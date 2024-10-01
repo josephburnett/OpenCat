@@ -294,7 +294,7 @@ float currentAdjust[DOF] = {};
 //control related variables
 #define IDLE_TIME 3000
 long idleTimer = 0;
-int randomInterval = 2000;
+int randomInterval = 10000;
 #define CHECK_BATTERY_PERIOD 10000  //every 10 seconds. 60 mins -> 3600 seconds
 int uptime = -1;
 int frame = 0;

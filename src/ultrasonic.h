@@ -21,7 +21,7 @@ void readRGBultrasonic() {
   if (millis() - ultraTimer > ultraInterval) {  //|| token == T_SKILL && millis() - ultraTimer > 3000) {
     ultraTimer = millis();
     ultraInterval = 0;
-    randomInterval = 1000;
+    /* randomInterval = 1000; */
     distance = ultrasonic.GetUltrasonicDistance();
     if (distance > 120) {
       return;
@@ -32,7 +32,7 @@ void readRGBultrasonic() {
         ultrasonic.SetRgbEffect(E_RGB_ALL, RGB_WHITE, E_EFFECT_BREATHING);
       ultraInterval = 1000;
       //      autoSwitch = true;
-      randomInterval = 1000;
+      /* randomInterval = 1000; */
     } else if (distance > 70) {
       if (!manualEyeColorQ)
         ultrasonic.SetRgbEffect(E_RGB_ALL, RGB_YELLOW, E_EFFECT_ROTATE);
@@ -41,7 +41,7 @@ void readRGBultrasonic() {
         ultrasonic.SetRgbEffect(E_RGB_ALL, RGB_BLUE, E_EFFECT_FLASH);
     } else if (distance < 3) {
       ultraInterval = 2000;
-      randomInterval = 5000;
+      /* randomInterval = 5000; */
       tQueue->addTask('k', "str", 1000);
       tQueue->addTask('k', "vtF", 1500);
       tQueue->addTask('k', "up");
@@ -115,7 +115,7 @@ void readRGBultrasonic() {
       for (byte i = 0; i < cmdLen; i++)
         newCmd[i] = (int8_t)min(max(allParameter[i], -128), 127);
       newCmd[cmdLen] = '~';
-      randomInterval = 5000;
+      /* randomInterval = 5000; */
       tQueue->addTask('L', newCmd);
     }
   }
