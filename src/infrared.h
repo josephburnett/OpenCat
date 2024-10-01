@@ -31,7 +31,8 @@ decode_results results;
 #define K42 "str"  //stretch
 
 #define K50 "hi"   //greeting
-#define K51 "pu"   //push up
+/* #define K51 "pu"   //push up */
+#define K51 "rc"   //flip over
 #define K52 "pee"  //standng with three legs
 
 #ifdef NYBBLE
