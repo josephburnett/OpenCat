@@ -1,7 +1,7 @@
 #define SOFTWARE_VERSION "N_240517"  //NyBoard + YYMMDD
 //board configuration
 // -- comment out these blocks to save program space for your own codes --
-#define BUZZER 5
+//#define BUZZER 5
 
 //#define SERVO_SLOW_BOOT
 
