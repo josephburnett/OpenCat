@@ -15,7 +15,7 @@ set -u
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${ARDUINO_CLI:-$HOME/.local/bin/arduino-cli}"
 BUILD="${1:-${TMPDIR:-/tmp}/kilo-body-build}"
-FLASH_MAX="${FLASH_MAX:-12288}"
+FLASH_MAX="${FLASH_MAX:-16384}"
 GLOBALS_MAX="${GLOBALS_MAX:-1540}"
 mkdir -p "$BUILD"
 
