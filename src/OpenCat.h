@@ -12,7 +12,6 @@
 
 #define DOF 16
 
-#ifdef NYBBLE
 int8_t middleShift[] = { 0, 15, 0, 0,
                          -45, -45, -45, -45,
                          10, 10, -10, -10,
@@ -35,57 +34,6 @@ int angleLimit[][2] = {
   { -120, 60 },
   { -120, 60 },
 };
-#elif defined BITTLE
-int8_t middleShift[] = { 0, -90, 0, 0,
-                         -45, -45, -45, -45,
-                         55, 55, -55, -55,
-                         -55, -55, -55, -55 };
-int angleLimit[][2] = {
-  { -120, 120 },
-#ifdef ROBOT_ARM
-  { -10, 180 },
-#else
-  { -85, 85 },
-#endif
-  { -120, 120 },
-  { -120, 120 },
-  { -90, 60 },
-  { -90, 60 },
-  { -90, 90 },
-  { -90, 90 },
-  { -200, 80 },
-  { -200, 80 },
-  { -80, 200 },
-  { -80, 200 },
-  { -80, 200 },
-  { -80, 200 },
-  { -80, 200 },
-  { -80, 200 },
-};
-#else
-int8_t middleShift[] = { 0, 15, 0, 0,
-                         -45, -45, -45, -45,
-                         55, 55, -55, -55,
-                         0, 0, 0, 0 };
-int angleLimit[][2] = {
-  { -90, 90 },
-  { -80, 65 },
-  { -90, 90 },
-  { -30, 30 },
-  { -90, 60 },
-  { -90, 60 },
-  { -90, 90 },
-  { -90, 90 },
-  { -200, 90 },
-  { -200, 90 },
-  { -90, 210 },
-  { -90, 210 },
-  { -65, 100 },
-  { -65, 100 },
-  { -70, 65 },
-  { -70, 65 },
-};
-#endif
 
 // #define INVERSE_SERVO_DIRECTION
 int8_t rotationDirection[] = { 1, -1, -1, 1,
@@ -94,50 +42,6 @@ int8_t rotationDirection[] = { 1, -1, -1, 1,
                                -1, 1, 1, -1 };
 
 
-#ifdef NyBoard_V0_1
-byte pwm_pin[] = { 7, 0, 15, 8,
-                   6, 1, 14, 9,
-                   5, 2, 13, 10,
-                   4, 3, 12, 11 };
-#define VOLTAGE_DETECTION_PIN A0  //voltage detector
-#define LOW_VOLTAGE 440
-#define DEVICE_ADDRESS 0x50  //I2C Address of eeprom chip
-#define BAUD_RATE 57600
-
-#elif defined NyBoard_V0_2
-byte pwm_pin[] = { 4, 3, 12, 11,
-                   5, 2, 13, 10,
-                   6, 1, 14, 9,
-                   7, 0, 15, 8 };
-#define VOLTAGE_DETECTION_PIN A0
-#define LOW_VOLTAGE 440
-#define DEVICE_ADDRESS 0x50
-#define BAUD_RATE 57600
-
-#elif defined NyBoard_V1_0
-byte pwm_pin[] = { 12, 11, 4, 3,
-                   13, 10, 5, 2,
-                   14, 9, 6, 1,
-                   15, 8, 7, 0 };
-#define VOLTAGE_DETECTION_PIN A7
-#define LOW_VOLTAGE 650
-#define DEVICE_ADDRESS 0x54
-#define BAUD_RATE 115200
-// #define NEOPIXEL_PIN 10  //the code for NeoPixels have to be shrinked to fit in the board
-// #define NUMPIXELS 7
-
-#elif defined NyBoard_V1_1
-byte pwm_pin[] = { 12, 11, 4, 3,
-                   13, 10, 5, 2,
-                   14, 9, 6, 1,
-                   15, 8, 7, 0 };
-#define VOLTAGE_DETECTION_PIN A7
-#define LOW_VOLTAGE 650
-#define DEVICE_ADDRESS 0x54
-#define BAUD_RATE 115200
-#define LED_PIN 10
-
-#elif defined NyBoard_V1_2
 byte pwm_pin[] = { 12, 11, 4, 3,
                    13, 10, 5, 2,
                    14, 9, 6, 1,
@@ -147,40 +51,13 @@ byte pwm_pin[] = { 12, 11, 4, 3,
 #define DEVICE_ADDRESS 0x54
 #define BAUD_RATE 115200
 #define LED_PIN 3
-// #define NEOPIXEL_PIN 10  //the code for NeoPixels have to be shrinked to fit in the board
-// #define NUMPIXELS 1
-#endif
 
-#ifdef NYBBLE
 #define MODEL "Nybble"
-#define HEAD
-#define TAIL
-#define X_LEG
 #define WALKING_DOF 8
 #define REGULAR G41
 #define KNEE G41
 #include "InstinctNybble.h"
 
-
-#elif defined BITTLE
-#ifdef ROBOT_ARM
-#define MODEL "Bittle RN"
-#else
-#define MODEL "Bittle"
-#endif
-#define HEAD
-#define TAIL  // the robot arm's clip is assigned to the tail joint
-#define LL_LEG
-#define WALKING_DOF 8
-#define REGULAR P1S
-#define KNEE P1S
-#ifdef ROBOT_ARM
-#include "InstinctBittle_arm.h"
-#else
-#include "InstinctBittle.h"
-#endif
-//#include "InstinctBittleShortExample.h"
-#endif
 
 //on-board EEPROM addresses
 #define MELODY_NORMAL 1023  //melody will be saved at the end of the 1KB EEPROM, and is read reversely. That allows some flexibility on the melody length.
@@ -240,12 +117,6 @@ byte pwm_pin[] = { 12, 11, 4, 3,
 #define T_RANDOM_MIND 'z'  //toggle random behaviors in the RANDOM_MIND mode
 #define T_QUERY '?'
 
-#ifdef GROVE_SERIAL_PASS_THROUGH
-#define T_READ 'R'        //read pin     R
-#define T_WRITE 'W'       //write pin                      W
-#define TYPE_ANALOG 'a'   //            Ra(analog read)   Wa(analog write)
-#define TYPE_DIGITAL 'd'  //            Rd(digital read)  Wd(digital write)
-#endif
 #define T_COLOR 'C'                     //change the eye colors of the RGB ultrasonic sensor
 #define T_INDEXED_SIMULTANEOUS_BIN 'I'  //I jointIndex1 jointAngle1 jointIndex2 jointAngle2 ... e.g. I0 70 8 -20 9 -20
 #define T_INDEXED_SEQUENTIAL_BIN 'M'    //M jointIndex1 jointAngle1 jointIndex2 jointAngle2 ... e.g. M0 70 0 -70 8 -20 9 -20
@@ -258,10 +129,6 @@ byte pwm_pin[] = { 12, 11, 4, 3,
 // #define T_SERVO_MICROSECOND 'w'  //PWM width modulation
 #define T_TEMP 'T'  //call the last 'K' skill data received from the serial port
 #endif
-
-#define EXTENSION 'X'
-#define EXTENSION_VOICE 'A'
-#define EXTENSION_ULTRASONIC 'U'
 
 
 float degPerRad = 180.0 / M_PI;
@@ -288,17 +155,10 @@ ServoModel_t servoModelList[] = {
 int zeroPosition[DOF] = {};
 int calibratedZeroPosition[DOF] = {};
 
-#ifdef X_LEG
 int currentAng[DOF] = { -30, -80, -45, 0,
                         0, 0, 0, 0,
                         75, 75, -75, -75,
                         -55, -55, 55, 55 };
-#else
-int currentAng[DOF] = { -30, -80, -45, 0,
-                        0, 0, 0, 0,
-                        75, 75, 75, 75,
-                        -55, -55, -55, -55 };
-#endif
 float currentAdjust[DOF] = {};
 
 //control related variables
@@ -371,22 +231,9 @@ float protectiveShift;  //reduce the wearing of the potentiometer
 #include "infrared.h"
 #endif
 
-#ifdef NEOPIXEL_PIN
-#include <Adafruit_NeoPixel.h>
-//Adafruit_NeoPixel pixel(NUMPIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
-#endif
-
 #ifdef RANDOM_MIND
-// #define ALL_RANDOM  // add random joint movements between the choice list of preset behaviors \
-                    // when it's activated, the gyro will be disabled
 #include "randomMind.h"
 #undef BINARY_COMMAND
-#endif
-
-#if defined NyBoard_V0_1 || defined NyBoard_V0_2
-#undef VOLTAGE_DETECTION_PIN
-#undef T_SERVO_MICROSECOND
-#undef T_SLOPE
 #endif
 
 #include "PCA9685servo.h"
@@ -404,28 +251,8 @@ float protectiveShift;  //reduce the wearing of the potentiometer
 #define T_TASK_QUEUE 'q'
 #endif
 
-#ifdef VOICE
-#include "voice.h"
-#elif defined VOICE_LD3320
-#include "voiceLD3320.h"
-#elif defined CAMERA
-#include "camera.h"
-#elif defined ULTRASONIC
+#ifdef ULTRASONIC
 #include "ultrasonic.h"
-#elif defined GESTURE
-#include "gesture.h"
-#elif defined PIR
-#include "pir.h"
-#elif defined DOUBLE_TOUCH
-#include "doubleTouch.h"
-#elif defined DOUBLE_LIGHT
-#include "doubleLight.h"
-#elif defined DOUBLE_INFRARED_DISTANCE
-#include "doubleInfraredDistance.h"
-#elif defined GROVE_SERIAL_PASS_THROUGH
-#include "ultrasonic.h"
-#elif defined OTHER_MODULES
-#elif defined ALL_RANDOM
 #else
 #define GYRO_PIN 0
 #endif
@@ -439,10 +266,6 @@ float protectiveShift;  //reduce the wearing of the potentiometer
 #ifdef IR_PIN
 #undef TASK_QUEUE
 #endif
-#endif
-
-#ifdef GROVE_SERIAL_PASS_THROUGH
-#undef IR_PIN
 #endif
 
 #include "skill.h"
@@ -478,39 +301,14 @@ void initRobot() {
 #ifdef LED_PIN
   pinMode(LED_PIN, OUTPUT);
 #endif
-#ifdef NEOPIXEL_PIN
-  //  pixel.begin();           // INITIALIZE NeoPixel pixel object (REQUIRED)
-  //  pixel.setBrightness(50); // Set BRIGHTNESS to about 1/5 (max = 255)
-#endif
 
 #ifdef TASK_QUEUE
   tQueue = new TaskQueue();
 #endif
 
-#ifdef VOICE
-  voiceSetup();
-#endif
-#ifdef VOICE_LD3320
-  voiceLD3320Setup();
-#endif
-#ifdef CAMERA
-  cameraSetup();
-#endif
-#ifdef GESTURE
-  gestureSetup();
-#endif
-
-#if defined DOUBLE_LIGHT || defined DOUBLE_TOUCH || defined DOUBLE_INFRARED_DISTANCE || defined ULTRASONIC
-#ifndef GROVE_SERIAL_PASS_THROUGH
-  skill.loadFrame("sit");  //required by double light
-  delay(500);              //use your palm to cover the two light sensors for calibration
-#endif
-#ifdef DOUBLE_INFRARED_DISTANCE
-  doubleInfraredDistanceSetup();
-#endif
-#ifdef DOUBLE_LIGHT
-  doubleLightSetup();
-#endif
+#ifdef ULTRASONIC
+  skill.loadFrame("sit");
+  delay(500);
 #endif
 
 #ifdef GYRO_PIN

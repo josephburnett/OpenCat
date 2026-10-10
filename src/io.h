@@ -65,43 +65,13 @@ void readSignal() {
   read_infrared();  //  newCmdIdx = 1
 #endif
   read_serial();  //  newCmdIdx = 2
-#ifdef VOICE
-  read_voice();
-#endif
-#ifdef VOICE_LD3320
-  read_voice_ld3320();
-#endif
   long current = millis();
   if (newCmdIdx && newCmdIdx <= 2) {
-    idleTimer = millis() +
-#ifdef DOUBLE_INFRARED_DISTANCE
-                0
-#else
-                IDLE_TIME
-#endif
-      ;
+    idleTimer = millis() + IDLE_TIME;
   } else if (token != T_CALIBRATE && current - idleTimer > 0) {
     // serialDominateQ = false;
-#ifdef CAMERA
-    read_camera();
-#endif
 #ifdef ULTRASONIC
     readRGBultrasonic();
-#endif
-#ifdef GESTURE
-    read_gesture();
-#endif
-#ifdef PIR
-    read_PIR();
-#endif
-#ifdef DOUBLE_TOUCH
-    read_doubleTouch();
-#endif
-#ifdef DOUBLE_LIGHT
-    read_doubleLight();
-#endif
-#ifdef DOUBLE_INFRARED_DISTANCE
-    read_doubleInfraredDistance();
 #endif
 #ifdef RANDOM_MIND
     if (autoSwitch && newCmdIdx == 0)

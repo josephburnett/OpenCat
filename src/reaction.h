@@ -68,9 +68,6 @@ void reaction() {
 #ifdef BINARY_COMMAND
         && token != T_LISTED_BIN && token != T_INDEXED_SIMULTANEOUS_BIN
 #endif
-#ifdef GROVE_SERIAL_PASS_THROUGH
-        && token != T_READ && token != T_WRITE
-#endif
     )
       beep(15 + newCmdIdx, 5);                    //ToDo: check the muted sound when newCmdIdx = -1
     if (hardServoQ && (lowerToken == T_SKILL)) {  //|| lowerToken == T_INDEXED_SEQUENTIAL_ASC || lowerToken == T_INDEXED_SIMULTANEOUS_ASC)) {
@@ -351,10 +348,6 @@ void reaction() {
       // this block handles array like arguments
       case T_INDEXED_SEQUENTIAL_BIN:
       case T_INDEXED_SIMULTANEOUS_BIN:
-#ifdef GROVE_SERIAL_PASS_THROUGH
-      case T_READ:
-      case T_WRITE:
-#endif
         {                  //indexed joint motions: joint0, angle0, joint1, angle1, ... (binary encoding)
           if (cmdLen < 2)  //the terminator of upper-case tokens is not '\n'. it may cause error when entered in the Arduino serial monitor
             manualHeadQ = false;
@@ -365,11 +358,7 @@ void reaction() {
               targetFrame[i] = currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0);
             }
             // arrayNCPY(targetFrame, currentAng, DOF);
-            byte group =
-#ifdef GROVE_SERIAL_PASS_THROUGH
-              token == T_WRITE ? 3 :
-#endif
-                               2;
+            byte group = 2;
             for (int i = 0; i < cmdLen; i += group) {
               if (newCmd[i] >= 0 && newCmd[i] < DOF) {
                 targetFrame[newCmd[i]] = (int8_t)newCmd[i + 1];
@@ -382,51 +371,12 @@ void reaction() {
               if (token == T_INDEXED_SEQUENTIAL_BIN) {
                 transform(targetFrame, 1, 2);
               }
-#ifdef GROVE_SERIAL_PASS_THROUGH
-              else if (token == T_WRITE) {
-                pinMode(newCmd[i + 1], OUTPUT);
-                if (newCmd[i] == TYPE_ANALOG) {
-                  analogWrite(newCmd[i + 1], uint8_t(newCmd[i + 2]));  //analog value can go up to 255.
-                                                                       //the value was packed as unsigned byte by ardSerial
-                                                                       //but casted by readSerial() as signed char and saved into newCmd.
-                } else if (newCmd[i] == TYPE_DIGITAL)
-                  digitalWrite(newCmd[i + 1], newCmd[i + 2]);
-              } else if (token == T_READ) {
-                PT('=');
-                pinMode(newCmd[i + 1], INPUT);
-                if (newCmd[i] == TYPE_ANALOG)  // Arduino Uno: A2->16, A3->17
-                  PTL(analogRead(newCmd[i + 1]));
-                else if (newCmd[i] == TYPE_DIGITAL)
-                  PTL(digitalRead(newCmd[i + 1]));
-              }
-#endif
             }
             if (nonHeadJointQ || lastToken != T_SKILL) {
               // PTL(token);
               transform(targetFrame, 1, 4);  // if (token == T_INDEXED_SEQUENTIAL_BIN) it will be useless
               skill.convertTargetToPosture(targetFrame);
             }
-          }
-          break;
-        }
-      case EXTENSION:
-        {
-          switch (newCmd[0]) {
-#ifdef VOICE
-            case EXTENSION_VOICE:
-              {
-                set_voice();
-                break;
-              }
-#endif
-#ifdef GROVE_SERIAL_PASS_THROUGH
-            case EXTENSION_ULTRASONIC:
-              {
-                PT('=');
-                PTL(readUltrasonic((int8_t)newCmd[1], (int8_t)newCmd[2]));
-                break;
-              }
-#endif
           }
           break;
         }
@@ -479,11 +429,6 @@ void reaction() {
             skill.loadFrame(newCmd);
             // skill.info();
             // PTH("mem",freeMemory());
-
-#ifdef DOUBLE_INFRARED_DISTANCE
-            if (skill.period == 1)
-              token = ' ';
-#endif
           }
           break;
         }
@@ -528,7 +473,7 @@ void reaction() {
   if (token == T_SKILL) {
     skill.perform();
 
-#if defined NyBoard_V0_1 || defined NyBoard_V0_2 || !defined GYRO_PIN
+#ifndef GYRO_PIN
     delayMicroseconds(850);  //Slow the robot down to smooth out motion; adjust delay PRN
 #endif
     if (skill.period < 0) {  //behaviors

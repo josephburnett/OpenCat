@@ -453,18 +453,8 @@ public:
           frame = 0;
         }
       }
-#ifndef HEAD
-      if (jointIndex == 0)
-        jointIndex = 2;
-#endif
-#ifndef TAIL
-      if (jointIndex == 2)
-        jointIndex = DOF - WALKING_DOF;
-#endif
-#if WALKING_DOF == 8
       if (jointIndex == 4)
         jointIndex = 8;
-#endif
       float duty;
       if (abs(period) > 1 && jointIndex < firstMotionJoint || abs(period) == 1 && jointIndex < 4 && manualHeadQ) {
         if (!manualHeadQ && jointIndex < 4) {
@@ -493,18 +483,6 @@ public:
 
 Skill skill;
 
-#ifdef BITTLE
-int8_t expect[] = {
-  57,
-  43,
-  60,
-  47,
-  -18,
-  7,
-  -17,
-  7,
-};
-#elif defined NYBBLE
 int8_t expect[] = {
   51,
   39,
@@ -515,7 +493,6 @@ int8_t expect[] = {
   19,
   -7,
 };
-#endif
 
 int testEEPROM(char* skillData) {
   skill.loadFrame(skillData);

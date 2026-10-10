@@ -23,7 +23,6 @@ int8_t levelTolerance[2] = { ROLL_LEVEL_TOLERANCE, PITCH_LEVEL_TOLERANCE };  //t
 float postureOrWalkingFactor;
 #endif
 
-#ifdef X_LEG                             // >< leg
 float adaptiveParameterArray[16][2] = {  // they will be saved as int8_t in EEPROM
   { -panF, 0 },
   { -panF, -tiltF },
@@ -42,26 +41,6 @@ float adaptiveParameterArray[16][2] = {  // they will be saved as int8_t in EEPR
   { -lRF, lPF },
   { -lRF, lPF }
 };
-#else  // >> leg
-float adaptiveParameterArray[16][2] = {  // they will be saved as int8_t in EEPROM
-  { -panF, 0 },
-  { -panF / 2, -tiltF },
-  { -2 * panF, 0 },
-  { 0, 0 },
-  { sRF, -sPF },
-  { -sRF, -sPF },
-  { -sRF, sPF },
-  { sRF, sPF },
-  { uRF, uPF },
-  { uRF, uPF },
-  { uRF, uPF },
-  { uRF, uPF },
-  { lRF, -0.5 * lPF },
-  { lRF, -0.5 * lPF },
-  { lRF, 0.5 * lPF },
-  { lRF, 0.5 * lPF }
-};
-#endif
 
 float RollPitchDeviation[2];
 int8_t slope = 1;

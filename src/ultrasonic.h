@@ -12,11 +12,7 @@ long colors[] = { RGB_RED, RGB_PURPLE, RGB_GREEN, RGB_BLUE, RGB_YELLOW, RGB_WHIT
 long ultraTimer;
 int ultraInterval = 1000;
 float distance;
-#ifdef BITTLE
-int feedbackDirection = -1;
-#elif defined NYBBLE
 int feedbackDirection = 1;
-#endif
 void readRGBultrasonic() {
   if (millis() - ultraTimer > ultraInterval) {  //|| token == T_SKILL && millis() - ultraTimer > 3000) {
     ultraTimer = millis();
@@ -67,26 +63,6 @@ void readRGBultrasonic() {
       distance -= 9;
       if (!manualEyeColorQ)
         ultrasonic.SetRgbColor(E_RGB_ALL, colors[int(max(min(distance / 10, 5), 0))]);
-#ifdef BITTLE
-      int mid[] = {
-        15,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        30,
-        30,
-        90,
-        90,
-        30,
-        30,
-        -30,
-        -30,
-      };
-#elif defined NYBBLE
       int mid[] = {
         15,
         0,
@@ -105,7 +81,6 @@ void readRGBultrasonic() {
         -30,
         -30,
       };
-#endif
       int allParameter[] = { mid[0] - distance / 2, -10 + distance / 2, distance * (random() % 50 < 1 ? int(random() % 2 - 1) : 1), 0,
                              0, 0, 0, 0,
                              mid[8] - 15 + distance / 2, mid[9] - 15 + distance / 2, mid[10] - 30 + distance * feedbackDirection, mid[11] - 30 + distance * feedbackDirection,

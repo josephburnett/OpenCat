@@ -34,16 +34,8 @@ decode_results results;
 #define K51 "pu"   //push up
 #define K52 "pee"  //standng with three legs
 
-#ifdef NYBBLE
 #define K60 "wsf"     //wash face
 #define K61 "buttUp"  //butt up
-#elif defined BITTLE
-#define K60 "ck"    //check around
-#define K61 "scrh"  //scratch
-#else
-#define K60 "fd"  //fold
-#define K61 "rt"  //
-#endif
 
 //#define K62 "z"  //turn on/off the random behaviors
 // #define K62 "zero"  //call your customized Newbility saved to PROGMEM

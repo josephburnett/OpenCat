@@ -13,10 +13,6 @@ const char mind11[] PROGMEM = "kcmh";
 const char mind12[] PROGMEM = "kvtF";
 
 const char *const mindList[] PROGMEM = {
-#ifdef ALL_RANDOM
-  mind0,
-  mind1,
-#endif
   mind2,
   mind3,
   mind4,
@@ -30,10 +26,6 @@ const char *const mindList[] PROGMEM = {
   mind12,
 };
 byte choiceWeight[] = {
-#ifdef ALL_RANDOM
-  30,
-  20,
-#endif
   10,
   5,
   3,
@@ -84,9 +76,6 @@ void randomMind() {
       randomNum -= choiceWeight[randomChoice];
     }
     if (randomChoice == 0) {
-#ifdef ALL_RANDOM
-      allRandom();
-#endif
     } else {
       strcpy_P((char *)newCmd, (char *)pgm_read_word(&mindList[randomChoice]));
       token = newCmd[0];
