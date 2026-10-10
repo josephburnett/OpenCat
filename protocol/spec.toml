@@ -1,0 +1,748 @@
+# Kilo body <-> mind protocol: the single source of truth.
+#
+# docs/architecture.md §4 and Appendix E describe this file in prose; where
+# they disagree with it, fix the document. After editing, run
+#     python3 protocol/gen.py
+# to regenerate protocol/gen/ and protocol/vectors/, then protocol/test.sh.
+#
+# Conventions
+#   * All multi-byte fields are little-endian. Payload structs are packed.
+#   * Field types: u8 i8 u16 i16 u32, or the name of a [structs.*] entry, or
+#     "bytes" (a raw tail whose length is implied by the payload length).
+#   * `count = N` makes a fixed array. `count_field = "x"` makes a variable
+#     array whose element count is stored in the earlier u8 field x;
+#     `min`/`max` bound the count (or, for "bytes", the tail length).
+#   * `unit` names the physical unit of the raw integer; `scale` converts raw
+#     to `unit` (physical = raw * scale). `range` is the accepted raw range;
+#     out-of-range values are BAD_ARG (they never change the frame length).
+#   * `enum` / `flags` name entries of [enums.*] / [flags.*].
+#   * kind: goal    = Pi->body, never acked, idempotent, refreshed at 5 Hz;
+#           command = Pi->body, always ACKed, retried, de-duplicated;
+#           stream  = body->Pi periodic, droppable (drop_order: lowest first);
+#           event   = body->Pi, never dropped, never acked by the Pi
+#                     (`reply_to` names the command it answers, if any).
+#   * epoch = true: the payload begins with the goal epoch byte.
+
+[meta]
+proto_major = 1
+proto_minor = 0
+
+# ---------------------------------------------------------------------------
+[link]
+baud = 250000                  # 8N1, no flow control; exact on 328P (U2X, UBRR=7) and PL011 (48 MHz / 12)
+max_payload = 60               # bytes
+header_bytes = 2               # type u8, seq u8
+crc_bytes = 2                  # CRC-16/CCITT-FALSE, LE, over type..payload (type, seq, payload)
+min_decoded = 4                # type + seq + crc
+max_decoded = 64               # 2 + 60 + 2
+max_wire = 66                  # COBS(max_decoded) = 65, plus the 0x00 delimiter
+frame_overhead = 6             # wire bytes = payload + 6 (type, seq, crc x2, COBS code, delimiter)
+delimiter = 0x00
+crc_init = 0xFFFF
+crc_poly = 0x1021
+crc_check = 0x29B1             # CRC of ASCII "123456789"
+tick_hz = 50
+tick_ms = 20
+telemetry_default_div = 2      # SET_STREAM telem_div default: 50 Hz / 2
+telemetry_default_hz = 25
+goal_refresh_hz = 5            # mind re-sends active goals at this rate (and on change)
+heartbeat_idle_ms = 100        # mind sends HEARTBEAT after this long with nothing sent
+mind_alive_ms = 1000           # ...but only while its asyncio loop proved alive within this
+cmd_retry_ms = 50              # command retry timeout
+cmd_max_retries = 3
+wd_stop_ms = 500               # body watchdog stage 1: stop motion, epoch bump, EVENT WATCHDOG
+wd_rest_ms = 1500              # body watchdog stage 2: REST
+wd_limp_s = 10                 # LIMP this long after watchdog REST
+body_lost_ms = 300             # mind treats the body as lost after this long without TELEMETRY
+hello_poll_hz = 2              # mind polls HELLO_REQ at this rate while the body is lost
+goal_refused_min_interval_ms = 1000   # EVENT GOAL_REFUSED rate limit, per message type
+head_hold_ms = 2000            # SET_HEAD hold released after this long without a refresh
+tx_ring_bytes = 96
+event_queue_depth = 8
+default_transition_ticks = 25  # SET_POSTURE transition_ticks = 0 means this
+eeprom_read_max = 56
+reboot_magic = 0x4B49          # "KI"
+trick_capacity = 32            # keyframes in the body's store
+trick_frames_per_msg = 4
+beep_max_notes = 8
+joint_count = 11               # driven joints, canonical order (JOINTS, keyframe ang[])
+channel_count = 16             # PCA9685 channels / calibration slots
+trick_speed_unity_q6 = 64      # TRICK_PLAY speed_q6 = 64 is 1x
+pca_full_off_bit = 0x1000      # PCA_COUNTS: bit 12 = channel full-off
+
+# ---------------------------------------------------------------------------
+[enums.ack_status]
+OK = 0
+BAD_LEN = 1
+BAD_ARG = 2
+BUSY = 3
+UNKNOWN_TYPE = 4
+CRC_MISMATCH = 5        # TRICK_COMMIT CRC does not match the uploaded frames
+NO_TRICK = 6
+REFUSED_LOW_BATT = 7
+REFUSED_FALLEN = 8
+EEPROM_BUSY = 9
+STALE = 10              # epoch mismatch
+
+# EVENT GOAL_REFUSED reason: a subset of ack_status values.
+[enums.goal_refused_reason]
+BAD_LEN = 1
+BAD_ARG = 2
+LOW_BATT = 7
+FALLEN = 8
+STALE = 10
+
+[enums.event]
+BOOT = 1                # arg = reset_cause
+FELL = 2                # arg = +-1 roll fall (sign = roll sign), +-2 pitch fall
+RECOVERED = 3
+RECOVERY_FAILED = 4
+LOW_BATTERY = 5         # arg = level: 1 WARN, 2 LOW, 3 CRITICAL
+BATTERY_OK = 6
+WATCHDOG = 7
+LINK_RESTORED = 8
+IMU_FAULT = 9
+IMU_OK = 10
+TRICK_DONE = 11         # arg = trick_id
+GAIT_STOPPED = 12
+GOAL_REFUSED = 13       # arg = (type << 8) | goal_refused_reason
+CONFIG_MIGRATED = 14
+CONFIG_DEFAULTED = 15   # arg = reason
+EEPROM_SAVED = 16
+TX_DROPPED = 17         # rate-limited
+
+[enums.mode]            # TELEMETRY.mode
+BOOT = 0
+LIMP = 1
+IDLE = 2
+GAIT = 3
+TRICK = 4
+FALLEN = 5
+RECOVERING = 6
+LOW_BATT = 7
+CALIB = 8
+LINK_LOST = 9
+
+[enums.owner]           # TELEMETRY.owners nibbles; priority order (higher wins)
+IDLE = 0
+GAIT = 1
+TRICK = 2
+REFLEX = 3
+PI_HOLD = 4             # head nibble only: the Pi holds the head (SET_HEAD mode=1)
+
+[enums.posture]
+LIMP = 0
+REST = 1
+SIT = 2
+STAND = 3
+STANCE = 4
+CALIB = 5
+ZERO = 6
+
+[enums.gait_pattern]
+WALK = 0
+TROT = 1
+CRAWL = 2
+
+[enums.head_mode]
+RELEASE = 0
+HOLD = 1
+
+[enums.reset_cause]
+COLD = 0
+FLASHED = 1
+REQUESTED = 2
+WARM_UNEXPECTED = 3
+
+[enums.config_state]
+OK = 0
+MIGRATED = 1
+DEFAULTED = 2
+
+[enums.battery_level]   # EVENT LOW_BATTERY arg
+WARN = 1
+LOW = 2
+CRITICAL = 3
+
+[enums.easing]          # keyframe flags bits 0-1
+LINEAR = 0
+COSINE = 1
+STEP = 2
+SPLINE_RESERVED = 3
+
+# ---------------------------------------------------------------------------
+# Bit flags: name = bit number.
+[flags.telemetry_flags]
+BALANCE_ACTIVE = 0
+IMU_FAULT = 1
+SERVOS_POWERED = 2
+GAIT = 3
+TRICK = 4
+HEAD_HELD = 5
+BATT_WARN = 6
+LINK_OK = 7
+OVERRUN = 8
+NO_BATTERY = 9
+EEPROM_PENDING = 10
+DIST_FRESH = 11
+
+[flags.hello_caps]
+BUZZER = 0
+DMP = 2
+ULTRASONIC = 3
+EYES = 4
+
+[flags.posture_flags]
+BALANCE = 0
+
+[flags.gait_flags]
+BOB = 0
+WAG = 1
+BALANCE = 2
+
+[flags.trick_flags]
+BALANCE = 0
+FALL_OK = 1
+
+[flags.trick_play_flags]
+MIRROR = 0
+
+[flags.keyframe_flags]  # bits 0-1 are the easing enum
+BALANCE = 2
+
+[flags.eyes_mask]       # SET_EYES led_mask: 0x07 right, 0x38 left, 0x3F all
+R0 = 0
+R1 = 1
+R2 = 2
+L0 = 3
+L1 = 4
+L2 = 5
+
+# ---------------------------------------------------------------------------
+[structs.keyframe]      # 14 B, §3e
+fields = [
+  { name = "dur", type = "u8", unit = "tick", range = [1, 255], note = "ticks from the previous frame" },
+  { name = "hold", type = "u8", unit = "tick", note = "ticks to hold after arriving" },
+  { name = "flags", type = "u8", flags = "keyframe_flags", note = "bits 0-1 easing (enum easing), bit 2 balance" },
+  { name = "ang", type = "i8", count = 11, unit = "deg", note = "canonical joint order; -128 = unchanged" },
+]
+
+[structs.note]          # 2 B
+fields = [
+  { name = "note", type = "i8", unit = "note", note = "pitch index; mapping fixed by the body buzzer (P1)" },
+  { name = "dur_10ms", type = "u8", unit = "ms", scale = 10 },
+]
+
+# ---------------------------------------------------------------------------
+# Pi -> body (0x01..0x7F)
+
+[[messages]]
+name = "HELLO_REQ"
+id = 0x01
+dir = "pi_to_body"
+kind = "command"
+doc = "Ask for HELLO."
+fields = []
+
+[[messages]]
+name = "HEARTBEAT"
+id = 0x02
+dir = "pi_to_body"
+kind = "goal"
+doc = "Keep the link alive."
+fields = []
+
+[[messages]]
+name = "PING"
+id = 0x03
+dir = "pi_to_body"
+kind = "command"
+doc = "Answered by PONG, for RTT."
+fields = [
+  { name = "token", type = "u16" },
+]
+
+[[messages]]
+name = "SET_STREAM"
+id = 0x04
+dir = "pi_to_body"
+kind = "command"
+doc = "Telemetry, JOINTS and IMU_RAW divisors of the 50 Hz tick (0 = off)."
+fields = [
+  { name = "telem_div", type = "u8", note = "0 off, default 2 -> 25 Hz" },
+  { name = "joints_div", type = "u8", note = "0 off" },
+  { name = "imu_raw_div", type = "u8", note = "0 off" },
+]
+
+[[messages]]
+name = "STATS_REQ"
+id = 0x05
+dir = "pi_to_body"
+kind = "command"
+doc = "Answered by STATS."
+fields = []
+
+[[messages]]
+name = "PCA_READ"
+id = 0x06
+dir = "pi_to_body"
+kind = "command"
+doc = "Answered by PCA_COUNTS (debug and calibration checks)."
+fields = []
+
+[[messages]]
+name = "SET_POSTURE"
+id = 0x10
+dir = "pi_to_body"
+kind = "goal"
+epoch = true
+doc = "Posture plus transition. LIMP and REST are never stale."
+fields = [
+  { name = "epoch", type = "u8" },
+  { name = "posture", type = "u8", enum = "posture" },
+  { name = "transition_ticks", type = "u8", unit = "tick", note = "0 = 25" },
+  { name = "flags", type = "u8", flags = "posture_flags" },
+]
+
+[[messages]]
+name = "SET_GAIT"
+id = 0x11
+dir = "pi_to_body"
+kind = "goal"
+epoch = true
+doc = "Run/stop plus gait parameters (§3d)."
+fields = [
+  { name = "epoch", type = "u8" },
+  { name = "run", type = "u8", range = [0, 1] },
+  { name = "pattern", type = "u8", enum = "gait_pattern" },
+  { name = "period_ms", type = "u16", unit = "ms", range = [300, 2000] },
+  { name = "duty", type = "u8", unit = "1/256", range = [128, 230] },
+  { name = "stride_mm", type = "i8", unit = "mm", range = [-60, 60] },
+  { name = "turn_mm", type = "i8", unit = "mm", range = [-40, 40], note = "+ = left" },
+  { name = "step_h_mm", type = "u8", unit = "mm", range = [0, 40] },
+  { name = "body_h_mm", type = "u8", unit = "mm", note = "IK workspace" },
+  { name = "flags", type = "u8", flags = "gait_flags" },
+]
+
+[[messages]]
+name = "SET_HEAD"
+id = 0x12
+dir = "pi_to_body"
+kind = "goal"
+epoch = true
+doc = "Hold/release pan, tilt, tail plus speed."
+fields = [
+  { name = "epoch", type = "u8" },
+  { name = "mode", type = "u8", enum = "head_mode" },
+  { name = "pan", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "tilt", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "tail", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "max_speed_dps", type = "u16", unit = "deg/s" },
+]
+
+[[messages]]
+name = "SET_BODY_POSE"
+id = 0x13
+dir = "pi_to_body"
+kind = "goal"
+epoch = true
+doc = "Body pitch, roll, height delta, x-shift (on top of gait / STANCE)."
+fields = [
+  { name = "epoch", type = "u8" },
+  { name = "pitch", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "roll", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "dheight_mm", type = "i8", unit = "mm" },
+  { name = "xshift_mm", type = "i8", unit = "mm" },
+]
+
+[[messages]]
+name = "SET_BALANCE"
+id = 0x14
+dir = "pi_to_body"
+kind = "goal"
+doc = "Enable, Kp, Kd, dead band, clamp."
+fields = [
+  { name = "enable", type = "u8", range = [0, 1] },
+  { name = "kp_q8", type = "u8", unit = "1", scale = 0.00390625 },
+  { name = "kd_ms", type = "u8", unit = "ms" },
+  { name = "deadband_deg", type = "u8", unit = "deg" },
+  { name = "max_corr_deg", type = "u8", unit = "deg" },
+]
+
+[[messages]]
+name = "TRICK_BEGIN"
+id = 0x20
+dir = "pi_to_body"
+kind = "command"
+doc = "Trick header; refused with BUSY while a trick plays."
+fields = [
+  { name = "trick_id", type = "u8" },
+  { name = "n_frames", type = "u8", range = [1, 32] },
+  { name = "loop_start", type = "u8" },
+  { name = "loop_end", type = "u8" },
+  { name = "repeats", type = "u8", note = "0 = once, 255 = until stopped" },
+  { name = "joint_mask", type = "u16" },
+  { name = "flags", type = "u8", flags = "trick_flags" },
+  { name = "end_posture", type = "u8", enum = "posture" },
+]
+
+[[messages]]
+name = "TRICK_FRAMES"
+id = 0x21
+dir = "pi_to_body"
+kind = "command"
+doc = "Up to 4 keyframes starting at index `first`."
+fields = [
+  { name = "first", type = "u8" },
+  { name = "count", type = "u8" },
+  { name = "frames", type = "keyframe", count_field = "count", min = 1, max = 4 },
+]
+
+[[messages]]
+name = "TRICK_COMMIT"
+id = 0x22
+dir = "pi_to_body"
+kind = "command"
+doc = "crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array; mismatch -> CRC_MISMATCH."
+fields = [
+  { name = "trick_id", type = "u8" },
+  { name = "crc16", type = "u16" },
+]
+
+[[messages]]
+name = "TRICK_PLAY"
+id = 0x23
+dir = "pi_to_body"
+kind = "command"
+epoch = true
+doc = "Play with speed and mirror; epoch mismatch -> ACK STALE."
+fields = [
+  { name = "epoch", type = "u8" },
+  { name = "trick_id", type = "u8" },
+  { name = "speed_q6", type = "u8", unit = "x", scale = 0.015625, range = [16, 255] },
+  { name = "flags", type = "u8", flags = "trick_play_flags" },
+]
+
+[[messages]]
+name = "TRICK_STOP"
+id = 0x24
+dir = "pi_to_body"
+kind = "command"
+doc = "Stop the playing trick."
+fields = [
+  { name = "transition_ticks", type = "u8", unit = "tick" },
+]
+
+[[messages]]
+name = "SET_EYES"
+id = 0x30
+dir = "pi_to_body"
+kind = "goal"
+doc = "LED mask plus RGB."
+fields = [
+  { name = "led_mask", type = "u8", flags = "eyes_mask", note = "0x07 right, 0x38 left, 0x3F all" },
+  { name = "r", type = "u8" },
+  { name = "g", type = "u8" },
+  { name = "b", type = "u8" },
+]
+
+[[messages]]
+name = "BEEP"
+id = 0x31
+dir = "pi_to_body"
+kind = "goal"
+doc = "Append 1..8 notes to the buzzer queue."
+fields = [
+  { name = "n", type = "u8" },
+  { name = "notes", type = "note", count_field = "n", min = 1, max = 8 },
+]
+
+[[messages]]
+name = "CAL_GET"
+id = 0x38
+dir = "pi_to_body"
+kind = "command"
+doc = "Answered by CAL_VALUES."
+fields = []
+
+[[messages]]
+name = "CAL_SET"
+id = 0x39
+dir = "pi_to_body"
+kind = "command"
+doc = "Absolute calibration offset for one joint."
+fields = [
+  { name = "joint", type = "u8", range = [0, 15] },
+  { name = "offset_a16", type = "i16", unit = "deg", scale = 0.0625, range = [-400, 400], note = "absolute, +-25 deg" },
+]
+
+[[messages]]
+name = "CAL_SAVE"
+id = 0x3A
+dir = "pi_to_body"
+kind = "command"
+doc = "Queue a config slot write; acked when queued, EVENT EEPROM_SAVED when written."
+fields = []
+
+[[messages]]
+name = "CAL_REVERT"
+id = 0x3B
+dir = "pi_to_body"
+kind = "command"
+doc = "Reload calibration from the slot."
+fields = []
+
+[[messages]]
+name = "IMU_OFFSETS_SET"
+id = 0x3C
+dir = "pi_to_body"
+kind = "command"
+doc = "Write MPU6050 offsets, optionally persist."
+fields = [
+  { name = "accel_x", type = "i16" },
+  { name = "accel_y", type = "i16" },
+  { name = "accel_z", type = "i16" },
+  { name = "gyro_x", type = "i16" },
+  { name = "gyro_y", type = "i16" },
+  { name = "gyro_z", type = "i16" },
+  { name = "save", type = "u8", range = [0, 1] },
+]
+
+[[messages]]
+name = "PARAM_GET"
+id = 0x3D
+dir = "pi_to_body"
+kind = "command"
+doc = "Answered by PARAM_VALUE."
+fields = [
+  { name = "id", type = "u8" },
+]
+
+[[messages]]
+name = "PARAM_SET"
+id = 0x3E
+dir = "pi_to_body"
+kind = "command"
+doc = "Set a param, optionally persist (acked when queued, EVENT EEPROM_SAVED later)."
+fields = [
+  { name = "id", type = "u8" },
+  { name = "value", type = "i16" },
+  { name = "persist", type = "u8", range = [0, 1] },
+]
+
+[[messages]]
+name = "EEPROM_READ"
+id = 0x3F
+dir = "pi_to_body"
+kind = "command"
+doc = "Answered by EEPROM_DATA."
+fields = [
+  { name = "addr", type = "u16" },
+  { name = "len", type = "u8", range = [1, 56] },
+]
+
+[[messages]]
+name = "REBOOT"
+id = 0x7E
+dir = "pi_to_body"
+kind = "command"
+doc = "Watchdog restart of the application (not the bootloader). magic must be 0x4B49."
+fields = [
+  { name = "magic", type = "u16", range = [0x4B49, 0x4B49] },
+]
+
+# ---------------------------------------------------------------------------
+# Body -> Pi (0x80..0xFF)
+
+[[messages]]
+name = "HELLO"
+id = 0x80
+dir = "body_to_pi"
+kind = "event"
+reply_to = "HELLO_REQ"
+doc = "Versions, build hash, reset cause, last alive tick, capabilities, epoch. Also sent unsolicited on boot."
+fields = [
+  { name = "proto_major", type = "u8" },
+  { name = "proto_minor", type = "u8" },
+  { name = "fw_build", type = "u32" },
+  { name = "reset_cause", type = "u8", enum = "reset_cause" },
+  { name = "last_alive_tick", type = "u16", unit = "tick" },
+  { name = "caps", type = "u16", flags = "hello_caps" },
+  { name = "max_payload", type = "u8" },
+  { name = "trick_capacity", type = "u8" },
+  { name = "joint_count", type = "u8" },
+  { name = "config_state", type = "u8", enum = "config_state" },
+  { name = "epoch", type = "u8" },
+]
+
+[[messages]]
+name = "TELEMETRY"
+id = 0x81
+dir = "body_to_pi"
+kind = "stream"
+drop_order = 3
+doc = "Body state, 25 Hz by default."
+fields = [
+  { name = "tick", type = "u16", unit = "tick", note = "wraps every 21.8 min" },
+  { name = "pitch", type = "i16", unit = "deg", scale = 0.0625, note = "nose up +, legacy reflection" },
+  { name = "roll", type = "i16", unit = "deg", scale = 0.0625, note = "left side up +" },
+  { name = "rate_pitch", type = "i16", unit = "deg/s", scale = 0.0625 },
+  { name = "rate_roll", type = "i16", unit = "deg/s", scale = 0.0625 },
+  { name = "rate_yaw", type = "i16", unit = "deg/s", scale = 0.0625 },
+  { name = "dist_mm", type = "u16", unit = "mm", note = "0 = no echo" },
+  { name = "batt_mv", type = "u16", unit = "mV", note = "filtered" },
+  { name = "mode", type = "u8", enum = "mode" },
+  { name = "owners", type = "u8", note = "low nibble leg owner, high nibble head owner (enum owner)" },
+  { name = "flags", type = "u16", flags = "telemetry_flags" },
+  { name = "last_rx_seq", type = "u8" },
+  { name = "trick_frame", type = "u8", note = "0xFF = none" },
+  { name = "gait_phase", type = "u8", note = "phi >> 8" },
+  { name = "tick_load", type = "u8", unit = "us", scale = 100, note = "max tick time since the last telemetry" },
+  { name = "rx_err", type = "u8", note = "cumulative, mod 256" },
+  { name = "epoch", type = "u8" },
+]
+
+[[messages]]
+name = "JOINTS"
+id = 0x82
+dir = "body_to_pi"
+kind = "stream"
+drop_order = 2
+doc = "11 output angles."
+fields = [
+  { name = "tick", type = "u16", unit = "tick" },
+  { name = "angle", type = "i16", count = 11, unit = "deg", scale = 0.0625 },
+]
+
+[[messages]]
+name = "IMU_RAW"
+id = 0x83
+dir = "body_to_pi"
+kind = "stream"
+drop_order = 1
+doc = "Raw accelerometer and gyro counts."
+fields = [
+  { name = "tick", type = "u16", unit = "tick" },
+  { name = "accel_x", type = "i16" },
+  { name = "accel_y", type = "i16" },
+  { name = "accel_z", type = "i16" },
+  { name = "gyro_x", type = "i16" },
+  { name = "gyro_y", type = "i16" },
+  { name = "gyro_z", type = "i16" },
+]
+
+[[messages]]
+name = "ACK"
+id = 0x84
+dir = "body_to_pi"
+kind = "event"
+doc = "Reply to every command: echoes its seq and type."
+fields = [
+  { name = "seq", type = "u8" },
+  { name = "type", type = "u8" },
+  { name = "status", type = "u8", enum = "ack_status" },
+]
+
+[[messages]]
+name = "EVENT"
+id = 0x85
+dir = "body_to_pi"
+kind = "event"
+doc = "Asynchronous event."
+fields = [
+  { name = "code", type = "u8", enum = "event" },
+  { name = "arg", type = "i16" },
+  { name = "tick", type = "u16", unit = "tick" },
+  { name = "epoch", type = "u8" },
+]
+
+[[messages]]
+name = "CAL_VALUES"
+id = 0x86
+dir = "body_to_pi"
+kind = "event"
+reply_to = "CAL_GET"
+doc = "16 calibration offsets."
+fields = [
+  { name = "offset", type = "i16", count = 16, unit = "deg", scale = 0.0625 },
+]
+
+[[messages]]
+name = "PARAM_VALUE"
+id = 0x87
+dir = "body_to_pi"
+kind = "event"
+reply_to = "PARAM_GET"
+doc = "A param's value and bounds."
+fields = [
+  { name = "id", type = "u8" },
+  { name = "value", type = "i16" },
+  { name = "min", type = "i16" },
+  { name = "max", type = "i16" },
+  { name = "default", type = "i16" },
+]
+
+[[messages]]
+name = "EEPROM_DATA"
+id = 0x88
+dir = "body_to_pi"
+kind = "event"
+reply_to = "EEPROM_READ"
+doc = "addr plus the bytes read (length implied by the payload length)."
+fields = [
+  { name = "addr", type = "u16" },
+  { name = "data", type = "bytes", min = 1, max = 56 },
+]
+
+[[messages]]
+name = "PONG"
+id = 0x89
+dir = "body_to_pi"
+kind = "event"
+reply_to = "PING"
+doc = "Echoed token plus the body tick."
+fields = [
+  { name = "token", type = "u16" },
+  { name = "tick", type = "u16", unit = "tick" },
+]
+
+[[messages]]
+name = "STATS"
+id = 0x8A
+dir = "body_to_pi"
+kind = "event"
+reply_to = "STATS_REQ"
+doc = "19 B of counters."
+fields = [
+  { name = "uptime_s", type = "u32", unit = "s" },
+  { name = "overruns", type = "u16" },
+  { name = "max_tick_us", type = "u16", unit = "us" },
+  { name = "stack_free_min", type = "u16", unit = "B" },
+  { name = "rx_crc_err", type = "u16" },
+  { name = "rx_overflow", type = "u16" },
+  { name = "i2c_err", type = "u16" },
+  { name = "imu_stale", type = "u16" },
+  { name = "dmp_rate_hz", type = "u8", unit = "Hz" },
+]
+
+[[messages]]
+name = "PCA_COUNTS"
+id = 0x8B
+dir = "body_to_pi"
+kind = "event"
+reply_to = "PCA_READ"
+doc = "16 PCA9685 OFF counts (bit 12 = full-off)."
+fields = [
+  { name = "counts", type = "u16", count = 16, unit = "count" },
+]
+
+[[messages]]
+name = "LOG"
+id = 0x8F
+dir = "body_to_pi"
+kind = "stream"
+drop_order = 0
+doc = "Debug builds only. ASCII text, 1..60 B, no terminator."
+fields = [
+  { name = "text", type = "bytes", min = 1, max = 60 },
+]
