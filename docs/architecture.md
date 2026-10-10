@@ -1,65 +1,86 @@
 # Kilo architecture: body firmware and mind software
 
-Design document for rebuilding the firmware and control software of Kilo, a
-Petoi Nybble on a NyBoard V1_2 with a Raspberry Pi 2 Model B on its back.
+This is the design for rebuilding the firmware and control software of Kilo,
+a Petoi Nybble on a NyBoard V1_2 with a Raspberry Pi 2 Model B on its back.
 
-Status: draft for implementation, 2026-10-10. Ground truth used: `OpenCat.ino`,
-`src/` on branch `mega` at 684d0eb, and `docs/raspberry-pi.md`. Numbers marked
-**(est.)** are estimates. Everything else was read from the code or measured on
-that commit (`arduino-cli compile -b arduino:avr:uno`: 32016 B flash, 1620 B of
-globals).
+**Status:** revised draft for implementation, 2026-10-10.
 
-Units used throughout:
+**Ground truth:** `OpenCat.ino` and `src/` on branch `mega` at 684d0eb, plus
+`docs/raspberry-pi.md`. Numbers marked **(est.)** are estimates. All other
+numbers were read from the code or measured on that commit. Compiling it with
+`arduino-cli -b arduino:avr:uno` gives 32016 B of flash and 1620 B of globals.
+
+**Units:**
 
 | Name | Meaning | Type |
 |---|---|---|
-| `a16` | angle in 1/16 degree (0.0625°) | `int16_t`, range ±2047.9° |
+| `a16` | angle in 1/16 degree | `int16_t`, ±2047.9° |
 | `q2` | length in 1/4 mm | `int16_t` |
-| `Q14` / `Q12` | fixed-point fraction with 14 / 12 fractional bits | `int16_t` / `int32_t` |
+| `Qn` | fixed point with n fractional bits | stated at each use |
 | tick | one 20 ms motor-loop period (50 Hz) | |
-| count | one PCA9685 step, 1/4096 of the PWM period (about 1 µs, see 3b) | |
+| count | one PCA9685 step, 1/4096 of the PWM period (≈1 µs) | |
 
-All multi-byte protocol fields are little-endian.
+All multi-byte protocol fields are little-endian. Appendices B to H hold the
+derivations, the archaeology of the legacy firmware, the full byte tables,
+operations notes and test tables. The main body links to them.
+
+---
+
+## Decisions at a glance
+
+| Topic | Decision | § |
+|---|---|---|
+| Split | BODY = new NyBoard firmware (real-time, reflexes); MIND = Python on the Pi (goals, personality). The Pi is always onboard. | 2 |
+| Tick | 50 Hz, polled against a fixed `micros()` deadline. Nothing blocks. | 3a |
+| Libraries | Custom UART, polled I2C, PCA9685 and DMP drivers. No HardwareSerial, Wire, I2Cdev, Print or `pulseIn`. Integer maths; float is a sanctioned fallback for IK only. | 3 |
+| Ultrasonic | Echo timed by a pin-change ISR on D6. 80 ms cadence, 25 ms cap. | 3a |
+| Reset cause | `.noinit` RAM magic plus a tick-alive canary, because optiboot clears `MCUSR`. | 3a |
+| Calibration | Imported from the legacy EEPROM's per-robot values. New A/B 128 B slots at 704..959. The legacy layout is never written. | 3b |
+| Arbitration | Owners REFLEX > TRICK > GAIT > IDLE per joint, a 200 ms crossfade, then head and balance layers, then limits and slew. | 3c |
+| Stale goals | A goal epoch byte. Reflex takeovers and watchdog trips bump it, and goals carrying an old epoch are refused. | 3c, 4 |
+| Gait | Parametric phase oscillator, per-leg planar 2-link IK, fixed point. | 3d |
+| Tricks | 32 × 14 B keyframes in RAM, int8 degrees, cosine or linear easing, uploaded by the Pi. | 3e |
+| Balance | `corr = −(Kp·e + Kd·rate)` at 50 Hz. Geometric (through IK) for gait and stance, legacy joint gains for joint-space owners. | 3f |
+| Attitude | Integer pitch/roll from the DMP quaternion, keeping the legacy pitch reflection. The DMP is dropped in P5. | 3f |
+| Watchdog | Two stages: stop motion at 0.5 s, REST at 1.5 s, LIMP 10 s later. | 3g |
+| Protocol | COBS + CRC-16/CCITT-FALSE at 250000 baud. Goals unacked and refreshed at 5 Hz; commands acked and de-duplicated. | 4 |
+| IR remote | **Dropped.** | |
+| Buzzer | **Kept, Pi-driven.** A `BEEP` note queue plus built-in reflex chirps. ISR-toggled on D5. | 3a, 4 |
+| First tricks | Basics: sit, rest, stand, stretch, balance. Social: hi, wash face, check around, sniff, scratch, pee, push-up, butt-up. Athletic tricks (backflip, roll, jump) are not ported. Fall recovery stays a body reflex. | 5 |
+| Behaviour | An in-house behaviour tree under a utility selector over drives, ticked at 10 Hz. | 5 |
+| Testing | Host g++ tests with sanitizers, the same tests under simavr, a virtual body on a pty, a size/symbol harness, and a HIL checklist. | 6 |
 
 ---
 
 ## 1. Goals and non-goals
 
-### Goals
+**Goals**
 
-1. **A companion with personality.** Kilo should explore, react to people and
-   obstacles, rest when tired or low on battery, and show mood with eyes, head,
-   tail and tricks. Personality lives on the Pi, where it can grow without
-   fighting a 32 KB flash limit.
-2. **A platform for learning control.** The firmware has a fixed-rate loop, an
-   explicit owner model, a parametric gait with real inverse kinematics, and a
-   tunable balance controller. Gains and parameters can be changed live over the
-   protocol, and every tick can be logged at 50 Hz on the Pi.
-3. **Capability over compatibility.** The Pi is always onboard. The firmware
-   uses the NyBoard for hard real-time work (servo timing, IMU, reflexes,
-   ultrasonic timing) and nothing else.
-4. **Safety stays on the body.** Falls, low battery, joint limits and a lost or
-   crashed Pi are handled by the firmware within one tick. They never depend on
-   the Pi.
-5. **Verifiable.** Firmware logic is plain C++ that builds and runs on a
-   desktop. The protocol has one specification with cross-language test vectors.
-   Flash and RAM are budgeted and checked on every build.
+1. A companion with personality. Kilo explores, reacts to people and
+   obstacles, rests when tired or low on battery, and expresses mood with eyes,
+   head, tail, tricks and sounds. The personality lives on the Pi.
+2. A platform for learning control. The body has a fixed-rate loop, an explicit
+   owner model, a parametric gait with real IK, and a tunable balance
+   controller. Every parameter can be changed live, and the state can be logged
+   at 50 Hz.
+3. Safety stays on the body. Falls, low battery, joint limits and a lost Pi are
+   handled within one tick, with no Pi involvement.
+4. Verifiable by construction. Firmware logic is plain C++ that runs on a
+   desktop. There is one protocol specification with cross-language test
+   vectors. Size and symbols are checked on every build.
 
-### Non-goals
+**Non-goals**
 
-- No compatibility with Petoi's token protocol (`k`, `m`, `i`, `K`...), the
-  Petoi mobile app, `serialMaster`, or the setup sketch (`MAIN_SKETCH` off).
-- No skill storage in EEPROM. The 64 KB I2C EEPROM is not used in v1 (see 8).
-  Tricks live on the Pi and are sent into RAM when needed.
-- No on-board behaviour: no random mind, no task queue, no ultrasonic reactions,
-  no eye effects engine. The body has reflexes, not opinions.
-- No legacy gait tables (`wkF`, `trF`, ...) on the body. The gait generator
-  replaces them. A subsampled legacy walk may be used once as a P1 baseline
-  (see 7).
-- No vision or other heavy compute on the NyBoard. No machine learning on the Pi
-  2 beyond classical computer vision.
-- No 12-DoF (Bittle-style shoulder roll) support. Joints 4 to 7 are kept as
-  indices so the joint table stays legacy-shaped, but they are never driven.
+- Compatibility with Petoi's token protocol, the mobile app, `serialMaster`, or
+  the setup sketch.
+- Skill storage in EEPROM. Tricks live on the Pi and are sent into RAM on
+  demand.
+- Behaviour on the body. No random mind, task queue, ultrasonic reactions or
+  eye effects.
+- Legacy gait tables on the body. The gait generator replaces them.
+- Vision on the NyBoard, or anything beyond classical computer vision on the
+  Pi 2.
+- 12-DoF support. Joints 3 to 7 keep their indices but are never driven.
 
 ---
 
@@ -71,8 +92,8 @@ All multi-byte protocol fields are little-endian.
              |  telemetry log      CLI / daemon socket      flash tool (arduino-cli + avrdude)         |
              |                         kilo.link.SerialLink  (/dev/ttyAMA0, 250000 8N1)              |
              +---------------------------------------|---------------------------------------------+
-                         goals: posture, gait params,| head target, body pose, eyes, tricks, params
-                         telemetry 25-50 Hz, events,  | acks                           GPIO4 -> RESET (flashing only)
+                  goals (+epoch): posture, gait, head, | body pose, eyes, beeps; trick upload/play; params
+                  telemetry 25-50 Hz, events, acks     |                           GPIO4 -> RESET (flashing only)
              +---------------------------------------|---------------------------------------------+
              |                        NyBoard V1_2, ATmega328P @ 16 MHz ("BODY", C++)                 |
              |  UART/COBS/CRC  ->  goal registers  ->  50 Hz tick:                                   |
@@ -80,102 +101,71 @@ All multi-byte protocol fields are little-endian.
              |   -> head layer -> balance layer -> limits + slew -> angle->counts -> PCA9685 (I2C)    |
              |  side work: ultrasonic (pin-change ISR), battery ADC, eyes (WS2812), buzzer, EEPROM     |
              +-----------------------------------------------------------------------------------------+
-                 I2C 400 kHz: PCA9685 (0x40), MPU6050 (0x68), [AT24C512 0x54 unused]
+                 I2C 400 kHz: PCA9685 (0x40), MPU6050 (0x68), [I2C EEPROM 0x54, unused]
 ```
 
-### What runs where
+**What runs where**
 
 | Function | Where | Why |
 |---|---|---|
-| Servo PWM generation | PCA9685 hardware | Autonomous. It holds the last pose even while the AVR resets. |
-| 50 Hz motor loop, interpolation, arbitration | Body | Needs deterministic timing. Linux on a Pi 2 gives no hard deadline. |
-| Gait generator + IK | Body | Generates angles at 50 Hz. Streaming them from the Pi would use bandwidth and miss deadlines. |
-| Balance (pitch/roll) | Body | Needs IMU-to-servo latency of a few ms. |
-| Reflexes (fall, battery, limits, link watchdog) | Body | Must keep working when the Pi hangs, reboots or is absent. |
-| Ultrasonic ranging | Body | Echo timing needs µs resolution. Results go to the Pi as telemetry. |
-| Eye colours, buzzer notes | Body executes, Pi decides | Simple actuators. |
-| Trick storage, authoring, mirroring, legacy import | Mind | Plenty of storage, easy to edit. |
-| Perception, personality, behaviour selection | Mind | Python, camera, more CPU. |
-| Logging, flashing, calibration UI | Mind | Filesystem, network, tools. |
+| Servo PWM | PCA9685 | Autonomous. It holds the last pose while the AVR resets. |
+| 50 Hz loop, interpolation, arbitration, gait + IK, balance | Body | Needs deterministic timing and a few ms from IMU to servo. Linux on a Pi 2 gives neither. |
+| Reflexes (fall, battery, limits, link watchdog) | Body | Must work while the Pi hangs, reboots or is absent. |
+| Ultrasonic ranging | Body | Needs µs echo timing. Only the range goes to the Pi. |
+| Eyes, buzzer | Body executes, Pi decides | Simple actuators. The body adds its own reflex chirps. |
+| Tricks, perception, personality, logging, flashing, calibration UI | Mind | Needs storage, Python and CPU. |
 
-### Latency expectations
+**Latency**
 
-| Path | Latency | Notes |
-|---|---|---|
-| IMU sample -> servo command | 3-5 ms after the tick starts, plus up to 10 ms DMP sample age **(est.)** | IMU is read at the start of the tick and the PCA9685 is written about 4 ms later. |
-| PCA9685 register write -> new pulse on the wire | ≤ 4.1 ms | One PWM period at about 244 Hz. |
-| Pi goal frame -> applied to the next tick | 1-3 ms on the wire + ≤ 20 ms tick phase | Worst case is about 23 ms. |
-| Body state -> Pi Python callback | ≤ 20 ms tick phase + 1.2 ms wire + 1-10 ms Linux tty **(est.)** | Set `ASYNC_LOW_LATENCY` on the tty. |
-| Behaviour tree reaction to telemetry | 100 ms tick of the tree | The tree runs at 10 Hz. |
-| Camera perception -> head motion | 150-350 ms **(est.)** | Pi 2 at 3-10 fps, see 5. |
-| Servo mechanical response (G41) | about 100-150 ms per 60° **(est.)** | Usually dominates everything above. |
+| Path | Latency |
+|---|---|
+| IMU sample → PCA9685 write | ≈4 ms within the tick, plus ≤10 ms DMP sample age **(est.)** |
+| Pi goal → applied | ≤2.6 ms on the wire + ≤20 ms tick phase |
+| Body state → Python callback | ≤20 ms + 1.3 ms wire + 1-10 ms Linux tty **(est.)** |
+| Camera percept → head motion | 150-350 ms **(est.)**. Servo mechanics (≈100-150 ms per 60°) usually dominate. |
 
-Design rule that follows: **anything that must react within about 100 ms runs on
-the body.** That covers balance, falls and the link watchdog. Everything slower
-belongs to the mind.
+Rule: anything that must react within about 100 ms runs on the body.
 
 ---
 
 ## 3. Body firmware design
 
-### Repository layout
+The sketch is `body/body.ino`. Logic lives in `body/src/core/` (plain C++) and
+hardware access in `body/src/hal/`. The full tree is in Appendix G. Four rules
+apply to `core/`:
 
-```
-body/
-  body.ino                 # setup(), loop(): glue only, no logic
-  src/                     # arduino-cli compiles src/ recursively
-    core/                  # plain C++11, no Arduino headers, built on host too
-      fx.h fx.cpp          # fixed point: sin, atan2, isqrt, tables
-      joints.h joints.cpp  # joint table, angle->counts, limits, slew
-      ik.h ik.cpp          # planar 2-link IK/FK
-      gait.h gait.cpp      # phase oscillator + foot trajectories
-      keyframe.h .cpp      # trick store + interpolator
-      arbiter.h .cpp       # owners, crossfade, head + balance layers
-      balance.h .cpp       # attitude controller
-      reflex.h .cpp        # fall, battery, watchdog state machines
-      attitude.h .cpp      # quaternion -> pitch/roll (integer)
-      cobs.h crc16.h codec.h codec.cpp   # protocol
-      protocol_gen.h       # GENERATED from protocol/spec.toml
-      params.h params.cpp  # tunable parameter table
-      config_block.h .cpp  # EEPROM block layout, CRC, legacy migration
-    hal/                   # Arduino/AVR-specific, thin
-      uart.* i2c.* pca9685.* mpu6050_dmp.* ultrasonic.* ws2812.* adc.* eeprom_writer.* buzzer.* clock.*
-  test/                    # host tests (g++), Makefile, golden vectors
-  budget.json              # per-phase flash/RAM ceilings for the size harness
-protocol/
-  spec.toml                # single source of truth for message layouts
-  gen.py                   # emits body/src/core/protocol_gen.h and mind/kilo/protocol_gen.py
-  vectors.json             # cross-language codec test vectors (generated + hand-written)
-mind/
-  kilo/ ...                # Python package (section 5)
-```
+1. **Fixed-width types only.** On AVR `int` is 16 bits; on the host it is 32.
+   A grep-lint rejects `int`, `unsigned` and `long`, and products are widened
+   explicitly with `(int32_t)a * b`.
+2. **No Arduino headers, floats, heap or virtual functions.** Time and sensor
+   values come in as arguments.
+3. **C++11** (`gnu++11` under avr-gcc 7.3).
+4. **Every core module has host tests** (§6).
 
-Rules for `core/`:
+**Why no standard libraries.** Flash is not the constraint: the whole design is
+≈15 KB of 32 KB. The reasons are these:
 
-- Use fixed-width types only (`int16_t`, `int32_t`, `uint8_t`). On AVR `int` is
-  16 bits, on the host it is 32 bits. A bare `int` product that overflows on the
-  328P passes silently on the host. A grep-lint in the test Makefile rejects
-  `\bint\b|\bunsigned\b|\blong\b` in `core/`.
-- Widen products explicitly: `(int32_t)a * b`.
-- No floats, no heap, no virtual functions, no `Arduino.h`. Time is passed in as
-  an argument (tick number). Sensors and outputs pass through plain structs.
-- Use C++11 (`-std=gnu++11` is what avr-gcc 7.3 runs under arduino-cli).
+- HardwareSerial's 64 B RX buffer is smaller than one maximum 66 B frame.
+- Wire's 32 B transaction limit blocks the single 66 B PCA9685 burst.
+- Together they cost ≈330 B of RAM (Serial 157 B, Wire buffers ≈165 B), which
+  is 16% of the 2 KB.
+- Wire's `endTransmission` and `pulseIn` block with no bound we control.
 
-The firmware does **not** use `HardwareSerial`, `Wire`, `I2Cdev`/`MPU6050`
-classes, `Print`, `tone()` or `EEPROM.h`. Each is replaced by a small HAL module.
-Together these libraries cost about 6 KB of flash and about 330 B of RAM today
-(Serial object 157 B, Wire buffers about 165 B). The Arduino core stays for
-`init()`, Timer0 `millis()`/`micros()`, `analogRead` and the build system.
-**Implementation check:** confirm with `avr-nm` that `HardwareSerial0.o` is not
-linked. Our `USART_RX_vect` would collide with it.
+The replacements are small and bounded: a UART driver with ISR rings, a polled
+TWI master (2 ms timeout, bus recovery), a PCA9685 burst writer, and a DMP
+driver. The DMP upload needs only single-register writes, 16 B block writes and
+16 B read-backs; uploading the 3062 B image with verification is the I2C
+driver's acceptance test.
+
+Integer maths is the default. Float is a sanctioned fallback for IK only: about
+1.6 KB of flash and 2-3 ms per tick **(est.)**, if the fixed-point IK proves
+too costly to get right.
 
 ### 3a. Timing: the 50 Hz tick
 
-**Recommendation: deadline polling on `micros()` in `loop()`, not a timer
-interrupt.** Nearly all tick work is I2C (IMU read, PCA9685 write), which cannot
-run inside an ISR. A timer ISR would only set a flag, which is the same as
-polling a deadline. Polling also leaves Timer1 free (the IR library needs it if
-the IR remote is kept) and Timer2 free for the buzzer.
+The loop polls a fixed deadline instead of using a timer interrupt. Almost all
+tick work is I2C, which cannot run in an ISR, so a timer ISR would only set a
+flag.
 
 ```
 loop():
@@ -186,1436 +176,1469 @@ loop():
       if lag > 40000: next_tick = micros() + 20000; stats.overruns++   // resync, never "catch up"
       run_tick()
   else:
-      background()                  // EEPROM writer, LED show, eye/buzzer queues, TX, ultrasonic bookkeeping
+      background()                  // EEPROM writer, eye update, event/TX queues, IMU re-init chunk (LIMP only)
 ```
 
-Order of work inside `run_tick()`:
-
-| # | Step | Time **(est.)** |
+| # | Tick step | Time **(est.)** |
 |---|---|---|
-| 1 | Read IMU: FIFO count (2 B) + newest 28 B DMP packet | 1.0-1.5 ms |
-| 2 | Quaternion -> pitch/roll/gyro rates (integer) | 0.15 ms |
-| 3 | `uart_poll()` (yield point) | <0.1 ms |
-| 4 | Reflex state machines, owner selection | 0.05 ms |
-| 5 | Owner outputs: gait + IK for 4 legs, or trick interpolation, or posture | 0.8 ms (gait), 0.1 ms (others) |
-| 6 | Crossfade, head layer, balance layer, limits, slew, angle->counts | 0.3 ms |
-| 7 | `uart_poll()` (yield point) | <0.1 ms |
-| 8 | PCA9685 burst write, all 16 channels in one transaction | 1.6 ms |
-| 9 | Ultrasonic trigger if due (20 µs pulse); battery ADC if due (104 µs) | 0.13 ms |
-| 10 | Telemetry encode into TX ring if due; `wdt_reset()`; record tick duration | 0.15 ms |
-| | **Total** | **about 4-5 ms of 20 ms (20-25%)** |
+| 1 | IMU: read FIFO count, read `floor(count/28)·28` bytes, keep the last packet | ≈1.5 ms at 100 Hz DMP rate (Appendix B) |
+| 2 | Quaternion → pitch/roll/rates (integer) | 0.15 ms |
+| 3 | `uart_poll()` | <0.1 ms |
+| 4 | Reflexes, owner selection, epoch bookkeeping | 0.05 ms |
+| 5 | Owner outputs (gait + IK for 4 legs / trick / posture) | 0.8 ms gait, 0.1 ms otherwise |
+| 6 | Crossfade, head and balance layers, limits, slew, angle → counts | 0.3 ms |
+| 7 | `uart_poll()` | <0.1 ms |
+| 8 | PCA9685 burst write of all 16 channels | 1.6 ms |
+| 9 | Ultrasonic trigger if due (20 µs), battery ADC if due (104 µs) | 0.13 ms |
+| 10 | Telemetry into the TX ring, `wdt_reset()`, tick-alive canary, timing stats | 0.15 ms |
+| | **Total** | **≈4.5-5 ms of 20 ms** |
 
-The real figure is reported live as `tick_load` in telemetry and as a max in
-`STATS`. Acceptance threshold: max tick time < 12 ms over a 10-minute walk.
+The measured value is reported as `tick_load` in TELEMETRY and `max_tick_us`
+in STATS. Acceptance: under 12 ms over a 10-minute trot.
 
-**I2C cost.** The PCA9685 auto-increments, so channels 0-15 (`LED0_ON_L` =
-0x06 through 0x45) can be written in one transaction: address + register + 64
-data bytes = 66 bytes × 9 bit-times = 594 bits, which is 1.49 ms at 400 kHz plus
-about 0.1 ms overhead. Today's firmware does one `setPWM` transaction per servo
-(6 bytes plus the Wire library overhead, about 0.2 ms each), so 11-16 servos take
-2-3 ms. Today's sketch runs the bus at 500 kHz (`Wire.setClock(500000L)`), but
-the MPU6050 is specified to 400 kHz, so the new firmware uses 400 kHz.
+**Non-blocking rules**
 
-The custom I2C driver is polled (busy-waits on `TWINT`) and has a 2 ms timeout
-per transaction. On timeout it does a bus recovery (9 SCL clocks + STOP),
-increments `stats.i2c_errors`, and skips the step. Three consecutive IMU
-failures set the `IMU_FAULT` flag (see 3g). The driver has no 32-byte buffer
-limit, unlike `Wire`.
+- No `delay()` and no `pulseIn()`. Busy-waits are limited to 50 µs, except
+  inside I2C transactions, which are bounded at 2 ms.
+- No section runs longer than ≈2 ms without calling `uart_poll()`. At 250000
+  baud a byte arrives every 40 µs, and the 192 B RX ring gives 7.7 ms of slack.
+- EEPROM writes go through a background writer: one byte when `EEPE` is clear,
+  ≈3.4 ms per byte.
+- Eye updates disable interrupts for 180 µs, which can drop 2-3 UART bytes.
+  They happen only on change, only in `background()`, and never while an
+  ultrasonic echo is in flight. A damaged frame fails its CRC and is recovered
+  by goal refresh or command retry (§4).
+- The buzzer is a Timer2 compare ISR toggling D5 in software at 2× the note
+  frequency: ≈1% CPU at 2 kHz and ≈2-3 µs of jitter on ultrasonic timestamps
+  and UART RX. D5, D6 (ultrasonic) and D7 (WS2812) share PORTD, so PORTD access
+  must be atomic: the ISR toggles with `PIND = _BV(5)`, D6/D7 change only via
+  single-instruction `sbi`/`cbi` or inside the interrupts-off WS2812 routine,
+  and read-modify-write of PORTD with interrupts enabled is forbidden.
+- The IMU is never re-initialised inside a tick (see the boot sequence below).
 
-**Rules for what must never block:**
+**Ultrasonic.** Every 4th tick the body pulses D6 high for 20 µs and switches it
+to input with `PCINT22` enabled. The ISR timestamps both echo edges with
+`micros()`. No falling edge within 25 ms means "no echo" (`dist_mm = 0`).
+Appendix B has the step list and the error budget.
 
-- No `delay()`, no `pulseIn()`, no busy-wait longer than 50 µs, except inside an
-  I2C transaction (bounded at 2 ms).
-- No single non-yielding section longer than about 2 ms. `uart_poll()` is called
-  between the large steps. At 250000 baud a byte arrives every 40 µs, so a
-  192-byte RX ring gives 7.7 ms of slack.
-- EEPROM writes go through a background writer. It writes one byte when `EEPE`
-  is clear, about 3.4 ms per byte, so a 64-byte block takes about 220 ms in the
-  background. It never calls the blocking `eeprom_write_byte` in a loop.
-- WS2812 eye updates disable interrupts for 6 LEDs × 24 bits × 1.25 µs = 180 µs.
-  That can drop UART bytes (the USART buffers only about 2 bytes) and can skew an
-  ultrasonic echo edge. Mitigation: eye updates happen only on change (rare),
-  only from `background()`, and never while an ultrasonic echo is in flight. Any
-  frame that loses bytes fails its CRC. Goals are re-sent idempotently and
-  commands are acked and retried (section 4), so a lost frame costs nothing.
+**Boot sequence**
 
-**Ultrasonic.** Today `RgbUltrasonic::GetUltrasonicDistance()` calls
-`pulseIn()`. It blocks for up to the echo length (about 38 ms with no obstacle)
-or for `pulseIn`'s default 1 s timeout if the echo never starts. The module uses
-one signal pin (D6) for both trigger and echo. New design:
+1. Read the `.noinit` reset record (below) and initialise the UART.
+2. Initialise I2C and probe the PCA9685. Already configured (awake, expected
+   prescaler) = warm start: read back the 16 `LEDn_OFF` registers to seed the
+   pose and keep outputting it. Otherwise = cold start: configure it all
+   full-off (LIMP), because the servo pose is unknown.
+3. Run `dmpInitialize` **before the hardware watchdog is enabled**. It takes
+   ≈300 ms (192 chunks of 16 B, each with read-back verify), with up to 3
+   attempts. If all fail, set `IMU_FAULT` and continue without balance or fall
+   detection.
+4. Load the config slot (3b), send `HELLO` and `EVENT BOOT`, then
+   `wdt_enable(WDTO_250MS)`.
+5. Enter the loop. A warm start holds the read-back pose until the IMU is ready
+   or 1 s has passed, then moves to REST under the watchdog policy (3g). A cold
+   start stays LIMP until the Pi sends a goal.
 
-1. Every 4th tick (80 ms, 12.5 Hz), drive D6 high for 20 µs (busy-wait is fine),
-   then set it to input. Enable pin-change interrupt `PCINT22` (PCMSK2 bit 6).
-2. The ISR timestamps the rising edge and the falling edge with `micros()`
-   (4 µs resolution, which is 0.7 mm) and disables itself after the falling
-   edge.
-3. At the next trigger time, if no falling edge was seen within 25 ms of the
-   trigger (about 4.3 m), report `distance_mm = 0` ("no echo") and re-arm.
-   Distance = echo_us × 343 / 2000 mm, computed as `echo_us * 1715 / 10000` in
-   int32.
-4. The 80 ms cadence is above the 60 ms ring-down that HC-SR04-style modules
-   need.
+At runtime the IMU is re-initialised only while LIMP. It runs as a state
+machine in `background()` that uploads one 16 B chunk per pass (≈192 passes,
+about 4 s) and kicks the watchdog in between.
 
-ISR latency jitter from the UART, TWI and Timer0 ISRs is about 10-20 µs, which
-is 2-3 mm. That is acceptable. Cost: about 0.25 KB flash, 10 B RAM, zero
-blocking.
+**Reset cause.** The stock Uno optiboot clears `MCUSR` before the application
+runs, so hardware reset flags cannot be read.¹ Instead, a `.noinit` record (not
+zeroed by the C runtime) holds `magic` u16, `build` u32 (hash of the running
+firmware), `reason` u8 (set to `REQUESTED` just before a `REBOOT`) and
+`alive_tick` u16 (the tick-alive canary, written every tick). At boot:
 
-**Hardware watchdog.** `wdt_enable(WDTO_250MS)` after boot, reset once per
-completed tick. A hung I2C bus or a firmware bug reboots the AVR within 250 ms.
-The PCA9685 keeps outputting the last pulses, so the robot freezes rather than
-going limp. On boot the firmware **does not reset the PCA9685** if it is already
-configured (MODE1 shows it awake and the prescaler is the expected value).
-Instead it reads back the 16 `LEDn_OFF` registers to initialise the current
-joint angles, so a watchdog reboot causes no jump. Today's `servoSetup()` always
-calls `pwm.begin()`, which resets the chip, and then `shutServos()`.
+| Condition | Reported `reset_cause` |
+|---|---|
+| `magic` invalid | `COLD`: power-on, or a brown-out that lost RAM |
+| `magic` ok, `build` ≠ this build | `FLASHED` |
+| `reason == REQUESTED` | `REQUESTED` (a `REBOOT` message) |
+| otherwise | `WARM_UNEXPECTED`: watchdog hang, reset button, a GPIO4 pulse not used for flashing, or a RAM-preserving brown-out. `HELLO` carries `last_alive_tick`, and the Pi knows whether it pulsed GPIO4. |
+
+The record is then rewritten for the current boot.
+
+¹ Optiboot v8 passes `MCUSR` to the application in `r2`, but installing it
+needs an ISP programmer. That is not planned.
 
 ### 3b. Joint model
 
-**Joint table** (verified against `src/OpenCat.h` arrays `pwm_pin`,
-`rotationDirection`, `middleShift`, `angleLimit`):
+| Idx | Joint | PCA ch | dir | midShift ° | limits ° |
+|---|---|---|---|---|---|
+| 0 | head pan | 12 | +1 | 0 | -120..120 |
+| 1 | head tilt | 11 | −1 | 15 | -80..45 |
+| 2 | tail | 4 | −1 | 0 | -120..120 |
+| 3-7 | unused (12-DoF slots) | 3,13,10,5,2 | | | never driven |
+| 8 | LF shoulder | 14 | +1 | 10 | -100..80 |
+| 9 | RF shoulder | 9 | −1 | 10 | -100..80 |
+| 10 | RB shoulder | 6 | −1 | −10 | -80..100 |
+| 11 | LB shoulder | 1 | +1 | −10 | -80..100 |
+| 12 | LF knee | 15 | −1 | −30 | -60..120 |
+| 13 | RF knee | 8 | +1 | −30 | -60..120 |
+| 14 | RB knee | 7 | +1 | 30 | -120..60 |
+| 15 | LB knee | 0 | −1 | 30 | -120..60 |
 
-| Idx | Joint | PCA ch | dir | midShift (°) | limits (°) | Nybble |
-|---|---|---|---|---|---|---|
-| 0 | head pan | 12 | +1 | 0 | -120..120 | yes |
-| 1 | head tilt | 11 | -1 | 15 | -80..45 | yes |
-| 2 | tail | 4 | -1 | 0 | -120..120 | yes |
-| 3 | (unused) | 3 | +1 | 0 | -120..120 | no |
-| 4-7 | (shoulder roll on 12-DoF) | 13,10,5,2 | +1,-1,+1,-1 | -45 | -90..60 / -90..90 | no |
-| 8 | LF shoulder | 14 | +1 | 10 | -100..80 | yes |
-| 9 | RF shoulder | 9 | -1 | 10 | -100..80 | yes |
-| 10 | RB shoulder | 6 | -1 | -10 | -80..100 | yes |
-| 11 | LB shoulder | 1 | +1 | -10 | -80..100 | yes |
-| 12 | LF knee | 15 | -1 | -30 | -60..120 | yes |
-| 13 | RF knee | 8 | +1 | -30 | -60..120 | yes |
-| 14 | RB knee | 7 | +1 | 30 | -120..60 | yes |
-| 15 | LB knee | 0 | -1 | 30 | -120..60 | yes |
+The values come from `src/OpenCat.h`. The leg order LF, RF, RB, LB is not
+written down in the code; it is inferred from it (Appendix C).
 
-**Leg order verified as LF, RF, RB, LB** for both 8-11 and 12-15, from three
-independent clues in the code (OpenCat.h has no comment that states it):
+- The canonical wire order for the 11 driven joints is
+  `[0,1,2,8,9,10,11,12,13,14,15]`.
+- Channel, `dir`, `midShift` and limits are PROGMEM constants (robot model).
+  Per-robot data lives in EEPROM.
+- Unused channels are written full-off. The used channels span 0..15, so a
+  single 16-channel burst is cheapest.
 
-1. `adjust()` in `motion.h` computes `leftQ = (i - 1) % 4 > 1`, which gives
-   8 → left, 9 → right, 10 → right, 11 → left.
-2. `Skill::mirror()` swaps columns (8,9) and (10,11), so those are the left/right
-   pairs.
-3. Every posture in `InstinctNybble.h` gives 8 and 9 the same value and 10 and 11
-   the same value (for example `rest`: 60, 60, -60, -60), so 8 and 9 are the
-   front pair. The angle limits agree: front shoulders are -100..80, back
-   shoulders are -80..100.
+**Angle → PWM (per-robot legacy transfer function).** Each robot's legacy
+EEPROM holds the values the setup sketch computed for it:
+`CALIBRATED_ZERO_POSITIONS` (CZP) @96, `ANGLE2PULSE_FACTOR` (A2P) @160,
+`B_OFFSET` @274, `PCA9685_FREQ` @275, `PWM_PIN` @0, `CALIB` @16, `MID_SHIFT` @32
+and `ROTATION_DIRECTION` @48 (types in Appendix C4). The new firmware imports
+these values instead of hard-coding them.
 
-The populated PCA channels are {0,1,4,6,7,8,9,11,12,14,15}. They span 0..15, so
-one 16-channel burst write is the cheapest option. Unused channels are written
-as full-off.
-
-Canonical order on the wire for the 11 driven joints is
-**[0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15]**. It is used by keyframes, `JOINTS`
-telemetry and calibration-sized arrays where noted.
-
-**The angle -> PWM path (reproduces the legacy transfer function exactly).**
-Today's path (`calibratedPWM` → `writeAngle`) works as follows:
-
-- `setPWMFreq(240)` with a 25 MHz nominal oscillator gives prescale
-  `round(25e6/(4096·240)) - 1 = 24`. The real frequency is 25e6/(4096·25) =
-  244 Hz, a 4.096 ms period, so one count is 1.0 µs nominal.
-- The setup sketch stored `ANGLE2PULSE_FACTOR = 11000`. That is
-  `(2500-500)/180` evaluated in **integer** division (= 11) times 1.0 count/µs,
-  times 1000. It also stored `B_OFFSET = 60`, from `240/50` in integer division
-  (= 4) × 150 = 600, divided by 10.
-- `servo_deg = 90 + dir·midShift + dir·calib + dir·angle`.
-- `counts = 11 · servo_deg + 600`, clipped to 500..2500.
-- So the legacy neutral (servo 90°) is **1590 counts ≈ 1590 µs, not 1500 µs**,
-  and the slope is 11 counts/° instead of the nominal 11.1. Kilo's stored
-  calibration offsets absorb this offset.
-
-The new firmware keeps the identical function so that migrated calibration
-offsets stay valid:
+The legacy path computes `counts = A2P/1000 · (CZP + dir·angle) + B_OFFSET·10`,
+clipped to 500..2500. The new firmware evaluates the same function in integers:
 
 ```
-servo_a16 = 90*16 + dir[j] * (midShift[j]*16 + calib_a16[j] + angle_a16)       // int16
-counts    = 600 + (11 * (int32_t)servo_a16 + 8) / 16                            // round to nearest
+servo_a16 = zero_a16[j] + dir[j]·angle_a16                 // zero_a16 = CZP·16, imported per joint
+counts    = (a2p[j]·(int32_t)servo_a16 + 8000) / 16000 + b_offset_counts
 counts    = clamp(counts, 500, 2500)
 ```
 
-The sub-degree `a16` resolution is finer than the hardware's 1 count = 0.09°,
-so it costs nothing. A host differential test checks this against a transcript
-of the legacy float code for every joint and every whole-degree angle in range
-(section 6).
+The PCA prescaler is set exactly as legacy `setPWMFreq(240)` sets it.
+`PCA9685_FREQ` is stored for future µs conversions; it does not affect this
+path. Calibration is exposed on the protocol as the legacy-style offset
+`calib = dir·(zero − 90 − dir·midShift)` in `a16`, and `CAL_SET` rewrites
+`zero_a16`.
 
-`dir`, `midShift`, PCA channel and limits are compile-time PROGMEM constants
-copied from OpenCat.h, not EEPROM data. They describe the robot model, and
-nothing writes them at runtime. Only per-robot data (calibration, IMU offsets,
-tunables) lives in EEPROM.
+**Migration** runs when neither config slot is valid. It checks that
+`PWM_PIN`, `MID_SHIFT` and `ROTATION_DIRECTION` equal the PROGMEM constants,
+that `calib_j = dir·(CZP_j − 90 − dir·midShift_j)` matches `CALIB_j` within 1°,
+and that A2P ∈ 9000..13000 and `B_OFFSET·10` ∈ 400..800. If all pass, it writes
+slot A and emits `CONFIG_MIGRATED`. Otherwise it uses model defaults (A2P 11000,
+B 600, CZP = 90 + dir·midShift), emits `CONFIG_DEFAULTED(reason)`, and refuses
+`STAND` until the Pi has run calibration. Appendix C explains where 600 and 11 come from, and why
+neutral is ≈1590 counts rather than 1500.
 
-**EEPROM: a new block in a hole of the legacy layout.** The legacy layout uses
-internal EEPROM 0..282 (config), 320..700 (skill index; 47 entries of
-`nameLen + 5` bytes = 381 B) and about 966..1023 (melodies). The new firmware
-uses **704..959 (256 B)**. That region is unused by the old firmware, so
-flashing back the old OpenCat firmware works with its EEPROM intact. This is the
-fallback guarantee.
+**P0 task:** dump EEPROM 0..282 from Kilo once with `EEPROM_READ` before the
+first flash of new firmware, and commit it as `docs/kilo-eeprom-legacy.md`
+(hex + decoded).
 
-| Offset (from 704) | Size | Field |
+**EEPROM layout (new).** The legacy layout uses 0..282, 320..700 and
+≈966..1023, and the new firmware never writes those. Flashing the legacy
+firmware back therefore finds its EEPROM intact. The new firmware uses two
+128 B slots: A at 704..831 and B at 832..959.
+
+| Slot offset | Size | Field |
 |---|---|---|
 | 0 | 2 | magic `'K','L'` |
-| 2 | 1 | layout version (1) |
-| 3 | 1 | reserved |
-| 4 | 32 | `calib_a16[16]`, int16 |
-| 36 | 12 | IMU offsets: accel x,y,z, gyro x,y,z (MPU6050 offset-register values, int16) |
-| 48 | 2 | battery scale: mV per 64 ADC counts (default 646 ≈ 1000/99·64) |
-| 50 | 64 | persisted params (32 × int16, indexed by param id; 0x7FFF = "use default") |
-| 114 | 140 | reserved |
-| 254 | 2 | CRC-16/CCITT-FALSE over bytes 0..253 |
+| 2 | 1 | layout version |
+| 3 | 1 | sequence number (serial-number arithmetic) |
+| 4 | 32 | `zero_a16[16]` |
+| 36 | 32 | `a2p[16]` |
+| 68 | 2 | `b_offset_counts` |
+| 70 | 2 | `pca9685_freq_khz` |
+| 72 | 12 | IMU offsets (accel xyz, gyro xyz, MPU offset-register values) |
+| 84 | 2 | battery scale, mV per 64 ADC counts |
+| 86 | 32 | 16 persisted params (int16, 0x7FFF = default) |
+| 118 | 8 | reserved |
+| 126 | 2 | CRC-16/CCITT-FALSE over 0..125 |
 
-**Migration on first boot.** If the magic or CRC is bad, the firmware imports
-legacy values:
+**Writing a slot (`CAL_SAVE`, `PARAM_SET persist`):**
 
-- `CALIB` (16 × int8 at 16) → `calib_a16 = calib · 16`.
-- `MPUCALIB` (6 × int16 at 256) → IMU offsets.
-- Defaults for everything else.
+1. Copy the RAM image, with sequence + 1, into the **older** slot.
+2. Write only the bytes that differ from what is already in that slot.
+3. Write the CRC last.
 
-It then writes the block and emits `EVENT CONFIG_MIGRATED`. If the legacy data
-also looks invalid (calib outside ±25°), it uses zeros and emits
-`CONFIG_DEFAULTED`.
-
-Today's firmware also sends 3064/3160 µs "P_SOFT/P_HARD" pulses (`setServoP`).
-That is a Petoi convention for switching servo stiffness. Whether Kilo's G41
-servos honour it is unknown (open question 8.6). v1 drops it.
+A torn write leaves that slot invalid, and boot falls back to the other valid
+slot, never to stale legacy data. If both slots are invalid, migration runs.
 
 ### 3c. Arbitration
 
-**Owners and priority.** Each owner is a producer with an `active` flag, a joint
-mask (`uint16_t`, bit = joint index) and an output `q[j]` in `a16` for the
-joints in its mask.
-
 | Priority | Owner | Mask | Active when |
 |---|---|---|---|
-| 3 | REFLEX | all driven joints | fall response, recovery trick, low-battery rest, watchdog rest |
-| 2 | TRICK | mask from `TRICK_BEGIN` (default all 11) | a trick is playing |
-| 1 | GAIT | legs 8-15 | gait running, or stopping (stride ramp-down) |
-| 0 | IDLE | all driven joints | always: the current posture (REST, SIT, STAND, CALIB, ZERO, LIMP, or IK `STANCE`) |
+| 3 | REFLEX | all driven | Fall response and recovery, low-battery REST, watchdog stop and REST, warm-boot hold |
+| 2 | TRICK | from `TRICK_BEGIN` (default all 11) | A trick is playing |
+| 1 | GAIT | legs 8-15 | The gait is running or stopping |
+| 0 | IDLE | all driven | Always. Holds the current posture: LIMP, REST, SIT, STAND, STANCE (IK), CALIB or ZERO. |
 
-Per tick, per joint `j`:
+Per tick and per joint, the highest-priority active owner whose mask contains
+the joint supplies the base angle. When the owner of a joint changes, the
+crossfade starts from a snapshot of that joint's previous output:
 
 ```
-o*      = highest-priority active owner whose mask contains j
-base[j] = q_o*[j]
-if o*(j) != prev_owner[j]:                       // ownership changed
-    fade_src[j] = last_out_pre_layers[j]         // snapshot what the joint was doing
-    fade_n[j]   = crossfade_ticks(prev_owner, o*) // see table
-    fade_i[j]   = 0
-if fade_i[j] < fade_n[j]:
-    base[j] = fade_src[j] + (base[j] - fade_src[j]) * ease_cos(++fade_i[j] / fade_n[j])
+if owner(j) changed: src[j] = last_base[j]; n[j] = xfade(prev, new); i[j] = 0
+if i[j] < n[j]:     base[j] = src[j] + (base[j] − src[j]) · ease_cos(++i[j] / n[j])
 ```
 
-| Transition | Crossfade | Reason |
-|---|---|---|
-| any → TRICK | 0 ticks | The trick's first frame interpolates from the current pose over its own `dur`. |
-| any → REFLEX fall/recover | 0 ticks | The reflex sequence starts from the current pose. |
-| TRICK/REFLEX → GAIT/IDLE | 10 ticks (200 ms), param `XFADE_TICKS` | |
-| GAIT ↔ IDLE | handled by gait start/stop (see 3d), plus 10 ticks | |
-| IDLE posture A → posture B | the `SET_POSTURE` transition time (default 25 ticks) | |
+Crossfade lengths:
+- 0 ticks into TRICK or REFLEX, because their first frame interpolates from the
+  current pose;
+- 10 ticks (`XFADE_TICKS`) out of TRICK or REFLEX;
+- the posture's transition time between IDLE postures (default 25 ticks).
 
-The snapshot approach does not run the old owner during the fade. That keeps
-the cost low and makes the behaviour deterministic.
+Layers on top of the base pose:
 
-**Blend layers on top of the base pose:**
+1. **Head layer** (joints 0-2, only when the head owner is IDLE or GAIT):
+   - If the Pi holds a target (`SET_HEAD mode=1`), the head follows it,
+     slew-limited.
+   - Otherwise the head uses the posture's head plus the gait's head bob and
+     tail wag.
+   - The hold is released by `mode=0`, by `HEAD_HOLD_MS` (2 s) without a
+     refresh, or by any epoch bump.
+2. **Balance layer** (3f):
+   - For GAIT and STANCE, corrections enter the IK as body pitch/roll.
+   - For joint-space owners (built-in postures, tricks with `BALANCE`), they
+     pass through the per-joint gain table.
+   - Off for REFLEX, CALIB, LIMP and when `IMU_FAULT` is set.
+3. **Safety stage** (always applied):
+   - Clamp to joint limits.
+   - Slew-limit to `SLEW_MAX` (10°/tick ≈ 500°/s, about G41 no-load speed
+     **(est.)**).
+   - Convert angle → counts.
 
-1. **Head layer** (joints 0, 1, 2). It applies when the head's owner is IDLE or
-   GAIT, never during TRICK or REFLEX.
-   - If the Pi holds a head target (`SET_HEAD mode=1`), the output is that
-     target, slew-limited to the requested speed. Otherwise the output is the
-     posture's head angles plus the gait's head bob and tail wag (3d).
-   - The Pi's hold is released by `SET_HEAD mode=0`, by 2 s without a refreshed
-     `SET_HEAD` (param `HEAD_HOLD_MS`), or by the link watchdog.
-2. **Balance layer** (legs, optionally head tilt). The balance controller (3f)
-   produces body-attitude corrections `(corr_pitch, corr_roll)` in `a16`. It is
-   consumed in one of two ways:
-   - For GAIT and IDLE `STANCE`, the corrections are added to the body pose
-     offsets **before IK**. That is geometric and posture-independent.
-   - For joint-space owners (built-in postures, tricks with the `BALANCE` flag),
-     they are mapped through a per-joint gain table (the OpenCat
-     `adaptiveParameterArray` approach) and added after crossfade.
+**Goals and the goal epoch.** The Pi never sends joint angles except as trick
+keyframes. Goals are latched registers that the Pi overwrites:
+- `SET_POSTURE`, `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE`;
+- `SET_BALANCE`, `SET_EYES`, `BEEP`;
+- `TRICK_PLAY`.
 
-   It is disabled for REFLEX, for tricks without the flag, for CALIB/LIMP, and
-   when `IMU_FAULT` is set.
-3. **Safety stage** (always last): clamp to joint limits, then slew-limit to
-   `SLEW_MAX` per tick (default 10°/tick = 500°/s, about the G41 no-load speed
-   **(est.)**), then angle→counts. The value written is recorded as
-   `out[j]` (telemetry `JOINTS`).
+Without an epoch, a goal re-sent at 5 Hz from before a fall would restart a
+gait after recovery. So:
 
-**How the Pi expresses goals.** The Pi never sends joint angles, except as
-keyframes inside a trick. Goals are latched registers on the body that the Pi
-overwrites:
-
-- posture: `SET_POSTURE`
-- gait: `SET_GAIT` (run/stop + parameters)
-- head: `SET_HEAD`
-- body pose offsets: `SET_BODY_POSE`
-- balance: `SET_BALANCE`
-- eyes: `SET_EYES`
-- tricks: `TRICK_*`
-
-Goals are idempotent, so re-sending one is harmless. Reflexes can override them.
-When a reflex ends, the body goes to `STAND` (fall) or stays in `REST` (battery,
-watchdog). It does not resume the previous gait on its own. The Pi decides what
-happens next. Telemetry reports `mode`, the leg owner, the head owner and the
-last received sequence number, so the Pi can confirm that its goal took effect.
+- The body keeps `epoch` (u8, wraps), increments it on every REFLEX takeover
+  (fall, low battery) and watchdog trip, and reports it in every TELEMETRY and
+  EVENT. Each bump also clears the latched motion goals (gait stops, head
+  released, pose zeroed, trick stopped).
+- `SET_POSTURE`, `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE` and `TRICK_PLAY` carry
+  `epoch` as their first byte. A mismatch is refused with
+  `EVENT GOAL_REFUSED(type, STALE)` (`ACK STALE` for `TRICK_PLAY`), except
+  `SET_POSTURE` LIMP or REST, which is never stale.
+- The mind clears its desired motion goals on `FELL`, `WATCHDOG` and
+  `LOW_BATTERY`, adopts the event's epoch, and decides afresh (§5).
 
 ### 3d. Gait generator
 
-**Parameters** (from `SET_GAIT`, slew-limited per tick to avoid foot jumps):
+**Parameters** (`SET_GAIT`; slew-limited per tick). Defaults are **(est.)**,
+to be tuned.
 
-| Param | Unit | Range | Default walk / trot / crawl **(est., to tune)** |
+| Param | Unit | Range | Walk / trot / crawl |
 |---|---|---|---|
-| `pattern` | enum | WALK, TROT, CRAWL, (later PACE, BOUND) | |
+| `pattern` | enum | WALK, TROT, CRAWL | |
 | `period_ms` | ms | 300..2000 | 800 / 500 / 1200 |
-| `duty` | /256 | 128..230 (0.5..0.9) | 192 (0.75) / 140 (0.55) / 218 (0.85) |
-| `stride_mm` | mm, signed | -60..60 (negative = backward) | 30 / 35 / 25 |
-| `turn_mm` | mm, signed | -40..40 (positive = turn left) | 0 |
+| `duty` | /256 | 128..230 | 192 / 140 / 218 |
+| `stride_mm` | mm, signed | −60..60 | 30 / 35 / 25 |
+| `turn_mm` | mm, signed, + = left | −40..40 | 0 |
 | `step_h_mm` | mm | 0..40 | 15 / 12 / 18 |
-| `body_h_mm` | mm | within IK workspace | 0.80·(L1+L2) / 0.80 / 0.70 |
-| `flags` | bits | bob head, wag tail, balance | all on |
+| `body_h_mm` | mm | IK workspace | 0.80 / 0.80 / 0.70 × (L1+L2) |
+| `flags` | bits | head bob, tail wag, balance | all on |
 
-Body pose offsets (`SET_BODY_POSE`: pitch, roll, height delta, x-shift) apply on
-top. They are also used by IDLE `STANCE`.
+`SET_BODY_POSE` (pitch, roll, height delta, x-shift) applies on top. It also
+drives IDLE STANCE.
 
-**Phase oscillator.**
-- Global phase `φ` is a `uint16_t` (65536 = one cycle). Each tick adds
-  `65536·20/period_ms`. Changing the period never makes the phase jump.
-- Leg phase `φ_i = φ + offset_i` (wraps for free in uint16).
-- Offsets, in leg order LF, RF, RB, LB, as fractions of a cycle:
+**Phase.**
+- The global phase `φ` is a `uint16_t` (65536 per cycle). Each tick adds
+  `65536·20/period_ms`, so changing the period never makes the phase jump.
+- Leg phase `φ_i = φ + offset_i` and wraps naturally.
+- Leg `i` starts its swing when `φ_i` crosses `duty`, so a larger offset swings
+  earlier.
 
-| Pattern | LF | RF | RB | LB | Footfall sequence |
+| Pattern | LF | RF | RB | LB | Swing order |
 |---|---|---|---|---|---|
-| WALK (lateral-sequence) | 0.25 | 0.75 | 0.50 | 0.00 | LB → LF → RB → RF |
-| CRAWL | same as WALK, higher duty, lower body | | | | |
-| TROT | 0.00 | 0.50 | 0.00 | 0.50 | diagonals together |
+| WALK | 0.50 | 0.00 | 0.25 | 0.75 | LB → LF → RB → RF (lateral sequence) |
+| CRAWL | as WALK | | | | higher duty, lower body |
+| TROT | 0.00 | 0.50 | 0.00 | 0.50 | diagonal pairs |
 
-**Foot trajectory** in the leg frame (origin at the shoulder axis, x forward,
-z down). Per leg: neutral foot `x0_i` (param, default 0 = under the shoulder),
-height `H_i = body_h + pose terms`, and stride `S_i`. With `β = duty` and
-`p = φ_i/65536`:
+The host test asserts the resulting swing order and the pairings, not the
+table values.
 
-- Stance (`p < β`): `s = p/β`, `x = x0 + S_i·(1/2 − s)`, `z = H_i`. The foot
-  sweeps back linearly. Ground speed is `S_i/(β·T)`, for example
-  35 mm / (0.55 × 0.5 s) = 127 mm/s for the default trot **(est.)**.
-- Swing (`p ≥ β`): `s = (p − β)/(1 − β)`,
-  `x = x0 + S_i·(−1/2 + (1 − cos πs)/2)`, `z = H_i − h·sin(πs)`. The foot lifts
-  with a half-sine and moves forward with cosine easing, so its velocity is zero
-  at lift-off and touchdown.
-- Turning: `S_left = S − turn`, `S_right = S + turn`. With `S = 0` and
-  `turn ≠ 0`, Kilo turns in place.
+**Foot trajectory.** The leg frame has its origin at the shoulder axis, x
+forward and z down. With `p = φ_i/65536`, `β = duty`, neutral foot `x0_i`,
+height `H_i` and stride `S_i`:
 
-**Pose terms** (Nybble legs are planar, so roll comes only from leg-length
-differences):
+- **Stance** (`p < β`): `s = p/β`, `x = x0 + S_i(½ − s)`, `z = H_i`. Ground
+  speed is `S_i/(βT)`, for example 127 mm/s for the default trot **(est.)**.
+- **Swing** (`p ≥ β`): `s = (p−β)/(1−β)`, `x = x0 + S_i(−½ + (1 − cos πs)/2)`,
+  `z = H_i − h·sin πs`. The foot has zero velocity at lift-off and touchdown.
+- **Turning:** `S_left = S − turn`, `S_right = S + turn`. With `S = 0` Kilo
+  turns in place.
+
+**Pose terms.** Signs are chosen so that a positive pitch raises the nose and a
+positive roll raises the left side. In both cases the legs on the raised end or
+side get longer (larger `H`, since z points down).
 
 ```
-H_i = body_h + side_i·(W/2)·sin(roll_total) − end_i·(Lb/2)·sin(pitch_total)
-  side_i = +1 left, −1 right;   end_i = +1 front, −1 back
-  pitch_total = pose_pitch + corr_pitch(balance),   roll_total = pose_roll + corr_roll
+H_i = body_h + end_i·(Lb/2)·sin(pitch_total) + side_i·(W/2)·sin(roll_total)
+  end_i = +1 front, −1 back;  side_i = +1 left, −1 right
+  pitch_total = pose_pitch + corr_pitch;  roll_total = pose_roll + corr_roll   (corr from 3f)
   x0_i += pose_xshift
 ```
 
-The signs are fixed by host tests and the HIL check "positive pitch command
-raises the nose".
-
-**Head bob and tail wag** (head layer input when the Pi does not hold the head):
-- tilt += `A_bob·sin(2·2πφ)`, which counteracts the twice-per-cycle body bob of
-  a trot or walk, default 4°.
-- tail = posture tail + `A_wag·sin(2πφ)`, default 15°.
-
-This replaces today's `10·sin(frame·(j+2)·π/period)`.
+**Head bob and tail wag.** Tilt gets `A_bob·sin(2·2πφ)` (default 4°), which
+counteracts the twice-per-cycle body bob. Tail gets `A_wag·sin 2πφ` (default
+15°).
 
 **Start and stop.**
-- Start: GAIT becomes active at `φ = 0` with stride ramping from 0 to `S` over
-  one period.
-- Stop: stride ramps to 0 over one period. Then the generator waits until every
-  leg is in stance, deactivates, and IDLE (`STANCE` at the same body height)
-  takes over with no visible jump.
-- A pattern change goes through stop → start (about 1 cycle). Morphing phase
-  offsets smoothly is a later experiment.
+- Start at `φ = 0` with the stride ramping from 0 over one period.
+- Stop by ramping the stride to 0 over one period, waiting until all feet are
+  in stance, then handing over to IDLE STANCE at the same height.
+- A pattern change is a stop followed by a start.
 
-**Planar IK for one leg.** Upper link `L1` runs from the shoulder axis to the
-knee axis. Lower link `L2` runs from the knee axis to the foot contact point.
-Geometric angles:
+**Planar IK.**
+- `L1` is the shoulder axis to the knee axis; `L2` is the knee axis to the foot
+  contact point.
+- `θ1` is the upper link angle from straight down, positive = foot forward.
+- `θ2` is the knee bend relative to the upper link.
+- `σ_i = ±1` chooses which way the knee points.
 
-- `θ1` = upper link from straight down, positive = foot forward.
-- `θ2` = knee bend relative to the upper link, 0 = straight.
-- `σ_i = ±1` selects which way the knee points (elbow back or forward). It is a
-  per-leg parameter.
-
-Forward kinematics:
 ```
-x = L1·sin θ1 + L2·sin(θ1+θ2)
-z = L1·cos θ1 + L2·cos(θ1+θ2)
+FK:  x = L1 sin θ1 + L2 sin(θ1+θ2),   z = L1 cos θ1 + L2 cos(θ1+θ2)
+IK:  d² = x² + z²   (clamp d to [d_min, 0.95(L1+L2)])
+     c  = (d² − L1² − L2²) / (2 L1 L2),   s = σ_i √(1 − c²),   θ2 = atan2(s, c)
+     θ1 = atan2(x, z) − atan2(L2·s, L1 + L2·c)
+     shoulder_j = sgn_sh_i (θ1 − θ1_0),   knee_j = sgn_kn_i (θ2 − θ2_0_i)
 ```
 
-Inverse kinematics (closed form):
-```
-d² = x² + z²                                     clamp d to [d_min, 0.95·(L1+L2)]
-c  = cos θ2 = (d² − L1² − L2²) / (2·L1·L2)
-s  = σ·√(1 − c²)
-θ2 = atan2(s, c)
-θ1 = atan2(x, z) − atan2(L2·s, L1 + L2·c)
-```
+- `θ1_0` and `θ2_0` describe the calibration posture. Petoi's guide says it is
+  upper leg vertical and lower leg at 90° to it; this must be verified on Kilo.
+- The signs `sgn_sh`, `sgn_kn` and `σ` are fixed in P2. A host test checks that
+  FK of the legacy `up`, `sit` and `rest` postures puts the feet below the body
+  and symmetric left/right. A HIL test nudges one foot +10 mm forward.
+- `L1`, `L2`, `Lb`, `W` and the foot offset must be measured (open question 1).
+  Appendix B describes how and gives rough guesses.
 
-Joint angles sent to the safety stage:
-`shoulder_j = sgn_sh_i·(θ1 − θ1_0)` and `knee_j = sgn_kn_i·(θ2 − θ2_0_i)`.
-`θ1_0`, `θ2_0` are the geometric angles at joint angle 0 (the calibration
-posture). Per Petoi's calibration guide that posture is upper leg vertical and
-lower leg at 90° to it, so `θ1_0 = 0` and `θ2_0 = ±90°`. **Verify on Kilo.**
-
-The signs `sgn_sh`, `sgn_kn` and `σ` are found in P2 by two checks:
-- a host test: FK of the legacy `up`, `sit` and `rest` postures must give
-  plausible feet (below the body, symmetric left/right);
-- a HIL check: command foot +10 mm forward on one leg at a time.
-
-**What must be measured** (open question 8.1): `L1`, `L2`, the foot-contact
-offset (if the foot tip is not on the knee-to-tip line, add a constant angle
-`δ` to `θ2`), the shoulder-axis spacing front-to-back `Lb`, and the foot track
-width `W`.
-
-How to measure: put Kilo in `calib` and use calipers from axle centre to axle
-centre, and from the knee axle to the floor contact point. Rough estimates from
-Nybble's size: L1 ≈ L2 ≈ 45-55 mm, Lb ≈ 100-110 mm, W ≈ 55-65 mm. These are
-**guesses; do not ship them.** They are compile-time constants in
-`core/ik.h`, overridable by params.
-
-**Fixed-point plan.**
-
-- Lengths in `q2` (0.25 mm), so a 50 mm link is 200. Squares go in int32
-  (d² ≤ 2·400² = 320 000).
-- `c` in Q12 via one int32 division: `num·4096/den`, with
-  |num| ≤ 2·L1·L2 ≈ 80 000, so num·4096 ≤ 3.3e8, which fits.
-  `s = isqrt(4096² − c²)` in Q12.
-- The second atan2 takes `(L2·s, L1·4096 + L2·c)` directly. atan2 is
-  scale-invariant, so no division is needed there.
-- `atan2(y, x)` → `a16`: reduce to the first octant, `r = (min << 14) / max`
-  (Q14), then look up a **65-entry atan table** (0..45° in a16, 130 B PROGMEM)
-  with linear interpolation, then rebuild the quadrant. Max interpolation error
-  ≈ h²/8·max|f''| ≈ (1/64)²/8·0.65 rad ≈ 0.001°.
-- `sin`/`cos` from a **65-entry quarter-wave table** (Q14, 130 B), linearly
-  interpolated, error < 1e-4.
-- `isqrt32`: bitwise, 16 iterations, about 60 B.
-- Precision near full extension: `s = √(1−c²)` amplifies errors in `c` as
-  `c/s`. With the reach clamp at 0.95·(L1+L2), the knee bend stays ≥ about 25°
-  and the worst-case θ2 error is < 0.05° **(est.)**.
-- Acceptance: host test over a 1 mm grid of the workspace, |FK(IK(p)) − p| ≤ 0.25
-  mm and angle error vs a double-precision reference ≤ 0.25°.
-- Cost per leg: 3 atan2 (one int32 division each, about 40 µs **(est.)**) + 1
-  isqrt + 1 division ≈ 0.2 ms. That is 0.8 ms per tick for four legs.
-- Flash: tables 260 B + atan2/sin/isqrt about 400 B + IK about 400 B + gait
-  generator about 1.0 KB, so **about 2.0 KB total (est., soft)**.
+**Fixed point (summary; derivation in Appendix B).**
+- Lengths are `q2`. Squares are int32.
+- `c` and `s` are Q12, with one int32 division.
+- `atan2` normalises its arguments by a shared shift, then uses a 65-entry
+  table. Sine uses a 65-entry Q14 quarter-wave table. `isqrt32` is bitwise.
+- Targets: |FK(IK(p)) − p| ≤ 0.25 mm and angle error ≤ 0.25° against a double
+  reference.
+- Cost **(est.)**: 0.8 ms per tick and ≈2 KB of flash.
 
 ### 3e. Keyframe interpolator for tricks
 
-**Data model.** A trick has a header and up to **32 frames** held in one RAM
-buffer. Frame layout, 14 bytes:
+**Frame (14 B):**
 
 | Byte | Field | Meaning |
 |---|---|---|
-| 0 | `dur` u8 | ticks to move from the previous frame to this one (1..255 = 20 ms..5.1 s) |
-| 1 | `hold` u8 | ticks to hold after arriving (0..255) |
-| 2 | `flags` u8 | bits 0-1 easing: 0 linear, 1 cosine (default), 2 step; bit 2 balance on during this frame; others 0 |
-| 3..13 | `ang[11]` i8 | degrees, canonical joint order; **-128 = "unchanged"**, meaning keep the previous target for this joint |
+| 0 | `dur` u8 | Ticks from the previous frame (1..255 = 20 ms..5.1 s) |
+| 1 | `hold` u8 | Ticks to hold after arriving |
+| 2 | `flags` u8 | Bits 0-1 easing: 0 linear, 1 cosine (default), 2 step, 3 reserved (spline). Bit 2: balance on in this frame. |
+| 3..13 | `ang[11]` i8 | Degrees, in canonical joint order. **−128 = unchanged.** |
 
-Header (from `TRICK_BEGIN`):
-- `trick_id` u8: a Pi-chosen tag, so the Pi can cache what is loaded.
-- `n_frames`.
-- `loop_start`, `loop_end`, `repeats`: 0 = play once, 255 = repeat until
-  stopped. This is the same idea as OpenCat's `loopCycle`.
-- `joint_mask` u16: joints the trick owns. The others stay with GAIT/IDLE and
-  the head layer, which lets the Pi play, say, a tail-only or head-only trick.
-- `flags`: BALANCE (all frames), END_POSTURE (posture to switch IDLE to
-  afterwards).
+**Header (`TRICK_BEGIN`):**
+- `trick_id`: a Pi tag used for caching.
+- `n_frames` ≤ 32.
+- `loop_start`, `loop_end`, `repeats`: 0 = once, 255 = until stopped.
+- `joint_mask`: joints the trick owns. Unowned joints stay with GAIT/IDLE and
+  the head layer.
+- `flags`: `BALANCE`, and `FALL_OK`, which suppresses fall detection for
+  large-tilt tricks.
+- `end_posture`.
 
-**RAM budget.** 32 × 14 B = 448 B, plus about 16 B of player state. That is the
-largest elastic item in the RAM budget (3h). The biggest Nybble behaviour today
-is `cmh` with 22 frames, followed by `dg` (11) and `hds` (10), so 32 frames
-covers every existing trick with room left over. Postures are single-frame
-tricks. None of the Nybble tricks use the IMU-trigger columns (all zero), so
-triggers are not supported.
+**RAM:** 32 × 14 = 448 B for the store, plus 16 B of player state and a 22 B
+`from[11]` array. The largest Nybble behaviour (`cmh`) has 22 frames.
 
-**Timing and easing.**
-- Frame k starts from the joint targets of frame k−1. Frame 0 starts from the
-  current `out[]`.
-- Each tick `t` of `dur`: `q = from + (to − from)·e(t/dur)`, where
-  `e(s) = s` (linear) or `(1 − cos πs)/2` (cosine).
-- Cosine is computed as `sin²(πs/2)` from the sine table, all in Q14.
-- Cosine matches today's `transform()` easing and suits pose-to-pose motion.
-  Linear suits dense keyframes that should flow without stopping at every frame.
-- A later option is Catmull-Rom through keyframes, flag value 3 reserved.
-- `TRICK_PLAY` takes a `speed` (Q6, 64 = 1.0×, range 16..255 = 0.25×..4×) that
-  scales `dur` and `hold`, and a `mirror` flag. Mirror swaps the L/R joint pairs
-  (8↔9, 10↔11, 12↔13, 14↔15) and negates pan and tail, as `Skill::mirror()`
-  does. It costs about 60 B and lets the body mirror the built-in recovery
-  trick by fall direction.
+**Timing.**
+- Frame 0 starts from the current output. Each later frame starts from the
+  previous frame's targets.
+- Each tick: `q = from + (to − from)·e(t/dur)`, where `e` is linear or
+  `(1 − cos πs)/2 = sin²(πs/2)` computed from the sine table in Q14. Cosine
+  matches today's `transform()` easing.
+- `TRICK_PLAY` takes a speed (Q6, 64 = 1×, 16..255) that scales `dur` and
+  `hold`, and a mirror flag. Mirror swaps the L/R pairs, negates pan and tail,
+  and negates the expected roll.
 
-**Upload.** Uploads are chunked and acked, 4 frames (56 B) per `TRICK_FRAMES`,
-then `TRICK_COMMIT` with a CRC-16 of the whole frame array. Uploading while a
-trick is playing is refused with `BUSY`. Tricks are short, and a second buffer
-would cost another 448 B. A 22-frame trick needs 6 chunks plus a commit, which
-is about 100 ms of stop-and-wait **(est.)**.
+**Upload:**
+- 4 frames per `TRICK_FRAMES`, then `TRICK_COMMIT` with a CRC-16 of the frame
+  array. All are acked.
+- Uploading while a trick is playing is refused with `BUSY`.
+- A 22-frame trick needs 6 chunks plus a commit, ≈100 ms **(est.)**.
 
-**Built-in sequences in PROGMEM** (needed without the Pi): postures `rest`,
-`sit`, `up` (stand), `calib`/`zero`, and the recovery trick `rc` (3 frames).
-About 100 B.
-
-**Legacy import** (mind-side, section 5): each OpenCat behaviour row has
-16 angles, then speed, delay, trigger axis and trigger angle.
-- `dur = ceil(maxΔ / (speed/4) × LEGACY_STEP_MS / 20)`. `LEGACY_STEP_MS` is the
-  time today's `transform()` takes per step (16 servo writes), about 5-6 ms
-  **(est.)**. Calibrate it by filming both firmwares doing `hi`.
-- `hold = delay × 50 ms / 20`.
-- Joints 3-7 are dropped. `loopCycle` maps directly to
-  `loop_start/loop_end/repeats`.
+**Built-in sequences** (PROGMEM, ≈100 B): postures `rest`, `sit`, `up`
+(stand), `calib`/`zero`, and the recovery trick `rc`.
 
 ### 3f. Balance
 
-**Today (`motion.h` `adjust()` + `skill.h` `perform()`):**
+The legacy approach is in Appendix C. In short, it is a joint-space,
+proportional-only correction with a 5° per-update slew and dead bands. It is
+the starting point for the joint-space gain table.
 
-- **Error:** `dev = measured − expectedRollPitch[skill]`. A dead band of 5° roll
-  and 3° pitch is subtracted. Note that `sign(ypr)` is used, not `sign(dev)`.
-- **Per-joint gains:** `adaptiveParameterArray[j] = {rollFactor, pitchFactor}`
-  in units of 1/57.3, so the effective gain is factor·radPerDeg degrees of joint
-  per degree of tilt. Examples:
-  - upper legs: roll 60 → 1.05, pitch 30 → 0.52;
-  - lower legs: −1.5× the upper-leg values;
-  - head pan and tilt: −60, tail −120.
-- **Roll term:** it uses `|roll|` times a signed per-joint factor, with a 1.2×
-  multiplier on the downhill side. As I read it, most of the roll response is a
-  symmetric front/back crouch, and only 20% is left/right asymmetric.
-- **Walking factor:** leg corrections are halved while walking
-  (`POSTURE_WALKING_FACTOR 0.5`).
-- **Damping:** the change per update is limited to ±5° (`ADJUSTMENT_DAMPER`).
-  This is a slew limit, not a derivative term.
-- **Rate:** the IMU is read on every 3rd joint update in `perform()`
-  (`IMU_SKIP 3`), so the update rate depends on loop speed **(est. tens of Hz)**.
-  It is proportional-only, in joint space.
-
-**New design:**
-
-- **Rate:** 50 Hz, synchronous with the tick. The DMP produces packets at about
-  100 Hz (`SMPLRT_DIV = 4` → 200 Hz sample rate, FIFO divisor 1 → 100 Hz;
-  **verify** by counting packets), and we take the newest.
-- **Controller,** per axis:
-  ```
-  e     = deadband(measured − ref, DB)        DB default 2° (param)
-  u     = Kp·e + Kd·rate                      rate = DMP raw gyro on that axis, deg/s
-  u_f   = u_f + (u − u_f)·α                   α = 1/4, about 70 ms smoothing
-  corr  = clamp(slew(u_f, 1°/tick), ±15°)
-  ```
-  - `ref` is 0 for GAIT and STANCE, and the posture's or trick's expected
-    pitch/roll otherwise (for example `sit` = −30° pitch, from the legacy
-    header).
-  - Starting gains **(est.)**: Kp = 0.5 (Q8 128), Kd = 0.03 s.
-  - The gyro rate gives real damping, which today's slew-limit "damper" does
-    not. There is no integral term: a sustained slope should change the pose,
-    and an integrator would wind up.
-- **Application:** see 3c. Geometric through IK for GAIT and STANCE, so a 5°
-  roll correction changes left/right leg heights by `W·sin 5°`. Legacy-style
-  joint gains for joint-space postures and tricks, and those gains are params
-  initialised from `adaptiveParameterArray`.
-- **Tunable:** `SET_BALANCE` and `PARAM_SET` expose Kp, Kd, DB, clamp and α.
-  Telemetry streams pitch, roll and rates at 50 Hz for step-response
-  experiments. This is the main learning surface.
-- v1 applies corrections to all legs. Applying them only to stance legs during
-  swing is a later experiment.
-
-**Attitude without float.** The DMP packet holds the quaternion as int32 Q30. We
-take the high 16 bits as Q14 and compute the gravity vector:
+**Controller** (per axis, 50 Hz; the DMP produces ≈100 Hz and the newest
+packet is used):
 
 ```
-gx = 2(qx·qz − qw·qy)
-gy = 2(qw·qx + qy·qz)
-gz = qw² − qx² − qy² + qz²
-pitch = atan2(gx, √(gy² + gz²))
+e     = deadband(measured − ref, DB)            DB default 2°
+u     = Kp·e + Kd·rate                          rate = DMP raw gyro on that axis (a16/s)
+corr  = −u                                      negative feedback: nose too high → lower it
+corr  = clamp(slew(lowpass(corr, α=1/4), 1°/tick), ±15°)
+```
+
+- `ref` is 0 for GAIT and STANCE, and the posture's or trick's expected
+  pitch/roll otherwise (for example `sit` has −30° pitch).
+- Starting gains **(est.)**: Kp = 0.5, Kd = 0.03 s.
+- There is no integral term: a sustained slope should change the pose, and an
+  integrator would wind up.
+- `corr_pitch` and `corr_roll` enter the pose terms in 3d, where a positive
+  value raises the nose or left side. If Kilo is nose-high (`e > 0`), `corr` is
+  negative and the front legs shorten.
+- Joint-space owners map `corr` through per-joint gains, initialised from the
+  legacy `adaptiveParameterArray` with the same sign convention.
+- Everything is tunable live (`SET_BALANCE`, `PARAM_SET`), and telemetry streams
+  pitch, roll and rates at 50 Hz for step-response experiments.
+
+**Sign test.** A host closed-loop test runs a toy plant: body pitch responds to
+`corr_pitch` with a first-order lag, plus a step disturbance. It asserts that
+the error shrinks and that flipping any sign makes it grow. The same test runs
+for roll.
+
+**Attitude without float.** The DMP quaternion is int32 Q30. The firmware takes
+the high 16 bits as Q14:
+
+```
+gx = 2(qx·qz − qw·qy),  gy = 2(qw·qx + qy·qz),  gz = qw² − qx² − qy² + qz²
+```
+
+Each product is Q28 in int32. Each sum is shifted back to Q14 **before**
+squaring.
+
+```
+pitch = atan2(gx, isqrt(gy² + gz²))     (gy² + gz² is Q28 in int32, isqrt gives Q14)
 roll  = atan2(gy, gz)
+if gz < 0: pitch = (pitch > 0 ? 180° − pitch : −180° − pitch)    // legacy reflection, kept
 ```
 
-This uses the integer atan2 and isqrt from 3d. It removes the float library and
-`dmpGetYawPitchRoll` (today's `read_IMU()` alone is 1348 B). Yaw is not
-computed; the yaw rate comes from the raw gyro. Axis signs must be checked
-against today's `ypr` on Kilo (P1 differential HIL test).
+The reflection matches the active branch of `dmpGetYawPitchRoll` in the
+vendored V6_12 header (`USE_OLD_DMPGETYAWPITCHROLL` is not defined). Keeping it
+preserves the legacy convention, so the P1 A/B test against today's `ypr` and
+the fall-axis classification both behave the same. Rates come from the raw
+gyro in the DMP packet.
 
-The DMP-free filter is in the appendix.
+The DMP-free filter (P5) is in Appendix A.
 
 ### 3g. Reflexes and safety
 
-Reflex state machines live in `core/reflex.*`, are pure functions of
-(tick, sensors, params) and have full host tests.
+Reflexes are pure state machines in `core/reflex.*`, with full host tests.
 
-**Fall detection and recovery.**
+**Fall**
 
-| State | Condition / action |
+| State | Transition / action |
 |---|---|
-| UPRIGHT | |
-| → TIPPING | \|roll\| > 75° or \|pitch\| > 75° (param `FALL_DEG`) |
-| TIPPING → FALLEN | the condition holds for 6 consecutive ticks (120 ms). Today a single sample over 90° roll triggers. |
-| FALLEN | REFLEX takes all joints and holds the current pose (with the gait stopped). Emit `EVENT FELL(axis, sign)`. Wait until \|gyro\| < 20°/s for 10 ticks (it has stopped rolling). |
-| RECOVERING | Roll fall: play PROGMEM `rc`, mirrored by roll sign. Pitch fall (on the nose or tail): go to REST then LIMP and emit `RECOVERY_FAILED`, because `rc` does not handle pitch. |
-| → UPRIGHT | \|roll\| < 20° and \|pitch\| < 20° for 25 ticks. Hand over to IDLE `STAND`, emit `RECOVERED`. |
-| retry | Up to 3 attempts, 1 s apart. Then LIMP + `RECOVERY_FAILED`. |
+| UPRIGHT → TIPPING | \|roll\| > 75° or \|pitch\| > 75° (`FALL_DEG`) |
+| TIPPING → FALLEN | Held for 6 ticks (120 ms). Epoch bump. REFLEX holds the pose. `EVENT FELL(axis, sign)`. Wait until \|gyro\| < 20°/s for 10 ticks. |
+| FALLEN → RECOVERING | Roll fall: play `rc`, mirrored by roll sign, up to 3 tries 1 s apart. Pitch fall: REST, then the fall reflex's LIMP timer (2 s), then `RECOVERY_FAILED`. |
+| RECOVERING → UPRIGHT | \|roll\|, \|pitch\| < 20° for 25 ticks. IDLE STAND, then `RECOVERED`. |
 
-Fall detection is disabled in CALIB, LIMP, while the IMU is faulted, and while a
-trick runs that declares `FALL_OK` (header flag, for rolls).
+Fall detection is disabled in CALIB and LIMP, under `IMU_FAULT`, and during
+`FALL_OK` tricks.
 
-**Battery.**
-- The ADC on A7 uses AVcc (5 V) as reference: 1023 counts = 5 V at the pin.
-  Today `LOW_VOLTAGE 650` and the printout `voltage/99` imply **99 counts per
-  battery volt**. The divider ratio is 99·5/1023 ≈ 0.48 (about 1:2), so 650
-  counts = **6.57 V = 3.28 V per cell**. Full charge (8.4 V) is about 832 counts
-  and nominal (7.4 V) about 733.
-- The "/99" is Petoi's empirical scale and depends on the actual 5 V rail and
-  resistor tolerances. Kilo's real scale should be measured once with a meter
-  and stored (EEPROM field, open question 8.5).
-- New handling: sample every 5 ticks (10 Hz), IIR filter with α = 1/16 (time
-  constant about 1.6 s). Servo current spikes sag the pack briefly, so raw
-  samples are never compared to thresholds. Reported as `batt_mv`.
+**Battery.** A7 reads through a ≈1:2 divider against a 5 V reference, and the
+legacy scale is 99 counts per volt, so `LOW_VOLTAGE 650` ≈ 6.57 V (3.28 V per
+cell). The scale goes into the EEPROM slot after one meter check. Samples are
+taken at 10 Hz and IIR-filtered (α = 1/16, τ ≈ 1.6 s), so motion sag does not
+trip thresholds.
 
-| Level | Default | Action |
-|---|---|---|
-| WARN | < 6.9 V for 5 s | `EVENT LOW_BATTERY(level=1)`. The Pi should wind down. |
-| LOW | < 6.6 V for 5 s | REFLEX → REST, then LIMP after 2 s. Motion goals are refused with `REFUSED_LOW_BATT` until the voltage is > 7.0 V (hysteresis). `EVENT LOW_BATTERY(2)`. Buzzer melody if the buzzer is kept. |
-| CRITICAL | < 6.3 V for 1 s | LIMP immediately. `EVENT LOW_BATTERY(3)`. The Pi should `shutdown -h` now, because it runs off the same pack through the buck converter. |
-| USB-only | < 3 V | No battery (USB power): battery reflexes disabled, flag `NO_BATTERY`. |
+| Level | Trip | Clear (hysteresis) | Action |
+|---|---|---|---|
+| WARN | < 6.9 V for 5 s | > 7.1 V for 10 s | `EVENT LOW_BATTERY(1)` |
+| LOW | < 6.6 V for 5 s | > 7.0 V for 10 s | Epoch bump. REFLEX → REST, LIMP after 2 s. Motion goals refused (`REFUSED_LOW_BATT`). Low-battery chirp. `EVENT LOW_BATTERY(2)`. |
+| CRITICAL | < 6.3 V for 1 s | (latched until reboot) | LIMP now. `EVENT LOW_BATTERY(3)`. The Pi shuts itself down. |
+| no battery | < 3 V | > 5 V | Battery reflexes off (USB bench power), `NO_BATTERY` flag |
 
-**Joint limits.** Always enforced in the safety stage (3c), whatever the owner.
-The limits are the PROGMEM table above, which can only be narrowed by params.
-The slew limit (10°/tick default) also applies to reflexes.
+**Joint limits** are enforced in the safety stage for every owner. Params can
+only narrow them.
 
-**Link watchdog.** "Valid message" means any CRC-valid frame from the Pi. The
-Pi sends `HEARTBEAT` at 10 Hz when it has nothing else to send.
+**Link watchdog.** Any CRC-valid frame from the Pi resets it.
 
-| Time since last valid frame | Action |
+| Since the last valid frame | Action |
 |---|---|
-| < 500 ms (`WATCHDOG_MS`) | normal |
-| ≥ 500 ms | Emit `EVENT WATCHDOG` (queued; the Pi sees it on reconnect). Release the head hold. Stop the gait (stride ramp-down, 1 period) and stop any trick. Then REFLEX moves to the REST posture over 1 s with **balance on**. |
-| ≥ 10 s more | LIMP (servos unpowered). |
-| next valid frame | The watchdog clears. The body stays in REST/LIMP until the Pi sends a goal. |
+| ≥ 0.5 s (`WD_STOP_MS`) | Stage 1. Epoch bump. Stop: gait ramp-down (≤ 1 period, ≤ 2 s), trick stopped, head released. `EVENT WATCHDOG`. |
+| ≥ 1.5 s (`WD_REST_MS`), and the ramp-down is done | Stage 2. REFLEX → REST over 1 s, balance on. |
+| REST + 10 s | The watchdog reflex's LIMP timer fires: LIMP. |
+| Next valid frame | `EVENT LINK_RESTORED`. The body stays in its current state until the Pi sends a goal with the new epoch. |
 
-Boot counts as link-lost: the body boots into REST then LIMP, and never stands
-up without the Pi. When `WATCHDOG_MS = 0` the link watchdog is off, for bench
-debugging only.
+Worst case, from the Pi going silent mid-walk to lying down, is
+0.5 + 2 + 1 = 3.5 s. From standing it is 2.5 s.
 
-**Servo power semantics.**
-- **LIMP:** every channel is written full-off (`LED_OFF_H` bit 4). The G41s get
-  no pulses and hold no torque. The servo electronics stay powered from the
-  pack: as far as I can tell the NyBoard has no switch on the servo rail
-  (verify), so LIMP saves motor current but not quiescent current.
-- **REST:** the lying-down posture (`rest` from InstinctNybble.h), then LIMP
-  after a 1 s settle. This is the same as today's `d`.
+**REST and LIMP.**
+- **REST** is only a posture: lying down, with servos powered.
+- **LIMP** writes every channel full-off. G41 servos then hold no torque, but
+  their electronics stay powered (the board appears to have no servo-rail
+  switch; to verify).
+- REST never limps by itself. Each reflex that ends in LIMP owns its own timer:
+  fall 2 s, low battery 2 s, watchdog 10 s. The Pi can request either state
+  directly.
 
-**AVR watchdog and brown-out.** `MCUSR` is read at boot and reported in `HELLO`
-(power-on, external reset = Pi GPIO4 or the button, brown-out, watchdog). A
-watchdog reset means a firmware bug. A brown-out means the battery sagged under
-load, which is diagnostic for the Pi-on-battery problem in
-`docs/raspberry-pi.md`.
+**Boot.**
+- A cold boot stays LIMP, because the servo pose is unknown.
+- A warm boot (the PCA9685 is found configured) holds the read-back pose, then
+  goes to REST under the watchdog timeline. The body never stands without the
+  Pi.
 
-**IMU fault.** If no fresh DMP packet arrives for 10 ticks, or 3 I2C errors in a
-row: balance and fall detection are disabled, the `IMU_FAULT` flag is set,
-`EVENT IMU_FAULT` is emitted, and the IMU is re-initialised in background at
-most once per 5 s.
+**IMU fault.** The fault is raised when no fresh packet arrives for 10 ticks,
+or after 3 consecutive I2C errors. Then balance and fall detection are disabled,
+`IMU_FAULT` is set, and an event is emitted. Re-initialisation happens only
+when LIMP (3a).
+
+**Hardware watchdog.** 250 ms, enabled after the IMU initialises (3a).
 
 ### 3h. Memory budget
 
-**Calibration from today's build** (mega @ 684d0eb: 32016 B flash, 1620 B
-globals). Selected symbols from `avr-nm --size-sort`:
+Itemised estimates, and today's measured symbols for calibration, are in
+Appendix D.
 
-| Item today | Flash |
-|---|---|
-| `dmpMemory` (DMP image) | 3062 B |
-| `read_IMU()` (float quaternion → ypr) | 1348 B |
-| `beep()` (float duration + tone) | 1236 B |
-| `RgbUltrasonic::SetRgbEffect` (effects engine) | 970 B |
-| `Skill::loadFrame` + `lookupAddressByName` + `formatSkill` + `loadDataFromI2cEeprom` | about 1.6 KB |
-| `transform()` + `calibratedPWM()` + `writeAngle()` | about 1.2 KB |
-| IR timer ISR (`TIMER1_COMPA`) | 474 B (+ decoder, `irparams` 147 B RAM) |
-| Serial object / `newCmd` buffer | 157 B / 468 B RAM |
-| `main()` (everything inlined) | 10.5 KB |
-
-From the brief: servo driver path about 2.1 KB, IMU with DMP about 4.2 KB + 3 KB
-image, Wire about 2.3 KB, Serial/Print about 1.4 KB, float library about 1.6 KB.
-
-**New firmware estimate** (all **est.**; **S** = soft, could be 50% off):
-
-| Component | Flash | RAM | Notes |
-|---|---|---|---|
-| Arduino core subset (init, Timer0 millis/micros, analogRead, pin I/O) + vectors + crt | 1.0 KB | 15 B | |
-| UART driver (RX/TX ISRs, rings) | 0.3 KB | 192 + 96 B | rings sized in 3a |
-| COBS + CRC-16 + codec + dispatch (generated tables) | 1.5 KB S | 64 + 64 B | RX frame + TX frame scratch |
-| I2C polled driver + bus recovery | 0.35 KB | 4 B | replaces Wire (2.3 KB) |
-| PCA9685 driver, legacy transfer, read-back on boot | 0.4 KB | 32 B | counts buffer |
-| MPU6050 DMP: image | 3.06 KB | | removed in P5 |
-| MPU6050 DMP: init + FIFO read (no I2Cdev/MPU6050 classes) | 0.9 KB S | 28 + 16 B | |
-| Attitude (Q14 quaternion → pitch/roll, rates) | 0.3 KB | 12 B | replaces float path (1.3 KB + float library 1.6 KB) |
-| Fixed-point math (atan2, sin, isqrt, 2 tables) | 0.7 KB | 0 | |
-| IK | 0.4 KB | 0 | |
-| Gait generator | 1.0 KB S | 40 B | |
-| Keyframe player + store | 0.6 KB | 448 + 16 B | store is the elastic item |
-| Arbiter, crossfade, head layer, limits, slew | 0.8 KB S | 90 B | 11 joints × about 8 B |
-| Balance controller | 0.4 KB | 16 B | |
-| Reflexes (fall/recover, battery, link watchdog, IMU fault) | 0.7 KB S | 24 B | |
-| PROGMEM postures + `rc` | 0.15 KB | 0 | |
-| EEPROM block, migration, background writer | 0.5 KB | 70 B | RAM copy of calib, IMU offsets, live params |
-| Params table (ids, defaults, min/max) | 0.3 KB | 40 B | |
-| Ultrasonic (PCINT) | 0.25 KB | 10 B | |
-| WS2812 eyes, solid colours only | 0.25 KB | 18 B | replaces RGBLed + effects (about 1.6 KB) |
-| Battery ADC + filter | 0.1 KB | 6 B | |
-| Telemetry, stats, events queue | 0.5 KB | 30 B | |
-| Buzzer, Timer2 note queue (optional) | 0.35 KB | 20 B | |
-| IR remote (optional, **not recommended**) | about 2.0 KB | about 150 B | + 20 kHz Timer1 ISR |
-| Stack (worst case, measured by stack painting) | | 350 B | |
-| **Total without IR** | **about 14.8 KB** (S: up to 19 KB) | **about 1.72 KB** | |
-| **Limit** | **32256 B** (32 KB − 512 B optiboot) | **2048 B** | |
-| Headroom | about 13-17 KB | about 330 B | |
-
-**Flash and RAM by phase (est.):**
-
-| Phase | Flash | RAM |
+| | Flash | RAM |
 |---|---|---|
-| P0 | about 10 KB | about 1.1 KB |
-| P1 | about 13 KB | about 1.65 KB |
-| P2 | about 15 KB | about 1.72 KB |
-| P5 | about 11.5 KB | about 1.70 KB |
+| Estimate (P2 feature set) | ≈15 KB; soft bound 18 KB = P2 ceiling | globals ≈1.50 KB + stack 350 B ≈ 1.85 KB |
+| Limit | 32256 B (32 KB − 512 B optiboot) | 2048 B |
+| Headroom | ≥ 14 KB | ≈200 B |
 
-RAM is tighter than flash. If it gets tight, these levers apply in order:
+| Phase | `budget.json` flash ceiling | Globals ceiling |
+|---|---|---|
+| P0 (incl. fx + integer attitude) | 12 KB | 1540 B |
+| P1 | 16 KB | 1540 B |
+| P2 | 18 KB | 1540 B |
+| P5 | 15 KB | 1540 B |
+
+The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
+use is reported through a painted canary (`stack_free_min` in STATS). RAM is
+the tight resource. If needed, shrink in this order:
 1. keyframe store 32 → 24 frames (−112 B);
-2. RX ring 192 → 128 (−64 B; then decoding must poll more often);
-3. TX ring 96 → 64.
-
-`STATS` reports the stack low-water mark from a painted canary
-(`0xA5` fill at boot), so RAM headroom is measured, not guessed.
+2. RX ring 192 → 128 B;
+3. TX ring 96 → 64 B.
 
 ---
 
 ## 4. Protocol specification
 
-### Physical link and baud
+`protocol/spec.toml` is the single source of truth. It generates
+`body/src/core/protocol_gen.h` and `mind/kilo/protocol_gen.py`. This section
+gives the shape; Appendix E has every byte layout.
 
-The link is the 328P USART0 ↔ Pi PL011 on GPIO14/15 (`/dev/ttyAMA0`). On the
-Pi 2 B, PL011 is the primary UART because there is no Bluetooth. 3.3 V levels on
-the header. 8N1, no flow control.
+**Link.**
+- 328P USART0 ↔ Pi PL011 on GPIO14/15 (`/dev/ttyAMA0`), 8N1, no flow control,
+  at **250000 baud**.
+- Both ends are exact at that rate: on the 328P with U2X and UBRR = 7, and on
+  the PL011 with a 48 MHz UARTCLK and divisor 12.000. 115200 has a 2.1% error
+  on the 328P. 500000 would halve the main-loop slack for no need.
+- Worst-case load is 19% upstream and 36% downstream (Appendix B).
+- Check `vcgencmd measure_clock uart` reads 48 MHz.
+- During development the Petoi CH343 USB adapter can stand in for the Pi
+  (Appendix F). **Unplug it whenever the Pi drives the UART**, because both
+  drive the same RX line.
 
-**Recommendation: 250000 baud.**
-
-| Baud | 328P @16 MHz error | Pi PL011 (48 MHz UARTCLK) | Throughput |
-|---|---|---|---|
-| 115200 | +2.1% (U2X, UBRR=16 → 117647) | 26.04 → 115176 (−0.02%) | 11.5 kB/s |
-| **250000** | **0.0%** (U2X, UBRR=7) | **12.000 exact** | **25 kB/s** |
-| 500000 | 0.0% (U2X, UBRR=3) | 6.000 exact | 50 kB/s |
-
-Why 250000:
-- Both ends are exact.
-- It more than doubles the headroom over 115200. The worst-case load below is
-  18% upstream and 36% downstream at 250000; at 115200 the downstream worst case
-  would be 78%.
-- It keeps 40 µs per byte, which with a 192 B ring gives 7.7 ms of slack in the
-  main loop.
-
-500000 halves that slack and gains nothing we need. It can be revisited if
-streaming needs grow.
-
-Pi notes:
-- Check `vcgencmd measure_clock uart`; it should read 48000000. With the old
-  3 MHz default the maximum is 187500 baud; fix it with
-  `init_uart_clock=48000000` in `config.txt`.
-- pyserial on Linux sets non-standard rates through `termios2`/`BOTHER`, so
-  `baudrate=250000` works.
-- Disable the serial console (`raspi-config` → serial login shell No, hardware
-  Yes), or kernel messages land on the body. CRC would reject them, but they
-  would still use bandwidth.
-- The bootloader still runs at 115200 (see Flashing).
-
-### Framing: COBS + CRC-16
+**Framing:**
 
 ```
-decoded frame:  type u8 | seq u8 | payload (0..60 B) | crc16 u16 LE      (4..64 B)
-wire:           COBS(decoded) | 0x00                                       (≤ 66 B)
-CRC:            CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no xorout)
-                over type..payload. Check value: "123456789" → 0x29B1.
+decoded: type u8 | seq u8 | payload (0..60) | crc16 u16 LE        (4..64 B)
+wire:    COBS(decoded) | 0x00                                     (≤ 66 B)
+CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection), over type..payload; check("123456789") = 0x29B1
 ```
 
-**Why COBS over start-byte + length:**
-- With SOF+LEN, a corrupted length byte can swallow the next good frames, and a
-  SOF value inside a payload produces false starts. Resync is guesswork, and
-  with only a CRC-8 about 1 in 256 false candidates passes.
-- With COBS, 0x00 never appears inside a frame, so every delimiter is a certain
-  resync point. A dropped byte damages exactly one frame.
-- Cost: at most 1 byte of overhead per frame (frames are < 254 B), about 80 B of
-  AVR code, and 15 lines of Python.
-
-**Why CRC-16:**
-- Python has it in the standard library: `binascii.crc_hqx(data, 0xFFFF)`.
-- AVR has a 1-instruction-per-bit helper: `_crc_xmodem_update` from
-  `<util/crc16.h>` with init 0xFFFF computes the same CRC. The host build uses a
-  portable bitwise version.
-- It costs one byte more than CRC-8, which this link can easily afford. It
-  detects all 1- and 2-bit errors and all bursts ≤ 16 bits.
+- **Why COBS.** 0x00 never occurs inside a frame, so every delimiter is a
+  certain resync point, and a dropped byte damages exactly one frame. With a
+  start byte plus a length field, a corrupted length can swallow the next good
+  frames.
+- **Why CRC-16.** It is in the Python standard library as
+  `binascii.crc_hqx(data, 0xFFFF)`. On AVR, avr-libc's `_crc_xmodem_update()`
+  (inline asm, a few tens of cycles per byte) computes the same polynomial
+  without reflection, so with init 0xFFFF it gives CCITT-FALSE. The host build
+  uses a portable bitwise version.
 
 **Receiver rules:**
-- Bytes accumulate until 0x00. More than 66 bytes before a delimiter → discard
-  until the next 0x00 and count `rx_overflow`.
-- Then COBS-decode, check `len ≥ 4`, check CRC (failure → `rx_crc_err`).
-- Dispatch on `type`. The payload length must exactly match the type's spec;
-  variable types state their rule. A mismatch → `NACK BAD_LEN`.
-- Unknown type → `NACK UNKNOWN_TYPE`.
-- `seq` increments per frame per direction (wraps). The Pi uses body `seq` gaps
-  to count lost telemetry. The body echoes Pi `seq` in `ACK` and in
-  telemetry `last_rx_seq`.
+- Read up to 0x00. If more than 66 B arrive first, discard up to the next
+  delimiter (`rx_overflow`).
+- COBS-decode, check `len ≥ 4`, check the CRC (`rx_crc_err`).
+- The payload length must match the type exactly; variable-length types state
+  their rule.
+- `seq` increments per frame in each direction.
 
-**Worked examples** (computed with `binascii.crc_hqx`; these become entries in
-`protocol/vectors.json`):
+**Acks and errors.** There is no NACK message. Every reply to a command is an
+`ACK(seq, type, status)`. Status values:
 
-```
-HELLO_REQ seq=0       decoded: 01 00 3e 2e              wire: 02 01 03 3e 2e 00
-SET_HEAD seq=7 mode=1 pan=20° tilt=-10° tail=0 speed=180°/s
-                      decoded: 12 07 01 40 01 60 ff 00 00 b4 00 97 4f
-                      wire:    08 12 07 01 40 01 60 ff 01 02 b4 03 97 4f 00
-```
+| Code | Status |
+|---|---|
+| 0 | OK |
+| 1 | BAD_LEN |
+| 2 | BAD_ARG |
+| 3 | BUSY |
+| 4 | UNKNOWN_TYPE |
+| 5 | CRC_MISMATCH (trick) |
+| 6 | NO_TRICK |
+| 7 | REFUSED_LOW_BATT |
+| 8 | REFUSED_FALLEN |
+| 9 | EEPROM_BUSY |
+| 10 | STALE |
 
-### Acknowledgement model
+- **Goals** (`SET_*`, `BEEP`, `HEARTBEAT`) are never acked. They are idempotent
+  and the mind re-sends active goals at 5 Hz and immediately on change.
+  Rejections are reported as `EVENT GOAL_REFUSED(type, reason)`, rate-limited
+  to 1/s per type, where reason is STALE, BAD_LEN, BAD_ARG, LOW_BATT or FALLEN.
+  Telemetry confirms what took effect: `mode`, owners, `epoch`, `last_rx_seq`.
+- **Commands** (trick upload/play/stop, calibration, params, EEPROM, stream
+  settings, stats, reboot) are acked. The Pi retries after 50 ms, up to 3
+  times.
+- **De-duplication.** The body caches the last `(seq, type, status)`. A
+  repeated command with the same `seq` and `type` is re-acked without being
+  executed again, so a retry after a lost ACK is harmless.
+- `CAL_SAVE` and `PARAM_SET persist` are acked when queued. The write itself is
+  reported later by `EVENT EEPROM_SAVED`.
 
-- **Goals** (`SET_POSTURE`, `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE`,
-  `SET_BALANCE`, `SET_EYES`, `HEARTBEAT`, `BEEP`) are **not acked**. They are
-  idempotent and the mind re-sends active goals at 5 Hz and immediately on
-  change. A lost goal is corrected within 200 ms. Confirmation comes from
-  telemetry (`mode`, owners, `last_rx_seq`).
-- **Commands** (everything else: trick upload, calibration, params, EEPROM,
-  stream config, reboot) are **acked** with `ACK(seq, type, status)`. The Pi
-  retries after 50 ms, up to 3 times. Commands must be safe to repeat: for
-  example `TRICK_FRAMES` carries its frame index, and `CAL_SET` is absolute.
-- A goal that is refused (for example while low on battery) produces an
-  `EVENT GOAL_REFUSED(type, reason)`, rate-limited to 1/s.
+**Message index.** Types 0x01-0x7F go Pi → body; 0x80-0xFF go body → Pi. `E`
+marks a payload that starts with an epoch byte.
 
-### Message catalogue
-
-Payload offsets start after `type, seq`. Types 0x01-0x7F are Pi → body; types
-0x80-0xFF are body → Pi.
-
-**Pi → body**
-
-| Type | Name | Payload | Bytes | Ack |
-|---|---|---|---|---|
-| 0x01 | HELLO_REQ | (empty) | 0 | replies HELLO |
-| 0x02 | HEARTBEAT | (empty) | 0 | no |
-| 0x03 | PING | `token u16` | 2 | replies PONG |
-| 0x04 | SET_STREAM | `telem_div u8` (ticks per TELEMETRY, 0=off, default 2 → 25 Hz), `joints_div u8` (default 0), `imu_raw_div u8` (default 0) | 3 | yes |
-| 0x05 | STATS_REQ | (empty) | 0 | replies STATS |
-| 0x10 | SET_POSTURE | `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE(IK), 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = default 25), `flags u8` (bit0 balance) | 3 | no |
-| 0x11 | SET_GAIT | `run u8` (0 stop, 1 run), `pattern u8`, `period_ms u16`, `duty u8` (/256), `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit0 head bob, bit1 tail wag, bit2 balance) | 10 | no |
-| 0x12 | SET_HEAD | `mode u8` (0 release, 1 hold), `pan a16 i16`, `tilt a16 i16`, `tail a16 i16`, `max_speed_dps u16` | 9 | no |
-| 0x13 | SET_BODY_POSE | `pitch a16 i16`, `roll a16 i16`, `dheight_mm i8`, `xshift_mm i8` | 6 | no |
-| 0x14 | SET_BALANCE | `enable u8`, `kp Q8 u8`, `kd_ms u8` (Kd in ms), `deadband_deg u8`, `max_corr_deg u8` | 5 | no |
-| 0x20 | TRICK_BEGIN | `trick_id u8`, `n_frames u8` (1..32), `loop_start u8`, `loop_end u8`, `repeats u8`, `joint_mask u16`, `flags u8` (bit0 balance, bit1 fall_ok), `end_posture u8` | 9 | yes (BUSY if playing) |
-| 0x21 | TRICK_FRAMES | `first u8`, `count u8` (1..4), then `count × 14 B` frames (3e) | 2+14n ≤ 58 | yes |
-| 0x22 | TRICK_COMMIT | `trick_id u8`, `crc16 u16` over all frame bytes | 3 | yes (CRC_MISMATCH) |
-| 0x23 | TRICK_PLAY | `trick_id u8`, `speed Q6 u8` (64 = 1×), `flags u8` (bit0 mirror) | 3 | yes (NO_TRICK, REFUSED_*) |
-| 0x24 | TRICK_STOP | `transition_ticks u8` | 1 | yes |
-| 0x30 | SET_EYES | `led_mask u8` (bits 0-5 = LEDs; 0x07 right, 0x38 left, 0x3F all), `r u8`, `g u8`, `b u8` | 4 | no |
-| 0x31 | BEEP | `n u8` (1..8), then n × (`note i8`, `dur_10ms u8`), appended to a non-blocking queue | 1+2n | no |
-| 0x38 | CAL_GET | (empty) | 0 | replies CAL_VALUES |
-| 0x39 | CAL_SET | `joint u8`, `offset a16 i16` (absolute, ±25°). Enters CALIB posture if not already in it. | 3 | yes |
-| 0x3A | CAL_SAVE | (empty): queues the EEPROM block write | 0 | yes after the write completes (about 0.3 s) |
-| 0x3B | CAL_REVERT | (empty): reloads from EEPROM | 0 | yes |
-| 0x3C | IMU_OFFSETS_SET | `ax ay az gx gy gz i16 ×6`, `save u8` | 13 | yes |
-| 0x3D | PARAM_GET | `id u8` | 1 | replies PARAM_VALUE |
-| 0x3E | PARAM_SET | `id u8`, `value i16`, `persist u8` | 4 | yes (BAD_ARG if out of range) |
-| 0x3F | EEPROM_READ | `addr u16`, `len u8` (≤ 56) | 3 | replies EEPROM_DATA |
-| 0x7E | REBOOT | `magic u16 = 0x4B49` ("KI"): restart the application by watchdog (does **not** enter the bootloader) | 2 | yes, sent before the reset |
-
-**Body → Pi**
-
-| Type | Name | Payload | Bytes |
+| Type | Name | Kind | Purpose |
 |---|---|---|---|
-| 0x80 | HELLO | `proto_major u8`, `proto_minor u8`, `fw_build u32` (git short hash), `reset_cause u8` (MCUSR bits: PORF 1, EXTRF 2, BORF 4, WDRF 8), `caps u16` (bit0 buzzer, bit1 IR, bit2 DMP, bit3 ultrasonic, bit4 eyes), `max_payload u8` (60), `trick_capacity u8` (32), `joint_count u8` (11), `config_state u8` (0 ok, 1 migrated, 2 defaulted) | 13 |
-| 0x81 | TELEMETRY | see below | 25 |
-| 0x82 | JOINTS | `tick u16`, `out a16 i16 × 11` (canonical order, after the safety stage) | 24 |
-| 0x83 | IMU_RAW | `tick u16`, `ax ay az gx gy gz i16 × 6` (raw sensor LSB) | 14 |
-| 0x84 | ACK | `seq u8`, `type u8`, `status u8` (0 OK, 1 BAD_LEN, 2 BAD_ARG, 3 BUSY, 4 UNKNOWN_TYPE, 5 CRC_MISMATCH, 6 NO_TRICK, 7 REFUSED_LOW_BATT, 8 REFUSED_FALLEN, 9 EEPROM_BUSY) | 3 |
-| 0x85 | EVENT | `code u8`, `arg i16`, `tick u16` | 5 |
-| 0x86 | CAL_VALUES | `calib a16 i16 × 16` (all 16 joint indices) | 32 |
-| 0x87 | PARAM_VALUE | `id u8`, `value i16`, `min i16`, `max i16`, `default i16` | 9 |
-| 0x88 | EEPROM_DATA | `addr u16`, `bytes[len]` | 2+len |
-| 0x89 | PONG | `token u16`, `tick u16` | 4 |
-| 0x8A | STATS | `uptime_s u32`, `overruns u16`, `max_tick_us u16`, `stack_free_min u16`, `rx_crc_err u16`, `rx_overflow u16`, `i2c_err u16`, `imu_fail u16`, `dmp_rate_hz u8` | 21 |
-| 0x8F | LOG | ASCII text, ≤ 60 B (debug builds only, `-DKILO_LOG`) | var |
+| 0x01 | HELLO_REQ | cmd | Ask for HELLO |
+| 0x02 | HEARTBEAT | goal | Keep the link alive |
+| 0x03 | PING | cmd | → PONG, for RTT |
+| 0x04 | SET_STREAM | cmd | Telemetry, JOINTS and IMU_RAW divisors |
+| 0x05 | STATS_REQ | cmd | → STATS |
+| 0x06 | PCA_READ | cmd | → PCA_COUNTS (debug and calibration checks) |
+| 0x10 | SET_POSTURE | goal E | LIMP, REST, SIT, STAND, STANCE, CALIB, ZERO + transition |
+| 0x11 | SET_GAIT | goal E | Run/stop + gait parameters |
+| 0x12 | SET_HEAD | goal E | Hold/release pan, tilt, tail + speed |
+| 0x13 | SET_BODY_POSE | goal E | Pitch, roll, height, x-shift |
+| 0x14 | SET_BALANCE | goal | Enable, Kp, Kd, dead band, clamp |
+| 0x20 | TRICK_BEGIN | cmd | Header |
+| 0x21 | TRICK_FRAMES | cmd | Up to 4 frames |
+| 0x22 | TRICK_COMMIT | cmd | CRC check |
+| 0x23 | TRICK_PLAY | cmd E | Play with speed and mirror |
+| 0x24 | TRICK_STOP | cmd | Stop |
+| 0x30 | SET_EYES | goal | LED mask + RGB |
+| 0x31 | BEEP | goal | Append up to 8 notes to the buzzer queue |
+| 0x38 | CAL_GET | cmd | → CAL_VALUES |
+| 0x39 | CAL_SET | cmd | Absolute offset for one joint |
+| 0x3A | CAL_SAVE | cmd | Queue a slot write |
+| 0x3B | CAL_REVERT | cmd | Reload from the slot |
+| 0x3C | IMU_OFFSETS_SET | cmd | Write MPU offsets (optionally persist) |
+| 0x3D | PARAM_GET | cmd | → PARAM_VALUE |
+| 0x3E | PARAM_SET | cmd | Set (optionally persist) a param |
+| 0x3F | EEPROM_READ | cmd | → EEPROM_DATA (≤ 56 B) |
+| 0x7E | REBOOT | cmd | Watchdog restart of the application (not the bootloader) |
+| 0x80 | HELLO | | Versions, build hash, reset cause, last alive tick, capabilities, epoch |
+| 0x81 | TELEMETRY | | Layout below |
+| 0x82 | JOINTS | | 11 output angles in a16 |
+| 0x83 | IMU_RAW | | Raw accel + gyro |
+| 0x84 | ACK | | seq, type, status |
+| 0x85 | EVENT | | code, arg, tick, epoch |
+| 0x86 | CAL_VALUES | | 16 calibration offsets in a16 |
+| 0x87 | PARAM_VALUE | | id, value, min, max, default |
+| 0x88 | EEPROM_DATA | | addr + bytes |
+| 0x89 | PONG | | token, tick |
+| 0x8A | STATS | | 19 B of counters |
+| 0x8B | PCA_COUNTS | | 16 × u16 OFF counts |
+| 0x8F | LOG | | Debug builds only |
 
-**TELEMETRY (0x81) payload:**
+**TELEMETRY (0x81), 26 B, 25 Hz by default:**
 
-| Off | Field | Type | Unit / meaning |
+| Off | Field | Type | Meaning |
 |---|---|---|---|
-| 0 | tick | u16 | tick counter (wraps every 21.8 min; the Pi unwraps it) |
-| 2 | pitch | i16 | a16, nose up positive |
-| 4 | roll | i16 | a16, left side up positive (convention fixed in P1) |
-| 6 | rate_pitch | i16 | a16/s (±2048 °/s) |
-| 8 | rate_roll | i16 | a16/s |
-| 10 | rate_yaw | i16 | a16/s |
-| 12 | dist_mm | u16 | last ultrasonic range; 0 = no echo |
-| 14 | batt_mv | u16 | filtered |
+| 0 | tick | u16 | Wraps every 21.8 min; the Pi unwraps it |
+| 2 | pitch | i16 a16 | Nose up +, with the legacy reflection |
+| 4 | roll | i16 a16 | Left side up + (confirmed in P1) |
+| 6 | rate_pitch / rate_roll / rate_yaw | 3 × i16 a16/s | |
+| 12 | dist_mm | u16 | 0 = no echo |
+| 14 | batt_mv | u16 | Filtered |
 | 16 | mode | u8 | 0 BOOT, 1 LIMP, 2 IDLE, 3 GAIT, 4 TRICK, 5 FALLEN, 6 RECOVERING, 7 LOW_BATT, 8 CALIB, 9 LINK_LOST |
-| 17 | owners | u8 | low nibble: leg owner (0-3), high nibble: head owner (0-3, 4 = Pi hold) |
-| 18 | flags | u16 | bit0 balance active, 1 IMU_FAULT, 2 servos powered, 3 gait active, 4 trick playing, 5 head held, 6 low batt warn, 7 link ok, 8 tick overrun since last telemetry, 9 NO_BATTERY, 10 EEPROM write pending, 11 dist fresh (new sample since last telemetry) |
-| 20 | last_rx_seq | u8 | seq of the last valid Pi frame |
+| 17 | owners | u8 | Low nibble: leg owner. High nibble: head owner (4 = Pi hold). |
+| 18 | flags | u16 | bit 0 balance active, 1 IMU_FAULT, 2 servos powered, 3 gait, 4 trick, 5 head held, 6 batt warn, 7 link ok, 8 overrun, 9 NO_BATTERY, 10 EEPROM pending, 11 dist fresh |
+| 20 | last_rx_seq | u8 | |
 | 21 | trick_frame | u8 | 0xFF = none |
 | 22 | gait_phase | u8 | φ >> 8 |
-| 23 | tick_load | u8 | max tick duration since last telemetry, units of 100 µs |
-| 24 | rx_err | u8 | CRC+overflow errors, cumulative mod 256 |
+| 23 | tick_load | u8 | Max tick time since the last telemetry, in 100 µs units |
+| 24 | rx_err | u8 | Cumulative, mod 256 |
+| 25 | epoch | u8 | Current goal epoch |
 
-**EVENT codes:** 1 BOOT (arg = reset cause), 2 FELL (arg = ±1 roll / ±2 pitch),
-3 RECOVERED, 4 RECOVERY_FAILED, 5 LOW_BATTERY (arg = level 1-3), 6
-BATTERY_OK, 7 WATCHDOG, 8 LINK_RESTORED, 9 IMU_FAULT, 10 IMU_OK, 11
-TRICK_DONE (arg = trick_id), 12 GAIT_STOPPED, 13 GOAL_REFUSED (arg = type <<
-8 | reason), 14 CONFIG_MIGRATED, 15 CONFIG_DEFAULTED, 16 EEPROM_SAVED.
-Events are queued (8 deep) and sent from `background()`. Events that happened
-during link loss are delivered once the Pi talks again.
+**TX priority.** The TX ring is 96 B. The worst single-tick burst at maximum
+stream rates is 103 B: TELEMETRY 32 + JOINTS 30 + IMU_RAW 20 + ACK 9 +
+EVENT 12. When a frame does not fit, the body drops IMU_RAW first,
+then JOINTS, then TELEMETRY. ACK and EVENT are never dropped. Events wait in
+their 8-deep queue until there is room. Drops are reported by a rate-limited `EVENT TX_DROPPED`.
 
-**Params** (ids are stable; full list in `protocol/spec.toml`; examples):
-`WATCHDOG_MS` (500), `XFADE_TICKS` (10), `SLEW_MAX_A16` (160), `FALL_DEG` (75),
-`BATT_WARN_MV` (6900), `BATT_LOW_MV` (6600), `BATT_CRIT_MV` (6300),
-`BAL_KP_Q8`, `BAL_KD_MS`, `BAL_DB_A16`, `BAL_MAX_A16`, `HEAD_HOLD_MS` (2000),
-`US_PERIOD_TICKS` (4), `L1_Q2`, `L2_Q2`, `LB_MM`, `W_MM`, `BOB_A16`, `WAG_A16`,
-`LEGACY_GAIN_j_ROLL/PITCH`.
+**Watchdog timing.**
+- The Pi's serial writer thread sends `HEARTBEAT` whenever it has sent nothing
+  for 100 ms. To stop a hung mind from masking itself, it does this only while
+  the asyncio loop has proved alive within the last 1 s (§5).
+- The body stops motion at 0.5 s and moves to REST at 1.5 s (3g).
+- The Pi treats the body as lost after 300 ms without telemetry, and polls
+  `HELLO_REQ` at 2 Hz until it answers.
 
-### Rates and bandwidth
+**Boot and reboot detection.** On every boot the body sends an unsolicited
+`HELLO` (with `reset_cause` from 3a, `last_alive_tick`, build hash, protocol
+version and current epoch) and `EVENT BOOT`. The Pi treats an unsolicited HELLO,
+or a tick that goes backwards, as a reboot. It then:
 
-Wire size = payload + 6 (type, seq, CRC × 2, COBS overhead, delimiter).
-
-| Direction | Stream | Rate | Wire B | B/s |
-|---|---|---|---|---|
-| Body → Pi | TELEMETRY | 25 Hz default, 50 Hz max | 31 | 775 / 1550 |
-| | JOINTS | off default, 50 Hz max | 30 | 1500 |
-| | IMU_RAW | off default, 50 Hz max | 20 | 1000 |
-| | EVENT / ACK / LOG | bursty | ≤ 66 | about 500 worst |
-| | **worst case total** | | | **about 4.5 kB/s = 18% of 25 kB/s** |
-| Pi → body | goal refresh (GAIT 16, HEAD 15, POSE 12, EYES 10) | 5 Hz + on change; worst 50 Hz each | 53 | 265 / 2650 |
-| | HEARTBEAT | 10 Hz | 6 | 60 |
-| | trick upload (stop-and-wait, ≤ 1 frame per 10 ms) | burst | 64 | ≤ 6400 |
-| | **worst case total** | | | **about 9.1 kB/s = 36%** |
-
-Single-frame wire time: 66 B max = 2.6 ms; telemetry = 1.2 ms.
-
-### Watchdog timing
-
-- The Pi sends `HEARTBEAT` every 100 ms. Any frame counts.
-- The body declares link loss at 500 ms, after 5 missed heartbeats. Actions are
-  in 3g.
-- The Pi declares the body lost after 300 ms without telemetry (at the 25 Hz
-  default that is 7 missed frames). It then marks state stale and keeps trying
-  `HELLO_REQ` at 2 Hz.
-
-### Boot and reboot detection
-
-On every boot the body sends `HELLO` (unsolicited) and `EVENT BOOT`, then starts
-telemetry at the default rate. The Pi treats an unsolicited `HELLO`, or a
-`tick` that goes backwards, as a body reboot. It then:
-
-1. logs `reset_cause` (WDRF = firmware bug, BORF = power problem);
-2. checks `proto_major` (mismatch → refuse to drive and offer to flash);
-3. re-sends stream settings and any non-default params it owns;
+1. logs the cause;
+2. checks `proto_major`, and refuses to drive and offers to flash on a mismatch;
+3. re-sends stream settings and non-default params;
 4. invalidates its trick cache;
-5. re-sends current goals.
+5. adopts the epoch and re-plans its goals.
 
-### Flashing from the Pi over the same UART
-
-- The NyBoard runs the Uno optiboot at **115200**. Optiboot only starts on an
-  **external reset** (`EXTRF`). A watchdog reset (`REBOOT`) goes straight back
-  to the application, so a reset pulse on the RESET line is required.
-- Pi GPIO4 (header pin 7) lands on the NyBoard's DTR/reset line. On the USB
-  adapter's socket that line is normally AC-coupled through a capacitor to
-  RESET; whether the header path has the capacitor is unverified (open question
-  8.7). Driving GPIO4 **low for 50 ms then high** produces a reset in either
-  case: through a capacitor the falling edge resets the chip, and with a direct
-  connection the low level holds reset and releasing it starts the bootloader.
-- In idle, GPIO4 is an output held **high** (`gpio=4=op,dh` in `config.txt`),
-  so Pi boot activity or a floating pin cannot reset the body.
-- **1-Wire must stay off.** The `w1-gpio` overlay claims GPIO4 by default and
-  periodically drives 480 µs low reset pulses while searching the bus. Each
-  pulse resets the NyBoard, and it also stops our tool from claiming the pin.
-
-Flash sequence (`kilo flash`, section 5):
-
-1. Tell the mind daemon to release `/dev/ttyAMA0` (lock file
-   `/run/kilo/serial.lock`).
-2. Build (`arduino-cli compile --fqbn arduino:avr:uno body/`). On a Pi 2 a full
-   build takes about 1-3 min **(est.)**, so cache the build directory.
-3. `gpioset` (libgpiod) GPIO4 low 50 ms → high.
-4. Within about 200 ms, run
-   `avrdude -p m328p -c arduino -P /dev/ttyAMA0 -b 115200 -D -U flash:w:body.ino.hex:i`.
-   Optiboot waits about 1 s after reset.
-5. Reopen at 250000 and wait ≤ 3 s for `HELLO` with `fw_build` equal to the
-   built hash. Success means the new firmware booted. Retry the reset+avrdude
-   once if sync fails.
-
-The legacy OpenCat hex is kept in `mind/firmware/opencat-legacy.hex`, so the
-same tool can roll back (`kilo flash --legacy`). The legacy firmware talks at
-115200 using the token protocol, and its EEPROM is untouched (3b).
+Flashing over this same UART (GPIO4 reset, optiboot at 115200, verification by
+HELLO build hash) is in Appendix F.
 
 ---
 
 ## 5. Mind software design (Python on the Pi)
 
-Constraints: Pi 2 B, 4 × Cortex-A7 at 900 MHz, 1 GB RAM, Raspbian 13
-(Python 3.13), armv7 32-bit wheels. Keep dependencies to `pyserial`, `numpy`,
-`opencv-python-headless` or apt `python3-opencv`, `picamera2` (apt), and
-optionally `py_trees`.
+The mind runs on the Pi 2 B: 4 × Cortex-A7 at 900 MHz, 1 GB RAM, Raspbian 13
+with Python 3.13. Dependencies are pyserial, numpy, OpenCV (apt
+`python3-opencv`) and picamera2 (apt). The package is `mind/kilo/`; its layout
+and the CLI are in Appendix G.
 
-### Package layout
+**Serial link.** `SerialLink` owns `/dev/ttyAMA0` at 250000 with
+`ASYNC_LOW_LATENCY`, and runs three threads:
 
-```
-mind/
-  pyproject.toml
-  kilo/
-    protocol_gen.py     # GENERATED from protocol/spec.toml: type ids, struct formats, enums, params
-    codec.py            # COBS, CRC (binascii.crc_hqx), encode/decode to dataclasses
-    link.py             # SerialLink: port, reader thread, framing, acks/retries, heartbeat, stats
-    body.py             # BodyState (latest telemetry, derived), BodyClient (goal API, desired-state refresh)
-    tricks/
-      model.py          # Trick, Frame dataclasses, JSON/YAML I/O, mirror, time scaling, validation
-      legacy_import.py  # parse src/InstinctNybble.h → tricks/*.json (behaviours + postures)
-      library/          # *.json tricks
-      uploader.py       # chunked upload + commit, cache by (trick_id, crc)
-    behaviour/
-      bt.py             # minimal behaviour-tree engine
-      drives.py         # personality drives + utility selection
-      trees/            # explore.py, rest.py, greet.py, startle.py, play.py, ...
-    perception/
-      ultrasonic.py     # filtering, approach/recede detection
-      imu_events.py     # pick-up, tap/pet (accel spikes), tilt
-      camera.py         # capture process (picamera2 or V4L2) + detectors
-      audio.py          # later
-    log.py              # telemetry/event logger (binary-framed or JSONL, rotating)
-    daemon.py           # `kilo run`: owns the link, runs the mind, exposes a UNIX socket
-    cli.py              # `kilo ...` subcommands
-    flash.py            # build + reset + avrdude + verify
-  tests/                # pytest: codec vs vectors.json, tricks, importer, BT, link against the virtual body
-  firmware/opencat-legacy.hex
-  systemd/kilo-mind.service
-```
+- **Reader:** splits on 0x00, decodes COBS, checks the CRC, parses into
+  dataclasses with the generated `struct` formats, and hands the messages to
+  the asyncio loop with `call_soon_threadsafe`.
+- **Writer:** drains an outbound queue and assigns `seq`. It sends `HEARTBEAT`
+  after 100 ms of silence, but only while the asyncio loop's liveness stamp is
+  less than 1 s old. A stalled mind therefore trips the body's watchdog instead
+  of being kept alive by the thread.
+- **Logger:** writes every frame with a monotonic timestamp to a rotating file,
+  off the asyncio loop, so disk stalls never delay control.
 
-### Serial link
+`request()` awaits the matching ACK with a 50 ms timeout and 3 retries, which
+is safe because of body-side de-duplication.
 
-`SerialLink` opens `/dev/ttyAMA0` at 250000 with `ASYNC_LOW_LATENCY` and owns
-one reader thread.
+**Desired-state goals and epoch.** `BodyClient` stores the desired posture,
+gait, head, pose, balance and eyes. It sends a goal on change and re-sends all
+active goals at 5 Hz, each stamped with the latest epoch from telemetry.
+Behaviours call methods like:
 
-- The reader splits on 0x00, decodes COBS, checks CRC, and parses into
-  dataclasses using the generated struct formats (`struct.Struct('<HhhhhhHHBBHBBBBB')`
-  for telemetry, for example).
-- Messages go to the asyncio loop with `call_soon_threadsafe`.
-- `send(msg)` assigns `seq`. `request(msg, expect=ACK)` awaits the matching ack
-  with a 50 ms timeout and 3 retries.
-- A heartbeat task runs at 10 Hz.
-- Stats: CRC errors, seq gaps, RTT from `PING`.
-- `on_hello` triggers the reboot handling in section 4.
+- `body.walk(stride=30, turn=0, pattern=TROT)`
+- `body.look(20, -10)`
+- `await body.play("hi", mirror=True)`, which resolves on `TRICK_DONE`
+- `body.beep([...])`
 
-Threads plus asyncio is chosen over `pyserial-asyncio` to keep dependencies
-minimal. The reader thread is about 60 lines.
+On `FELL`, `WATCHDOG` or `LOW_BATTERY`, the client **clears all desired motion
+goals**, adopts the event's epoch, and notifies the behaviour layer. Nothing
+from before the event is replayed.
 
-**Desired-state goals.** `BodyClient` stores the current goals (posture, gait,
-head, pose, balance, eyes). Changing one sends it immediately, and a 5 Hz task
-re-sends all active goals. Callers write
-`body.walk(stride=30, turn=0, pattern=TROT)`, `body.look(pan=20, tilt=-10)`,
-`body.stop()`, `body.posture(SIT)`, `await body.play("hi", mirror=True)`
-(resolves on `TRICK_DONE`) and `body.eyes(0x3F, 0, 0, 40)`. Behaviours never
-build frames.
-
-### Body-state model
-
-`BodyState` holds:
-- the last telemetry, with time unwrapped to a monotonic `t_body`;
+**Body state.** `BodyState` holds:
+- the latest telemetry, with time unwrapped;
 - link health;
-- derived quantities: `upright`, `moving`, `fallen`, filtered distance with
-  approach velocity, battery percentage (2S Li-ion curve, from voltage at rest),
-  an `is_stale` flag, and the last N events;
-- a 10 s ring of telemetry for detectors (numpy arrays).
+- derived values: upright, moving, fallen, filtered distance with approach
+  speed, and battery percentage from a resting 2S curve;
+- the last events;
+- a 10 s numpy ring buffer for detectors.
 
-### Behaviour layer
+**Behaviour: a minimal behaviour tree under a utility drive selector, ticked at
+10 Hz.**
 
-**Recommendation: a minimal behaviour tree, ticked at 10 Hz, with a
-utility-scored "drive" selector at the root.**
-
-- Personality needs many small reactive behaviours (startle at a sudden
-  approach, follow a face, nap when bored, greet). They must preempt each other
-  cleanly and be composable and reusable. A BT gives exactly that:
-  - Selectors re-check higher-priority conditions every tick, so "obstacle
-    close" or "fallen" interrupts "explore" without hand-written transitions.
-  - Sequences express multi-step acts (look, approach, sit, wag).
-  - Decorators handle cooldowns, timeouts and probability.
-- A hierarchical state machine needs explicit transitions between every pair of
-  states that can interrupt each other. With 10-20 behaviours that turns into a
-  tangle, and adding a behaviour means touching many transitions.
-- Pure BTs are deterministic, though, and a pet should not be.
-- So the root is a **utility selector over drives**:
-  - **energy**: drains with motion, recovers while resting, tied to battery;
-  - **curiosity**: grows when idle, drops while exploring;
-  - **sociability**: grows when alone, drops when a face is seen or Kilo is
+- **Why a behaviour tree.** Personality is many small reactive behaviours
+  (startle, follow a face, nap, greet, explore) that preempt one another.
+  Selectors re-check higher-priority conditions every tick, sequences express
+  multi-step acts, and decorators give cooldowns, timeouts and chance. A
+  hierarchical state machine needs a transition for every interruptible pair,
+  which tangles at 10-20 behaviours.
+- **Why a utility selector.** A pure behaviour tree is deterministic; a pet
+  should not be. The root therefore scores top-level behaviours from **drives**:
+  - energy: drains with motion, recovers at rest, tied to battery;
+  - curiosity: grows when idle;
+  - sociability: grows when alone, drops when a face is seen or Kilo is
     petted;
-  - **arousal**: spikes on a startle, then decays.
+  - arousal: spikes on a startle, then decays.
 
-  Each top-level behaviour has a score function of the drives and percepts plus
-  a little noise and a personality weight vector. The highest score wins, with
-  hysteresis so it does not flip every tick. Personality traits are the weight
-  vectors, saved in a YAML file the owner can edit.
-- Safety-style responses (fallen → wait for the body's recovery; low battery →
-  rest and shut down) sit in a higher-priority branch above the utility
-  selector.
+  Percepts, personality weights from an editable YAML file, and a little noise
+  also feed the scores, with hysteresis. Safety branches (fallen, low battery,
+  shutdown) sit above the selector.
+- **Engine.** The engine is in-house, ≈300 lines: Sequence, Selector, Parallel,
+  Cooldown, Timeout, Action and Condition. Each tick's active path is logged.
 
-The engine is in-house, about 300 lines (Sequence, Selector, Parallel,
-Inverter, Cooldown, Timeout, Action/Condition with RUNNING). It stays readable
-for learning, and it is easy to log every tick's active path (`log.py` records
-it). `py_trees` is an acceptable swap if visualisation matters more than
-minimalism.
+**Tricks.**
+- Tricks are JSON keyframes named by joint, with a model, validation, mirror
+  and time-scaling, and are uploaded with caching by `(trick_id, crc)`.
+- The first-version library is imported from `src/InstinctNybble.h`:
+  - basics: `sit`, `rest`, `up`, `str` (stretch), `balance`;
+  - social: `hi`, `wsf` (wash face), `ck` (check around), `snf` (sniff),
+    `scrh` (scratch), `pee`, `pu` (push-up), `buttUp`.
 
-### Perception adapters (realistic on a Pi 2 B)
+  Athletic tricks (backflip, roll, jump) are not ported. `rc` stays a PROGMEM
+  reflex on the body.
+- Import rules:
+  - `dur = ceil(maxΔ / (speed/4) · LEGACY_STEP_MS / 20)`, where
+    `LEGACY_STEP_MS` (≈5-6 ms **(est.)**) is calibrated by filming both
+    firmwares doing `hi`.
+  - Legacy speed 0 ("jump to") → `dur = 1`; the body's slew limit absorbs the
+    jump.
+  - `hold = delay·50/20`.
+  - `loopCycle` maps to the loop fields. Joints 3-7 are dropped.
+  - On mirror, `expectedRollPitch[0]` (roll) is negated.
+  - `FALL_OK` is set for tricks whose expected or reached tilt exceeds 45°.
+- Authoring uses a curses keyframe editor that jogs joints live. G41 servos
+  have no position feedback, so poses cannot be shaped by hand.
 
-- **Ultrasonic** (from telemetry, 12.5 Hz): median-of-3 filter, approach speed
-  from the slope, events `near(<15 cm)`, `approaching(>20 cm/s)`, `clear`.
-- **IMU events** (from 50 Hz telemetry with `IMU_RAW` on): picked up (sustained
-  accel change with legs unloaded), tap/pet (short accel spike while still),
-  tilted.
-- **Camera.** The camera runs in its own process (multiprocessing) to use a
-  second core and avoid the GIL. It sends compact detections (bbox, centre,
-  confidence, timestamp) over a pipe. Capture with `picamera2` (libcamera,
-  CSI camera) at 320×240 YUV420, using only the Y plane; a USB webcam uses
-  OpenCV V4L2 at 320×240.
+**Perception.**
+- **Ultrasonic** (12.5 Hz, from telemetry): median of 3, approach speed, and
+  `near`, `approaching` and `clear` events.
+- **IMU:** picked up, tap/pet, tilted.
+- **Camera:** runs in its own process. It captures 320×240 Y-plane frames with
+  picamera2 (CSI) or OpenCV V4L2 (USB) and sends detections over a pipe. Rates
+  on a Pi 2 B **(est., measured in P4)**:
 
-  Expected rates on a Pi 2 B **(est., measure in P4)**:
+  | Detector | Rate |
+  |---|---|
+  | Motion differencing (160×120) | 15-25 fps |
+  | HSV colour blob | 10-20 fps |
+  | Haar frontal face (320×240) | 3-6 fps |
+  | MobileNet-SSD | ≈0.5-1 fps; only for slow "who is there" checks |
 
-  | Detector | Resolution | Rate |
-  |---|---|---|
-  | Motion (frame differencing + blur) | 160×120 | 15-25 fps |
-  | Colour blob (HSV threshold + moments, e.g. a toy) | 160×120 | 10-20 fps |
-  | Haar frontal face (`detectMultiScale` with scaleFactor 1.2, minSize 30) | 320×240 | 3-6 fps |
-  | DNN face/person (MobileNet-SSD) | | about 0.5-1 fps; only for slow "who is there" checks, not tracking |
+  Head tracking is a P-loop on the detection centre → `SET_HEAD`, so expect
+  gentle tracking, not snapping.
+- **Microphone (later):** loudness and onset detection only.
 
-  Head tracking closes the loop on the Pi with a P-controller on the bbox
-  centre → `SET_HEAD` target at the detector rate, with the body slew-limiting.
-  At 5 fps that is a 200 ms loop, so expect gentle tracking, not snapping.
-- **Microphone (later):** USB mic, RMS loudness and onset detection
-  (clap/name-call level) at 20 Hz with numpy. Keyword spotting is a stretch on a
-  Pi 2.
+**Logging.** Frames go to `~/kilo-logs/*.kilolog` (≈1 MB/h at 25 Hz), replayable
+through the codec. A JSONL behaviour log records drives and the active path.
+`kilo log plot` produces offline plots. Together these close the loop for
+learning control: change a gain, walk, plot.
 
-### Logging
-
-`log.py` writes every received frame (raw decoded bytes + Pi monotonic
-timestamp) to `~/kilo-logs/YYYYMMDD-HHMMSS.kilolog`. The format is a length
-prefix + timestamp + frame; logs are replayable through the same codec. At
-25 Hz telemetry plus events this is about 1 MB/h. It also writes a JSONL
-behaviour log (active BT path, drive values, chosen behaviour) at 1 Hz and on
-change. `kilo log plot FILE --fields pitch,roll,corr` draws matplotlib plots
-off-robot. That covers the control-learning loop: change a gain, walk, plot the
-step response.
-
-### CLI (`kilo`)
-
-`kilo` talks to the daemon over `/run/kilo/kilo.sock` (JSON lines) if it is
-running, else it opens the serial port directly.
-
-| Command | Purpose |
-|---|---|
-| `kilo status` / `kilo monitor` | HELLO info, stats; live curses telemetry view |
-| `kilo posture rest\|sit\|stand\|limp` | |
-| `kilo walk --pattern trot --stride 30 --turn 0 --period 500` ; `kilo stop` | gait goals; `--keys` drives with arrow keys |
-| `kilo look PAN TILT [--tail T]` ; `kilo eyes RRGGBB [--side left]` ; `kilo beep NOTE:DUR ...` | |
-| `kilo trick list\|play NAME [--mirror] [--speed 1.5]\|import-legacy src/InstinctNybble.h` | |
-| `kilo trick edit NAME` | Curses keyframe editor. Select a joint, jog it ±1°/±5° (the robot shows the pose live via a 1-frame trick), capture a frame, set dur/hold/easing, preview from frame N, mirror, save JSON. The G41 servos have no position feedback, so poses cannot be authored by moving limbs by hand. |
-| `kilo cal` | Interactive joint calibration (CAL_SET/SAVE/REVERT, shows a reference image), plus `kilo cal imu` (Pi-side offset iteration using IMU_RAW with the robot flat; writes IMU_OFFSETS_SET) |
-| `kilo param get\|set\|list [--persist]` | Live tuning |
-| `kilo flash [--legacy] [--no-build]` | Section 4 |
-| `kilo run` | Start the mind (normally via systemd `kilo-mind.service`) |
-
-Moving IMU calibration to the Pi removes `CalibrateAccel/Gyro` (about 1 KB) from
-the body. The Pi has the time and the floats.
-
-### Flashing tool
-
-`flash.py`:
-
-1. `arduino-cli compile --fqbn arduino:avr:uno --build-path ~/.cache/kilo-build body/`
-2. Run the size check (the budget harness, section 6). Refuse to flash if over
-   budget.
-3. Embed the git hash: `--build-property compiler.cpp.extra_flags=-DKILO_BUILD=0x<hash>`.
-4. Release the port, reset via GPIO4, run avrdude, verify via HELLO (section 4).
-
-All of it is logged, and it works over SSH.
+**Flashing tool.** `kilo flash` builds with arduino-cli, runs the size/symbol
+harness and refuses to flash if it fails, embeds the git hash, releases the
+port, resets the body over GPIO4, runs avrdude, and verifies by HELLO. Details
+are in Appendix F.
 
 ---
 
 ## 6. Testing and verification strategy
 
-**1. Host unit tests for body core** (`body/test/`, `make test`). Build with
-`g++ -std=c++11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined`, plus
-the bare-type lint (3, layout rules).
+**Host unit tests (body core).** `body/test/` builds `core/` with
+`g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined`, plus the
+bare-type lint. It covers:
+- fx accuracy;
+- the per-robot legacy transfer function vs a transcription of the legacy float
+  code, fed the dumped EEPROM;
+- IK round trips;
+- gait phase, swing order and continuity;
+- keyframe timing;
+- arbitration and crossfades;
+- the balance closed-loop sign test;
+- reflex timelines, including epoch bumps;
+- config-slot torn-write recovery;
+- the codec against vectors, plus fuzzing.
 
-| Unit | Tests |
-|---|---|
-| fx | atan2 vs `std::atan2` over a 1000×1000 grid incl. axes and zero (≤ 0.02°); sin over all a16 (≤ 2e-4); isqrt exact for 0..2³²−1 sampled + edges |
-| joints | **Differential vs legacy:** a C++ transcription of today's `calibratedPWM`+`writeAngle` float math (stored counts 11000/60, PROGMEM tables) against the new integer path, for all 16 joints × every whole degree in limits × calib −10..10. Counts must match exactly, or within ±1 where float rounding differs (counts listed). Plus limit clamping and slew. |
-| ik | FK(IK(p)) round trip on a 1 mm grid (≤ 0.25 mm); angles vs a double reference (≤ 0.25°); reach clamp behaviour; FK of legacy postures plausible (feet below shoulders, L/R symmetric). |
-| gait | Per-leg phase offsets; stance foot speed constant within 2%; continuity (no output step > 3°/tick at default params); start/stop ends with all feet down; turn asymmetry sign; period change mid-cycle has no phase jump. Golden trajectories generated by a Python float reference (`body/test/ref/gait_ref.py`). |
-| keyframe | Exact tick timing of dur/hold; linear and cosine endpoints exact; −128 "unchanged"; loops and repeats; mirror; speed scaling; reject malformed headers. |
-| arbiter | Priority resolution per joint mask; crossfade length and monotonicity; head layer gating; balance gating per owner. |
-| balance | Step response in a toy simulation (body pitch = integrated correction with lag) is stable with no overshoot beyond 20% at default gains; deadband; saturation; slew. |
-| reflex | Fall timing (6 ticks), hysteresis, retries, recovery mirror by roll sign; battery filter and thresholds with synthetic sag spikes (a 200 ms dip must not trip LOW); link watchdog timeline. |
-| codec | All `protocol/vectors.json` entries both ways; fuzz with random/truncated/bit-flipped streams (libFuzzer or a 10⁶-iteration random loop under ASan): no crash, no accept of corrupted frames in practice, resync on the next 0x00. |
-| attitude | Quaternion → pitch/roll vs float reference for random unit quaternions (≤ 0.1°). |
+Appendix H has the per-unit criteria.
 
-**2. Exact-semantics run on AVR.** The same tests compiled with avr-g++ and run
-under `simavr` (Debian package), for fx/ik/gait/joints/codec. This catches
-int-promotion and 16-bit `int` bugs the host build cannot. It also yields real
-cycle counts for the tick budget in 3a, replacing the estimates.
+**Exact AVR semantics.** The same tests are built with avr-g++ and run under
+simavr. This catches 16-bit `int` and promotion bugs, and gives real cycle
+counts that replace the estimates in 3a.
 
-**3. Virtual body.** A host executable `body/test/vbody` links `core/` with stub
-HALs: a fake IMU from a scripted attitude, a fake ultrasonic, a servo array
-recording counts. It exposes the real protocol on a pty (`openpty`). The mind's
-`SerialLink`, CLI and behaviour trees run against it unchanged, on the
-desktop, in CI and on the Pi. Integration tests:
-- link watchdog → REST;
-- trick upload/play/TRICK_DONE;
-- reboot detection;
-- goal refusal on low battery.
+**Virtual body.** `body/test/vbody` links `core/` with stub HALs (scripted IMU,
+fake ultrasonic, recorded servo counts) and speaks the real protocol on a pty.
+The mind runs against it unchanged on a desktop or the Pi. Integration tests
+cover:
+- watchdog stages;
+- epoch refusal after a simulated fall;
+- trick upload and play;
+- ACK de-duplication;
+- reboot detection.
 
-**4. Python tests** (pytest, run on desktop and Pi):
-- codec vs `vectors.json`;
-- hypothesis round-trip of every message type;
-- CRC check value;
-- legacy importer on `src/InstinctNybble.h` (all 25 behaviours + postures
-  import, frame counts ≤ 32, `cmh` = 22 frames);
-- trick mirror/time-scale;
-- BT engine semantics;
-- link retry logic with an injected lossy transport.
+**Python tests.** pytest covers:
+- the codec vs `protocol/vectors.json`;
+- property-based round trips of every message;
+- the CRC check value;
+- the legacy importer, including frame counts, speed-0 handling and mirror;
+- the behaviour-tree engine;
+- link retries over a lossy fake transport;
+- the clearing of desired goals on events.
 
-**5. Protocol single source.** `protocol/gen.py` generates both
-`protocol_gen.h` and `protocol_gen.py` from `spec.toml`. The generated files are
-committed, so the Arduino build needs no Python. CI regenerates them and fails
-on diff.
+**Protocol single source.** `gen.py` output is committed. CI regenerates it and
+fails on any diff.
 
-**6. Size harness** (`tools/size.sh`, also run by `kilo flash`):
-- compiles `body/` with arduino-cli and parses flash/RAM;
-- runs `avr-nm --size-sort -C` and writes a per-module breakdown, grouped by
-  object file, to `build/size-report.txt`;
-- checks `body/budget.json` (ceilings per phase, e.g. P1: flash ≤ 16 KB,
-  globals ≤ 1700 B) and fails above the ceiling;
-- checks a forbidden-symbol list: `HardwareSerial`, `TwoWire`, `__addsf3`,
-  `__mulsf3`, `pulseIn`, `malloc`. If any is linked, the build fails. This
-  enforces the "no float, no Wire, no pulseIn" decisions mechanically.
+**Size and symbol harness.** `tools/size.sh` compiles `body/` and checks
+`budget.json`. It fails if any forbidden symbol is linked: `HardwareSerial`,
+`TwoWire`, `__addsf3`, `__mulsf3`, `pulseIn`, `malloc`, or `IRrecv`. If the
+sanctioned float IK fallback is ever used, the float symbols are allowed
+explicitly in `budget.json`. A per-object size report is written on every
+build.
 
-**7. Hardware-in-the-loop checklist on Kilo** (run per phase; results are noted
-in the merge commit message):
-
-| # | Check | Pass criterion |
-|---|---|---|
-| H1 | Flash from Pi; HELLO with matching build and `reset_cause` = EXTRF | 3/3 |
-| H2 | Calibration migration: compare `CAL_VALUES` to the legacy EEPROM bytes 16..31 via EEPROM_READ; `calib` posture looks identical to the old firmware's `kcalib` (photo side by side) | exact values, visual match |
-| H3 | Each joint +10° then −10° from STAND, one at a time | moves the documented direction, returns |
-| H4 | Limits: command beyond limit | clamped (JOINTS shows the limit) |
-| H5 | Watchdog: `kill -STOP` the daemon while standing | REST within 1.5 s, LIMP after 10 s more; recovers on resume |
-| H6 | AVR WDT: debug param that hangs the loop | reboot, no limb jump, HELLO with WDRF |
-| H7 | Fall: tip Kilo onto each side by hand | FELL event, `rc` mirrored correctly, RECOVERED in ≥ 4/5 tries |
-| H8 | Battery: bench supply 8.4 → 6.0 V in 0.1 V steps, 10 s each | WARN/LOW/CRIT at threshold ±0.1 V per the meter; no trips from motion sag at 7.2 V while trotting |
-| H9 | Timing: 10 min of trot with 50 Hz telemetry + JOINTS | `max_tick_us` < 12000, 0 overruns, `stack_free_min` > 150 B |
-| H10 | Serial soak: 30 min, max streams + 5 Hz goals | `rx_crc_err` = 0 (or explained by eye updates), Pi seq gaps < 0.1% |
-| H11 | Ultrasonic: box at 10 / 30 / 100 cm | within ±1 cm / ±2 cm / ±4 cm |
-| H12 | Eyes: red/green/blue/white each side | correct LEDs and colours |
-| H13 | Balance: Kilo standing on a board tilted 0→10° pitch and roll | body stays within 3° of level after 1 s |
-| H14 | Walk (P2): 2 m straight on the floor at default walk/trot | lateral drift < 20 cm **(target, est.)**; turn in place 360° < 20 s; 30 s trot without falling |
-| H15 | Fallback: `kilo flash --legacy`; old firmware works with its calibration | old `kup`, `kwkF` work |
+**Hardware-in-the-loop on Kilo.** Checklist H1-H15 (Appendix H) runs per phase,
+and the results go in the merge commit message. Highlights:
+- H1: flash gives `FLASHED`;
+- H2: PCA counts match legacy;
+- H5: the watchdog timeline;
+- H6: a hang gives `WARM_UNEXPECTED` with no limb jump;
+- H7: fall recovery;
+- H9: tick timing.
 
 ---
 
 ## 7. Phased plan
 
-Order principle: get Kilo **standing and talking under Pi control in P0**,
-**doing everything it does today in P1**, and **walking under Pi control in
-P2**, while the old firmware stays one command away (`kilo flash --legacy`).
-`OpenCat.ino` and `src/` are deleted only after P2's acceptance passes
-("cutover").
+Order: talking and standing under Pi control (P0), today's chosen tricks (P1),
+walking (P2). `kilo flash --legacy` stays available throughout. `OpenCat.ino`
+and `src/` are deleted after P2 is accepted.
 
-### P0: protocol + skeleton body
-
+**P0: protocol + skeleton body.**
 - **Deliverables:**
-  - `protocol/` (spec, generator, vectors).
-  - `body/` with: UART/COBS/CRC; HAL (I2C, PCA9685 with read-back, DMP read for
-    pitch/roll telemetry, ADC, EEPROM block + migration + writer); PROGMEM
-    postures with plain interpolation; HELLO/TELEMETRY/EVENT/ACK/STATS;
-    calibration and param messages; link watchdog → REST; battery reflex; AVR
-    WDT.
-  - `mind/`: codec, `SerialLink`, `BodyClient` (posture only), CLI
-    `status/monitor/posture/cal/param/flash`.
-  - Host tests for joints (legacy differential), codec, reflex (battery,
-    watchdog). Size harness. Virtual body.
-- **Removed from flash vs today:**
-  - the token protocol and parser (`io.h`, `reaction.h`, `newCmd` 468 B RAM);
-  - the skill system and I2C-EEPROM skill storage;
-  - the setup-sketch paths;
-  - TaskQueue;
-  - ultrasonic reactions and the RGB effects engine;
-  - IR (pending decision);
-  - `HardwareSerial`/Print, `Wire`/I2Cdev, `beep()` floats;
-  - the float library, if the integer attitude path lands in P0, else in P1.
-- **Acceptance:** H1, H2, H3, H4, H5, H6, H8, H10. Flash ≤ 12 KB. Kilo goes
-  REST → STAND → SIT → REST from `kilo posture` on the Pi.
+  - The `protocol/` spec, generator and vectors.
+  - Body:
+    - UART, COBS, CRC;
+    - I2C, PCA9685 with read-back, DMP init (pre-watchdog) and FIFO read;
+    - the **fx library and integer attitude** (no float anywhere);
+    - the `.noinit` reset record;
+    - config slots with legacy import;
+    - built-in postures;
+    - HELLO, TELEMETRY (with epoch), EVENT, ACK with de-dup, STATS,
+      PCA_COUNTS;
+    - calibration, params, `EEPROM_READ`;
+    - the two-stage watchdog;
+    - battery reflex with hysteresis;
+    - the hardware watchdog.
+  - Mind: codec, `SerialLink` (three threads), `BodyClient` (postures +
+    epoch), CLI `status/monitor/posture/cal/param/flash`.
+  - Host tests, virtual body, size harness.
+  - **Task: dump the legacy EEPROM 0..282 and commit
+    `docs/kilo-eeprom-legacy.md`.**
+- **Removed vs today:**
+  - the token protocol and parser, and `newCmd` (468 B RAM);
+  - the skill system and I2C-EEPROM skills;
+  - setup-sketch paths, TaskQueue and ultrasonic reactions;
+  - the RGB effects engine;
+  - the IR remote (≈2 KB, 147 B RAM, 20 kHz ISR);
+  - HardwareSerial, Print, Wire and I2Cdev;
+  - the float library, including float quaternion maths (≈1.3 KB) and
+    `beep()` floats.
+- **Acceptance:** H1-H6, H8, H10. Flash ≤ 12 KB, globals ≤ 1540 B. REST →
+  STAND → SIT → REST from the Pi.
 
-### P1: motor loop, arbitration, tricks, balance (parity with today's tricks)
-
+**P1: motor loop, arbitration, tricks, balance.**
 - **Deliverables:**
-  - The fixed 50 Hz tick as specified.
-  - Owners + crossfade + head layer + safety stage.
-  - Keyframe store/player/upload, mirror, speed.
-  - Balance controller (joint-space mode).
-  - Fall detection + `rc` recovery.
-  - Integer attitude.
-  - Ultrasonic via PCINT, eyes, buzzer queue (if kept).
-  - Mind: trick model, legacy importer for all Nybble behaviours and postures,
-    uploader with cache, `kilo trick ...`, keyframe editor v1, logger.
-  - Optional baseline: legacy `wkF` subsampled to 22 frames as a looping trick,
-    to compare against P2.
-- **Removed:** DMP float math (`dmpGetYawPitchRoll`, helper_3dmath float types),
-  if not already done.
-- **Acceptance:** H7, H9 (on a looping trick), H11, H12, H13. Every imported
-  trick plays and looks right to the owner side by side with the old firmware.
-  Attitude matches the old `ypr` within 1° static (A/B flash). Flash ≤ 16 KB.
+  - the full tick;
+  - owners, crossfade, head layer, safety stage, goal epoch;
+  - keyframe store, player and upload, with mirror and speed;
+  - joint-space balance;
+  - the fall reflex with `rc`;
+  - ultrasonic via PCINT, eyes;
+  - the buzzer (`BEEP` queue + reflex chirps);
+  - mind: trick model, importer, the first-version library, uploader, editor,
+    logger.
+  - Optional baseline: legacy `wkF` subsampled to 22 frames as a looping
+    trick.
+- **Acceptance:** H7, H9 (looping trick), H11-H13. Each first-version trick
+  matches the old firmware side by side, in the owner's judgement. Attitude
+  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 16 KB.
 
-### P2: gait generator + IK (walking under Pi control)
-
-- **Deliverables:**
-  - Measured link lengths and body dimensions (open question 8.1).
-  - `fx` tables, IK, gait generator, STANCE posture, geometric balance through
-    IK, head bob / tail wag.
-  - Mind: `kilo walk` with keyboard driving, gait parameter presets per pattern.
-- **Acceptance:** H14, H9 while trotting, IK/gait host tests including simavr.
-  WALK, TROT and CRAWL each start and stop cleanly with no foot jump visible on
-  slow-motion video. Flash ≤ 18 KB.
-- **Cutover:** delete `OpenCat.ino` and `src/` (the legacy hex is kept in
+**P2: gait + IK.**
+- **Deliverables:** measured geometry; IK, gait, STANCE, geometric balance, bob
+  and wag; `kilo walk` with keyboard driving.
+- **Acceptance:** H14, H9 while trotting, the IK/gait tests under simavr. WALK,
+  TROT and CRAWL start and stop with no visible foot jump on slow-motion video.
+  Flash ≤ 18 KB.
+- **Then cut over:** delete the legacy firmware (its hex is kept in
   `mind/firmware/`).
 
-### P3: mind v1 (personality with ultrasonic + IMU)
+**P3: mind v1 (ultrasonic + IMU personality).**
+- **Deliverables:** the behaviour-tree engine, drives, personality YAML, and
+  behaviours: explore, nap, startle, greet, pick-up and tap reactions, battery
+  wind-down with clean Pi shutdown. A systemd service.
+- **Acceptance:** 30 min autonomous with ≤ 2 obstacle contacts; responds to an
+  approach within 0.5 s; on CRITICAL battery the Pi shuts down before the body
+  limps. No firmware change, or only a P2.x patch.
 
-- **Deliverables:**
-  - BT engine, drives, personality YAML.
-  - Behaviours: explore (walk + turn away from obstacles), rest/nap (low
-    energy), startle (approach), greet (tricks + eyes), react to pick-up and
-    taps, battery wind-down + clean Pi shutdown on CRITICAL.
-  - systemd service, behaviour log.
-- **Acceptance:** 30 min autonomous on the floor; ≤ 2 obstacle contacts; rests
-  when energy is low; responds to approach within 0.5 s; on CRITICAL battery the
-  Pi shuts down cleanly before the body goes limp; no unhandled exceptions.
-  No firmware change is required. If one is, it is a P2.x patch.
+**P4: camera.**
+- **Deliverables:** the detector process and head tracking, with face seen →
+  social drive.
+- **Acceptance:** measured detector rates documented; tracking with ≤ 0.5 s lag
+  at ≥ 4 Hz; Pi CPU < 70%; power logged.
 
-### P4: camera
-
-- **Deliverables:** camera process, motion/blob/face detectors, head tracking,
-  "social" drive inputs (a face seen counts as company).
-- **Acceptance:** measured detector rates documented. Head tracks a face moving
-  across the field of view with ≤ 0.5 s lag at ≥ 4 Hz. Total Pi CPU < 70% and
-  power draw logged (USB meter) for the battery budget.
-
-### P5: DMP removal
-
-- **Deliverables:** raw accel/gyro read (14 B burst from 0x3B), integer
-  complementary filter (appendix), boot-time gyro bias capture, A/B build flag
-  `KILO_IMU_DMP`.
-- **Removed:** the DMP image (3062 B) + DMP init/FIFO code (about 0.9 KB). Added
-  back: about 0.5 KB for the filter. **Net about −3.5 KB flash**. Boot is
-  faster (no 3 KB image upload over I2C).
-- **Acceptance:** logged side-by-side (both estimators in a debug build or
-  back-to-back runs): static pitch/roll within 1°, dynamic (trot) within 3° RMS,
-  fall detection latency no worse than with the DMP. H7, H9, H13 re-run.
+**P5: DMP removal.**
+- **Deliverables:** a raw 14 B read and the integer complementary filter
+  (Appendix A), behind A/B flag `KILO_IMU_DMP`.
+- **Removed:** the DMP image (3062 B) and init/FIFO code (≈0.9 KB); the filter
+  adds back ≈0.5 KB. Net ≈ −3.5 KB, and a ≈300 ms faster boot.
+- **Acceptance:** static within 1°, trot within 3° RMS of the DMP; fall latency
+  no worse; H7, H9 and H13 re-run.
 
 ---
 
 ## 8. Open questions for the owner
 
-1. **Leg geometry** (blocks P2): measure L1, L2, the foot contact offset, the
-   front-back shoulder-axis spacing Lb and the foot track width W (3d). Also
-   confirm that the calibration posture is "upper leg vertical, lower leg at
-   90°" on Kilo.
-2. **Which tricks matter?** All 25 Nybble behaviours import mechanically. Which
-   ones should be polished, and which new ones do you want (for example stretch
-   on waking, a sleepy head-down nap)?
-3. **IR remote:** keep or drop? Cost: about 2 KB flash, about 150 B RAM, and a
-   20 kHz Timer1 interrupt (an estimated 5-10% CPU plus timing jitter).
-   Recommendation: **drop**; the Pi is
-   always there, and a phone or SSH replaces it.
-4. **Buzzer:** keep? Cost: about 0.35 KB. Recommendation: **keep.** It gives the
-   body a voice without the Pi (low-battery alarm, fall chirp), and the Pi
-   composes the melodies.
-5. **Battery scale:** measure the pack voltage with a meter against the
-   reported `batt_mv` once, to fix the "/99" scale. Do you plan a higher-drain
-   pack? Petoi warns the stock 1000 mAh pack struggles with a Pi aboard. The
-   battery thresholds depend on it.
-6. **Servo stiffness pulses:** did the old `setServoP` P_SOFT/P_HARD pulses ever
-   visibly change Kilo's G41 servos? If not, they stay dropped.
-7. **GPIO4 → reset wiring:** is there a capacitor on the header path (as on the
-   USB adapter socket)? The reset procedure works either way, but it matters if
-   GPIO4 is ever left low.
-8. **Camera hardware:** CSI camera (which version) or USB webcam? Where is it
-   mounted? The head moves, so a head-mounted camera makes tracking
-   self-referential (simpler), but adds weight and cabling on the head.
-9. **Personality:** which traits and how much autonomy? For example: "never
-   walk off unless I say so", or "explore freely on the floor". This also
-   decides whether table-edge risk needs a cliff sensor, which Nybble lacks.
-10. **Telemetry by default:** 25 Hz is the default. Do you want 50 Hz logging
-    always on for learning? It costs about 2 MB/h of SD writes.
-11. **I2C EEPROM (64 KB):** unused in this design. Keep it reserved, or use it
-    later (for example a persistent body-side log of falls and brown-outs)?
-12. **Network:** the Pi 2 has no Wi-Fi. A USB Wi-Fi dongle (+0.5-1 W) or
-    tethered Ethernet for development?
+1. **Leg geometry (blocks P2).** Measure L1, L2, the foot contact offset, the
+   shoulder spacing Lb and the foot track W (Appendix B). Confirm that the
+   calibration posture is "upper leg vertical, lower leg at 90°".
+2. **Battery.** Do one meter reading against the reported `batt_mv` to fix the
+   scale. Is a higher-drain pack planned? Petoi warns the stock 1000 mAh pack
+   struggles with a Pi aboard, and the thresholds depend on it.
+3. **UART and reset wiring.**
+   - Measure the TX/RX idle levels on the Pi header with a meter. The Pi's
+     GPIO15 must never see 5 V.
+   - Is there a capacitor between GPIO4 and RESET? The open-drain reset works
+     either way.
+4. **Camera.** CSI (which version) or USB? Head- or body-mounted?
+5. **Autonomy.** How free should Kilo be: "explore the floor" or "only move
+   when asked"? Nybble has no cliff sensor, so this decides whether tables are
+   off-limits.
+6. **Logging.** Keep 50 Hz telemetry plus JOINTS always on for learning
+   (≈2-3 MB/h), or only on demand?
+7. **I2C EEPROM (64 KB).** Unused. Keep it reserved, or later use it as a
+   body-side log of falls and resets?
+8. **Network.** The Pi 2 has no Wi-Fi. USB Wi-Fi dongle (+0.5-1 W) or Ethernet
+   for development?
 
 ---
 
 ## Appendix A: DMP-free attitude filter (P5)
 
-Read 14 bytes from `ACCEL_XOUT_H` (0x3B) each tick at 400 kHz, which takes
-about 0.4 ms.
+Each tick, read 14 B from `ACCEL_XOUT_H` (0x3B), ≈0.4 ms at 400 kHz.
 
 Configuration:
-- `CONFIG` DLPF = 3 (44 Hz accel / 42 Hz gyro): anti-aliasing for 50 Hz
-  sampling.
-- `GYRO_CONFIG` ±500 °/s (65.5 LSB per °/s).
-- `ACCEL_CONFIG` ±2 g (16384 LSB/g).
-- Offsets from the EEPROM block, written to the MPU offset registers at boot as
-  today.
+- `CONFIG` DLPF = 3 (44/42 Hz) for anti-aliasing;
+- gyro ±500°/s (65.5 LSB per °/s);
+- accel ±2 g (16384 LSB/g);
+- offsets from the config slot, written to the offset registers at boot.
 
-Per axis, with angles held as int32 `a16 << 8` so that sub-LSB increments
-accumulate:
+Angles are held per axis as int32 `a16 << 8`:
 
 ```
-gyro increment per tick in a16:  Δ = raw_gyro · (16 / 65.5) · 0.02 = raw · 0.004885 ≈ raw · 5 / 1024   (0.04% error)
-accel angle:  pitch_acc = atan2(−ax, isqrt(ay² + az²)),  roll_acc = atan2(ay, az)     (integer atan2 from 3d)
-predict:      θ += Δ
-correct:      if | |a| − 1 g | < 0.15 g:  θ += (θ_acc − θ) >> 6          // α = 1 − 1/64 ≈ 0.984
+gyro increment per tick (a16):  Δ = raw · (16/65.5) · 0.02 = raw · 0.004885 ≈ raw · 5/1024   (0.04% error)
+accel angle: pitch_acc = atan2(−ax, isqrt(ay² + az²)), roll_acc = atan2(ay, az)   (normalised integer atan2, Appendix B)
+             then apply the same gz<0 pitch reflection as 3f
+predict:     θ += Δ
+correct:     if | |a| − 1 g | < 0.15 g:  θ += (θ_acc − θ) >> 6          // α = 1 − 1/64 ≈ 0.984
 ```
 
-- Time constant: τ = dt·α/(1−α) = 0.02·63 ≈ 1.26 s. The gyro dominates below
-  τ and the accelerometer pins drift above it.
-- The magnitude gate skips the accelerometer during impacts and footfalls,
-  which would otherwise tilt the estimate.
-- Gyro bias: at boot, if the variance is low for 1 s, average 50 samples
-  in-place and subtract. The `kilo cal imu` offsets handle the rest.
-- Rates for telemetry and the balance D-term come straight from the gyro.
-- Yaw is not estimated (no magnetometer). The Pi integrates `rate_yaw` if it
-  needs heading for short periods.
-- Cost **(est.)**: 0.5 KB flash, 24 B RAM, about 0.6 ms per tick including the
-  read.
+- The time constant is τ = 0.02·63 ≈ 1.26 s.
+- The magnitude gate skips accelerometer correction during impacts.
+- Gyro bias is averaged at boot when still. Rates come from the gyro directly.
+- Yaw is not estimated (no magnetometer); the Pi integrates `rate_yaw` if it
+  needs heading over short periods.
+- Cost **(est.)**: 0.5 KB flash, 24 B RAM, ≈0.6 ms per tick.
+- The Pi can replay logged IMU_RAW through a Python reference filter to tune α
+  and the gate before touching firmware.
 
-This filter is also a learning exercise: the Pi can log `IMU_RAW` at 50 Hz,
-replay it through a Python reference filter, and tune α and the gate offline
-before changing firmware params.
+---
 
-## Appendix B: decisions taken where the brief left a choice
+## Appendix B: Derivations
 
-| Topic | Decision | Section |
+**B1. PCA9685 burst.** Registers `LED0_ON_L` (0x06) to `LED15_OFF_H` (0x45)
+auto-increment. Address + register + 64 data bytes = 66 bytes × 9 bit-times =
+594 bits, which is 1.49 ms at 400 kHz, plus ≈0.1 ms overhead. The legacy code
+does one `setPWM` transaction per servo through Wire (≈0.2 ms each, 2-3 ms in
+total) and runs the bus at 500 kHz, above the MPU6050's 400 kHz rating. The
+new driver is polled, with a 2 ms timeout per transaction; on timeout it clocks
+9 SCL pulses and a STOP, counts `i2c_err`, and skips the step.
+
+**B2. DMP FIFO read.**
+- `SMPLRT_DIV = 4` gives a 200 Hz sample rate, and the image's FIFO divisor 1
+  gives ≈100 Hz packets of 28 B. Verify by counting.
+- Each tick: read `FIFO_COUNT` (2 B), compute `n = count / 28`, read `n·28`
+  bytes in ≤ 28 B transactions, and keep the last packet. There is no
+  busy-wait for a packet; if `n = 0`, the previous attitude is reused and
+  `imu_stale` increments.
+- Reset the FIFO if `count % 28 ≠ 0` for 3 ticks in a row, or if
+  `count > 200`.
+- At 100 Hz there are ≈2 packets per tick: 2 + 56 bytes plus addressing ≈
+  0.6 kbit ≈ 1.5 ms with overhead. If the rate turns out to be 200 Hz (4 packets,
+  ≈2.8 ms per tick), raise the divisor in the image config or accept the
+  longer tick (still < 7 ms total).
+
+**B3. Ultrasonic.**
+1. Every 4th tick (80 ms, above the ≈60 ms ring-down of HC-SR04-style
+   modules), set D6 as output with `sbi`, high for 20 µs, then input with
+   `PCINT22` enabled.
+2. The ISR records the rising and falling `micros()` (4 µs resolution =
+   0.7 mm) and disables itself.
+3. No falling edge within 25 ms (≈4.3 m) → `dist_mm = 0`.
+4. Distance = `echo_us · 1715 / 10000` mm (343 m/s, round trip).
+
+Jitter sources are the UART RX ISR (≈3 µs), the buzzer ISR (≈2-3 µs) and
+Timer0 (≈5 µs every 1.024 ms): ≤ ≈2 mm in total. The WS2812 update (180 µs with
+interrupts off) is never scheduled during an echo. Legacy `pulseIn` blocked for
+up to the echo length (≈38 ms with no obstacle), or 1 s if the echo never
+started.
+
+**B4. WS2812.** 6 LEDs × 24 bits × 1.25 µs = 180 µs with interrupts off. The
+USART holds ≈2 received bytes. At 250000 baud (40 µs per byte), 2-3 bytes can
+be lost, which is one frame, caught by the CRC.
+
+**B5. Bandwidth.** Wire size = payload + 6.
+
+| Direction | Stream | Wire B | Rate | B/s |
+|---|---|---|---|---|
+| Up | TELEMETRY | 32 | 25 / 50 Hz | 800 / 1600 |
+| Up | JOINTS | 30 | 50 Hz max | 1500 |
+| Up | IMU_RAW | 20 | 50 Hz max | 1000 |
+| Up | ACK/EVENT/LOG | | bursty | ≤ 600 |
+| Up | **Worst** | | | **≈4.7 kB/s = 19% of 25 kB/s** |
+| Down | GAIT 17 + HEAD 16 + POSE 13 + EYES 10 | | 5 Hz (worst 50 Hz) | 280 (2800) |
+| Down | HEARTBEAT | 6 | 10 Hz | 60 |
+| Down | Trick upload, stop-and-wait | 64 | ≤ 1 per 10 ms | ≤ 6400 |
+| Down | **Worst** | | | **≈9.3 kB/s = 37%** |
+
+At 115200 the downstream worst case would be ≈80%.
+
+**B6. Fixed-point plan (IK and attitude).**
+- **Lengths** are `q2`: a 50 mm link = 200. `d² ≤ 2·400² = 320 000` (int32).
+- **Knee:** `num = d² − L1² − L2²`, with |num| ≤ 2·L1·L2 ≈ 80 000. Then
+  `c = num·4096/den` is Q12; num·4096 ≤ 3.3e8, which fits int32. Clamp `c` to
+  ±4096. `s = isqrt(4096² − c²)` is Q12, from an argument of at most 1.7e7.
+- **atan2(y, x) → a16** (all int32 inputs):
+  1. Take absolute values.
+  2. Shift **both** right by the same amount until `max(|y|, |x|) < 2^15`.
+  3. `r = (min << 14) / max` is Q14 in [0, 1]. min < 2^15, so `min << 14` <
+     2^29 fits.
+  4. Index = `r >> 8` (0..64), fraction = `r & 255`; linearly interpolate the
+     65-entry atan table (0..720 a16, 130 B).
+  5. Rebuild octant and quadrant.
+
+  Maximum interpolation error ≈ (1/64)²/8 · 0.65 rad ≈ 0.001°. The second IK
+  atan2 takes `(L2·s, L1·4096 + L2·c)`, values up to ≈3.3e6, which step 2
+  normalises. No extra division is needed, since atan2 is scale-invariant.
+- **Sine:** a 65-entry Q14 quarter-wave table (130 B), linearly interpolated,
+  error < 1e-4. Input is a16.
+- **isqrt32:** bitwise, 16 iterations, ≈60 B.
+- **Near full extension:** an error in `c` is amplified by `c/s`. The reach
+  clamp at 0.95(L1+L2) keeps the knee bend ≥ ≈25°, so the worst θ2 error is
+  < 0.05° **(est.)**.
+- **Attitude:** quaternion Q14 (int16) → products Q28 (int32) → sums shifted
+  `>> 14` to Q14 → squares Q28, with sum ≤ 2^29 → `isqrt` → Q14 → atan2 as
+  above.
+- **Cost (est.):** per leg, 3 atan2 (one int32 division each, ≈40 µs) + 1 isqrt
+  + 1 division ≈ 0.2 ms, so 0.8 ms per tick for four legs. Flash: tables 260 B,
+  fx ≈400 B, IK ≈400 B, gait ≈1 KB.
+- **Fallback:** float IK costs ≈1.6 KB of library and 2-3 ms per tick
+  **(est.)**.
+
+**B7. Measuring leg geometry.**
+- Put Kilo in `calib`. With calipers, measure:
+  - shoulder axle centre to knee axle centre (L1);
+  - knee axle centre to the floor contact point (L2). If the tip is not on the
+    knee-to-tip line, also the offset angle δ, added to θ2.
+- Measure front-to-back shoulder-axle spacing (Lb) and the left-right foot
+  track (W).
+- Rough guesses, **not to be shipped:** L1 ≈ L2 ≈ 45-55 mm, Lb ≈ 100-110 mm,
+  W ≈ 55-65 mm.
+
+---
+
+## Appendix C: Legacy archaeology
+
+**C1. Leg order LF, RF, RB, LB** for 8-11 and 12-15. `OpenCat.h` does not state
+it. Three independent clues:
+1. `adjust()` uses `leftQ = (i − 1) % 4 > 1`, which gives 8 = left, 9 = right,
+   10 = right, 11 = left.
+2. `Skill::mirror()` swaps columns (8,9) and (10,11), so these are the L/R
+   pairs.
+3. Every posture in `InstinctNybble.h` gives equal values to 8 and 9 and to 10
+   and 11 (`rest`: 60, 60, −60, −60), so 8 and 9 are the front pair. The front
+   and back limits are mirror images.
+
+**C2. The setup sketch's transfer function.**
+- `setPWMFreq(240)` with the 25 MHz nominal oscillator gives prescale 24, so
+  244 Hz, a 4.096 ms period and 1 count ≈ 1 µs.
+- `ANGLE2PULSE_FACTOR = (2500−500)/180` is integer division (= 11) × 1.0 ×
+  1000 = 11000.
+- `B_OFFSET = 240/50` (integer division, = 4) × 150 = 600 → stored as 60.
+- `zeroPosition = 90 + midShift·dir` and
+  `calibratedZeroPosition = zero + calib·dir` are stored as ints.
+- So neutral (servo 90°) is ≈1590 counts, not 1500, and the slope is 11
+  counts/° rather than 11.1. Kilo's calibration absorbed this, and that is why
+  the new firmware imports the stored values instead of recomputing them (3b).
+- The `P_SOFT`/`P_HARD` stiffness pulses (`setServoP`) are dropped.
+
+**C3. Legacy balance (`motion.h` `adjust()`).**
+- **Error:** `dev = ypr − expectedRollPitch`, with dead bands of 5° roll and 3°
+  pitch subtracted using `sign(ypr)`.
+- **Gains:** per-joint `{rollFactor, pitchFactor}` / 57.3, giving degrees of
+  joint per degree of tilt. Upper legs: roll 1.05, pitch 0.52. Lower legs:
+  −1.5×. Head: pan −60, tilt −60, tail −120.
+- **Roll term:** uses `|roll|` with signed factors and 1.2× on one side, so it
+  is mostly a symmetric crouch with 20% asymmetry (as I read it).
+- **Walking:** leg corrections are halved (`POSTURE_WALKING_FACTOR 0.5`).
+- **Damping:** the change per update is limited to ±5° (`ADJUSTMENT_DAMPER`).
+  This is a slew limit, not a derivative term.
+- **Rate:** the IMU is read on every 3rd joint write, so the rate depends on
+  loop speed.
+- It is proportional-only, in joint space.
+
+**C4. Legacy EEPROM items imported by migration (3b).**
+
+| Legacy item | Address | Size |
 |---|---|---|
-| Tick scheduling | `micros()` deadline polling, fixed grid, resync on > 2 tick lag | 3a |
-| Ultrasonic | pin-change ISR on D6, 80 ms cadence, 25 ms cap | 3a |
-| I2C | custom polled driver at 400 kHz, single 16-channel PCA9685 burst | 3a |
-| Serial/Wire/float | none linked; enforced by the size harness | 3, 6 |
-| Calibration layout | new 256 B EEPROM block at 704 with migration; legacy layout untouched for fallback; legacy angle→counts function reproduced exactly | 3b |
-| Framing | COBS + CRC-16/CCITT-FALSE, max 60 B payload | 4 |
-| Baud | 250000 | 4 |
-| Acks | goals unacked and refreshed at 5 Hz; commands acked with retry | 4 |
-| Trick store | 32 × 14 B frames in RAM, int8 degrees, −128 = unchanged, cosine/linear easing | 3e |
-| Balance | PD with gyro damping at 50 Hz; geometric via IK for gait/stance, legacy joint gains for joint-space owners | 3f |
-| Watchdog | 500 ms → REST with balance; +10 s → LIMP | 3g |
-| IMU calibration | moved to the Pi | 5 |
-| Behaviour | in-house BT under a utility drive selector | 5 |
-| Testing | host + simavr + virtual body on a pty | 6 |
+| `CALIBRATED_ZERO_POSITIONS` (CZP) | 96 | int16 × 16, servo degrees |
+| `ANGLE2PULSE_FACTOR` (A2P) | 160 | int16 × 16, counts/° × 1000 |
+| `B_OFFSET` | 274 | u8, counts / 10 |
+| `PCA9685_FREQ` | 275 | u16, kHz |
+| `PWM_PIN` | 0 | 16 B |
+| `CALIB` | 16 | 16 B |
+| `MID_SHIFT` | 32 | 16 B |
+| `ROTATION_DIRECTION` | 48 | 16 B |
+
+**C5. Other legacy facts used.**
+- Battery: `LOW_VOLTAGE 650` and the `voltage/99` printout. Full (8.4 V) ≈ 832
+  counts, nominal (7.4 V) ≈ 733.
+- Behaviour frame counts: `cmh` 22, `dg` 11, `hds` 10, others ≤ 9. No Nybble
+  trick uses the IMU-trigger columns.
+- Legacy EEPROM usage: 0..282 (config), 320..700 (47 skill entries of
+  nameLen + 5 B, 381 B), ≈966..1023 (melodies).
+
+---
+
+## Appendix D: Memory estimates
+
+**D1. Today's build, calibration points** (mega @ 684d0eb: 32016 B, 1620 B
+globals):
+
+| Symbol / area | Flash |
+|---|---|
+| `dmpMemory` | 3062 B |
+| `read_IMU()` (float quaternion → ypr) | 1348 B |
+| `beep()` (float) | 1236 B |
+| `SetRgbEffect` | 970 B |
+| Skill loading (4 functions) | ≈1.6 KB |
+| `transform` + `calibratedPWM` + `writeAngle` | ≈1.2 KB |
+| IR Timer1 ISR | 474 B + decoder; `irparams` 147 B RAM |
+| Serial object | 157 B RAM |
+| `newCmd` | 468 B RAM |
+
+From the brief: servo path ≈2.1 KB, IMU ≈4.2 KB + image, Wire ≈2.3 KB,
+Serial/Print ≈1.4 KB, float library ≈1.6 KB.
+
+**D2. New firmware (all est.; S = soft):**
+
+| Component | Flash | RAM |
+|---|---|---|
+| Arduino core subset + vectors + crt | 1.0 KB | 15 B |
+| UART driver | 0.3 KB | 192 + 96 + 6 B |
+| COBS, CRC, codec, dispatch, ACK de-dup cache | 1.5 KB S | 128 + 3 B |
+| I2C polled driver | 0.35 KB | 4 B |
+| PCA9685 driver + read-back | 0.4 KB | 32 B |
+| DMP image / DMP init + FIFO | 3.06 KB / 0.9 KB S | 44 B |
+| Attitude (integer) | 0.3 KB | 12 B |
+| fx (atan2, sin, isqrt, tables) | 0.7 KB | 0 |
+| IK / gait | 0.4 KB / 1.0 KB S | 40 B |
+| Keyframe store + player (incl. `from[11]`) | 0.6 KB | 448 + 16 + 22 B |
+| Arbiter, layers, safety, goal registers + epoch | 0.9 KB S | 120 B |
+| Balance | 0.4 KB | 16 B |
+| Reflexes | 0.7 KB S | 24 B |
+| PROGMEM postures + `rc` | 0.15 KB | 0 |
+| Config slots, migration, writer (RAM image) | 0.7 KB | 108 B |
+| Params | 0.3 KB | 40 B |
+| Ultrasonic / eyes / battery | 0.25 / 0.25 / 0.1 KB | 10 / 18 / 6 B |
+| Telemetry, stats / event queue (8 × 5) | 0.5 KB | 30 / 40 B |
+| Buzzer (Timer2 ISR, note queue, chirps) | 0.4 KB | 20 B |
+| `.noinit` reset record | 0.1 KB | 9 B |
+| **Total** | **≈15.4 KB** (S → 18 KB) | **globals ≈1.50 KB** |
+| Stack (painted, worst case) | | 350 B |
+
+---
+
+## Appendix E: Protocol reference
+
+`protocol/spec.toml` is authoritative. If this table disagrees with it, fix
+this table. Offsets are within the payload. `E` = epoch u8.
+
+**Pi → body**
+
+| Type | Payload | B |
+|---|---|---|
+| 0x01 HELLO_REQ, 0x02 HEARTBEAT, 0x05 STATS_REQ, 0x06 PCA_READ, 0x38 CAL_GET, 0x3A CAL_SAVE, 0x3B CAL_REVERT | (empty) | 0 |
+| 0x03 PING | `token u16` | 2 |
+| 0x04 SET_STREAM | `telem_div u8` (0 off, default 2 → 25 Hz), `joints_div u8`, `imu_raw_div u8` | 3 |
+| 0x10 SET_POSTURE | `E`, `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE, 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = 25), `flags u8` (bit 0 balance) | 4 |
+| 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance) | 11 |
+| 0x12 SET_HEAD | `E`, `mode u8` (0 release, 1 hold), `pan i16`, `tilt i16`, `tail i16` (a16), `max_speed_dps u16` | 10 |
+| 0x13 SET_BODY_POSE | `E`, `pitch i16`, `roll i16` (a16), `dheight_mm i8`, `xshift_mm i8` | 7 |
+| 0x14 SET_BALANCE | `enable u8`, `kp_q8 u8`, `kd_ms u8`, `deadband_deg u8`, `max_corr_deg u8` | 5 |
+| 0x20 TRICK_BEGIN | `trick_id u8`, `n_frames u8`, `loop_start u8`, `loop_end u8`, `repeats u8`, `joint_mask u16`, `flags u8` (bit 0 balance, 1 fall_ok), `end_posture u8` | 9 |
+| 0x21 TRICK_FRAMES | `first u8`, `count u8` (1..4), `count × 14 B` | 2+14n |
+| 0x22 TRICK_COMMIT | `trick_id u8`, `crc16 u16` | 3 |
+| 0x23 TRICK_PLAY | `E`, `trick_id u8`, `speed_q6 u8`, `flags u8` (bit 0 mirror) | 4 |
+| 0x24 TRICK_STOP | `transition_ticks u8` | 1 |
+| 0x30 SET_EYES | `led_mask u8` (0x07 right, 0x38 left, 0x3F all), `r u8`, `g u8`, `b u8` | 4 |
+| 0x31 BEEP | `n u8` (1..8), n × (`note i8`, `dur_10ms u8`) | 1+2n |
+| 0x39 CAL_SET | `joint u8`, `offset_a16 i16` (absolute, ±25°) | 3 |
+| 0x3C IMU_OFFSETS_SET | 6 × `i16`, `save u8` | 13 |
+| 0x3D PARAM_GET | `id u8` | 1 |
+| 0x3E PARAM_SET | `id u8`, `value i16`, `persist u8` | 4 |
+| 0x3F EEPROM_READ | `addr u16`, `len u8` (≤ 56) | 3 |
+| 0x7E REBOOT | `magic u16 = 0x4B49` | 2 |
+
+**Body → Pi**
+
+| Type | Payload | B |
+|---|---|---|
+| 0x80 HELLO | `proto_major u8`, `proto_minor u8`, `fw_build u32`, `reset_cause u8` (0 COLD, 1 FLASHED, 2 REQUESTED, 3 WARM_UNEXPECTED), `last_alive_tick u16`, `caps u16` (bit 0 buzzer, 2 DMP, 3 ultrasonic, 4 eyes), `max_payload u8`, `trick_capacity u8`, `joint_count u8`, `config_state u8` (0 ok, 1 migrated, 2 defaulted), `epoch u8` | 16 |
+| 0x81 TELEMETRY | §4 | 26 |
+| 0x82 JOINTS | `tick u16`, 11 × `i16` a16 | 24 |
+| 0x83 IMU_RAW | `tick u16`, 6 × `i16` | 14 |
+| 0x84 ACK | `seq u8`, `type u8`, `status u8` | 3 |
+| 0x85 EVENT | `code u8`, `arg i16`, `tick u16`, `epoch u8` | 6 |
+| 0x86 CAL_VALUES | 16 × `i16` a16 | 32 |
+| 0x87 PARAM_VALUE | `id u8`, `value`, `min`, `max`, `default` (i16) | 9 |
+| 0x88 EEPROM_DATA | `addr u16`, bytes | 2+len |
+| 0x89 PONG | `token u16`, `tick u16` | 4 |
+| 0x8A STATS | `uptime_s u32`, `overruns u16`, `max_tick_us u16`, `stack_free_min u16`, `rx_crc_err u16`, `rx_overflow u16`, `i2c_err u16`, `imu_stale u16`, `dmp_rate_hz u8` | 19 |
+| 0x8B PCA_COUNTS | 16 × `u16` OFF counts (bit 12 = full-off) | 32 |
+| 0x8F LOG | ASCII ≤ 60 | var |
+
+**Event codes:**
+
+| Code | Event |
+|---|---|
+| 1 | BOOT (arg = reset cause) |
+| 2 | FELL (±1 roll, ±2 pitch) |
+| 3 | RECOVERED |
+| 4 | RECOVERY_FAILED |
+| 5 | LOW_BATTERY (level) |
+| 6 | BATTERY_OK |
+| 7 | WATCHDOG |
+| 8 | LINK_RESTORED |
+| 9 | IMU_FAULT |
+| 10 | IMU_OK |
+| 11 | TRICK_DONE (id) |
+| 12 | GAIT_STOPPED |
+| 13 | GOAL_REFUSED (type << 8 \| reason) |
+| 14 | CONFIG_MIGRATED |
+| 15 | CONFIG_DEFAULTED (reason) |
+| 16 | EEPROM_SAVED |
+| 17 | TX_DROPPED (rate-limited) |
+
+**Params** (stable ids):
+
+| Group | Params (defaults) |
+|---|---|
+| Watchdog, motion | `WD_STOP_MS` (500), `WD_REST_MS` (1500), `WD_LIMP_S` (10), `XFADE_TICKS` (10), `SLEW_MAX_A16` (160) |
+| Fall | `FALL_DEG` (75) |
+| Battery | `BATT_WARN_MV`, `BATT_LOW_MV`, `BATT_CRIT_MV`, `BATT_HYST_MV` |
+| Balance | `BAL_KP_Q8`, `BAL_KD_MS`, `BAL_DB_A16`, `BAL_MAX_A16` |
+| Head | `HEAD_HOLD_MS` |
+| Ultrasonic | `US_PERIOD_TICKS` |
+| Geometry | `L1_Q2`, `L2_Q2`, `LB_MM`, `W_MM` |
+| Bob and wag | `BOB_A16`, `WAG_A16` |
+| Legacy joint gains | per-joint roll and pitch gains |
+
+**Worked frames** (in `vectors.json`):
+
+```
+HELLO_REQ seq=0       decoded: 01 00 3e 2e              wire: 02 01 03 3e 2e 00
+```
+
+Epoch-bearing examples are generated by `gen.py` from spec.toml.
+
+---
+
+## Appendix F: Operations
+
+**Pi configuration.**
+- Serial login shell off, hardware serial on.
+- 1-Wire off. The `w1-gpio` overlay claims GPIO4 and sends 480 µs low reset
+  pulses while scanning the bus, and each one resets the NyBoard.
+- UART clock 48 MHz (`init_uart_clock=48000000` if `vcgencmd` shows less).
+- The I2C switch on the NyBoard stays on "Arduino".
+- GPIO4 is left as an **input** (no pull) when idle: `gpio=4=ip,np`.
+
+**Reset via GPIO4 (emulated open-drain).** To reset, drive GPIO4 low for
+50 ms, then return it to input. That works whether GPIO4 is AC-coupled to
+RESET (the falling edge resets) or wired directly (the low level holds reset).
+It never drives the line high against the NyBoard's own reset circuit.
+
+**Flash sequence (`kilo flash`):**
+1. Ask the daemon to release `/dev/ttyAMA0` (`/run/kilo/serial.lock`).
+2. `arduino-cli compile --fqbn arduino:avr:uno --build-path ~/.cache/kilo-build body/`.
+   About 1-3 min on a Pi 2 **(est.)**. The git hash goes in through
+   `compiler.cpp.extra_flags=-DKILO_BUILD=0x…`.
+3. Run the size/symbol harness. Stop on failure.
+4. Pulse GPIO4 (libgpiod `gpioset`).
+5. Within ≈200 ms, run
+   `avrdude -p m328p -c arduino -P /dev/ttyAMA0 -b 115200 -D -U flash:w:body.ino.hex:i`.
+   Optiboot only starts on an external reset and waits ≈1 s.
+6. Reopen at 250000 and expect HELLO with `reset_cause = FLASHED` and the new
+   build hash within 3 s. Retry once.
+
+`kilo flash --legacy` writes `mind/firmware/opencat-legacy.hex`, which talks
+the token protocol at 115200 and finds its EEPROM intact.
+
+**Development over the CH343 USB adapter.**
+- The Petoi uploader enumerates as `/dev/ttyACM0` or `/dev/ttyUSB0` on Linux
+  (COM9 on the owner's Windows host, passed into WSL2 with usbipd).
+- avrdude resets the board through DTR natively.
+- The same `kilo` tools work with `--port`.
+- The adapter and the Pi header share the 328P's single UART. **Unplug the
+  adapter whenever the Pi drives the UART**, and vice versa.
+
+---
+
+## Appendix G: Repository layout and CLI
+
+```
+body/
+  body.ino
+  src/core/   fx  joints  ik  gait  keyframe  arbiter  balance  reflex  attitude
+              cobs  crc16  codec  protocol_gen.h  params  config_block  epoch
+  src/hal/    uart  i2c  pca9685  mpu6050_dmp  ultrasonic  ws2812  adc  eeprom_writer  buzzer  clock  noinit
+  test/       Makefile, unit tests, ref/ (Python float references), vbody/
+  budget.json
+protocol/     spec.toml  gen.py  vectors.json
+mind/
+  pyproject.toml
+  kilo/       protocol_gen.py codec.py link.py body.py log.py daemon.py cli.py flash.py
+              tricks/{model,legacy_import,uploader}.py tricks/library/*.json
+              behaviour/{bt,drives}.py behaviour/trees/*.py
+              perception/{ultrasonic,imu_events,camera,audio}.py
+  tests/  firmware/opencat-legacy.hex  systemd/kilo-mind.service
+tools/size.sh
+docs/
+```
+
+arduino-cli compiles `src/` recursively, which is why the logic lives under
+`body/src/`.
+
+**CLI.** `kilo` talks to the daemon over `/run/kilo/kilo.sock` (JSON lines), or
+opens the port directly if the daemon is not running.
+
+| Command | Purpose |
+|---|---|
+| `kilo status`, `kilo monitor` | HELLO, stats; live curses telemetry |
+| `kilo posture rest\|sit\|stand\|limp` | Postures |
+| `kilo walk --pattern trot --stride 30 --turn 0 --period 500 [--keys]`, `kilo stop` | Gait |
+| `kilo look PAN TILT [--tail T]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head, eyes, sound |
+| `kilo trick list\|play NAME [--mirror] [--speed 1.5]\|import-legacy FILE\|edit NAME` | Tricks; `edit` jogs joints live and captures frames |
+| `kilo cal`, `kilo cal imu` | Joint calibration; IMU offset iteration on the Pi from IMU_RAW (keeps `CalibrateAccel/Gyro`, ≈1 KB, off the body) |
+| `kilo param get\|set\|list [--persist]` | Live tuning |
+| `kilo eeprom dump 0 283 > docs/kilo-eeprom-legacy.md` | The P0 legacy dump |
+| `kilo flash [--legacy] [--no-build] [--port P]` | Appendix F |
+| `kilo log plot FILE --fields pitch,roll,corr` | Offline plots |
+| `kilo run` | Start the mind (normally via systemd) |
+
+---
+
+## Appendix H: Test tables
+
+**H-unit. Host and simavr criteria**
+
+| Unit | Criteria |
+|---|---|
+| fx | atan2 vs `std::atan2` over a 1000² grid incl. axes, zero and large magnitudes (≤ 0.02°); sin over all a16 (≤ 2e-4); isqrt exact (edges + sampled) |
+| joints | Transfer function vs a transcription of legacy float `writeAngle`, using the dumped EEPROM: all 16 joints × every whole degree in limits; exact or ±1 count (listed). Limits, slew. |
+| config | Migration accept/reject paths; torn write at every byte offset recovers to the other slot; sequence wrap |
+| ik | Round trip on a 1 mm grid ≤ 0.25 mm; ≤ 0.25° vs double; reach clamp; legacy postures plausible |
+| gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change |
+| keyframe | Tick-exact dur/hold; easing endpoints; −128; loops; mirror (incl. roll ref); speed |
+| arbiter | Per-joint priority; crossfade length/monotonicity; head and balance gating; epoch refusal and LIMP/REST exemption |
+| balance | Toy-plant closed loop converges; every sign flip diverges; dead band; saturation; slew |
+| reflex | Fall 6-tick timing, hysteresis, retries, mirror by roll sign, per-reflex LIMP timers; battery sag spikes don't trip, hysteresis clears; watchdog 0.5 / 1.5 s stages; epoch bump on each |
+| attitude | vs float reference incl. the gz<0 reflection (≤ 0.1°) |
+| codec | vectors.json both ways; 10⁶-iteration fuzz under ASan; resync on next 0x00; ACK de-dup |
+
+**H-HIL. On Kilo**
+
+| # | Check | Pass |
+|---|---|---|
+| H1 | Flash from the Pi | HELLO `FLASHED` with matching build, 3/3 |
+| H2 | Under legacy firmware put Kilo in `kup`; flash the new firmware (the PCA keeps running); `PCA_READ`; then `SET_POSTURE STAND` (`up`) and `PCA_READ` again | Counts identical ±1 per joint; `CAL_VALUES` = legacy CALIB |
+| H3 | Each joint ±10° from STAND | Moves as documented, returns |
+| H4 | Command beyond a limit | JOINTS shows the clamp |
+| H5 | `kill -STOP` the daemon while walking / standing | Motion stops ≤ 0.5 s + one period; lying down ≤ 3.5 s / 2.5 s; LIMP 10 s later; LINK_RESTORED and epoch refusal on resume |
+| H6 | Debug param that hangs the loop | HELLO `WARM_UNEXPECTED` with `last_alive_tick` near the hang; pose held with no jump, then REST |
+| H7 | Tip onto each side | FELL, `rc` mirrored correctly, RECOVERED ≥ 4/5; old goals refused as STALE until the mind re-plans |
+| H8 | Bench supply 8.4 → 6.0 V in 0.1 V / 10 s steps, then back up | Trips and clears within ±0.1 V of the meter; no sag trips while trotting at 7.2 V |
+| H9 | 10 min trot, 50 Hz telemetry + JOINTS | `max_tick_us` < 12000, 0 overruns, `stack_free_min` > 150 B |
+| H10 | 30 min soak, max streams + 5 Hz goals | `rx_crc_err` ≈ 0 (eye updates explain any); seq gaps < 0.1% |
+| H11 | Ultrasonic at 10 / 30 / 100 cm | ±1 / ±2 / ±4 cm |
+| H12 | Eyes R/G/B/W per side; BEEP scale | Correct LEDs; clean tones; no ultrasonic degradation while beeping |
+| H13 | Board tilted 0 → 10° pitch and roll | Body within 3° of level after 1 s |
+| H14 | Walk 2 m (P2) | Drift < 20 cm **(target)**; 360° turn in place < 20 s; 30 s trot without a fall |
+| H15 | `kilo flash --legacy` | Old `kup`, `kwkF` work with the old calibration |
