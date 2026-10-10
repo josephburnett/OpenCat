@@ -130,6 +130,21 @@ const char *translateIR() {
 
 #define IR_GAIT_LEN 3  //the gait name is at most 2 characters + '\0'
 #define IR_CMD_LEN 8   //the longest key string is "buttUp" (6 characters + '\0')
+
+//read_infrared() strcpy_P()s whatever translateIR() returns into a char[IR_CMD_LEN] on the stack,
+//so a key string that outgrows IR_CMD_LEN has to fail the build rather than overflow that buffer.
+#define IR_KEY_FITS(k) static_assert(sizeof(k) <= IR_CMD_LEN, "IR key " k " is longer than IR_CMD_LEN")
+IR_KEY_FITS(K00); IR_KEY_FITS(K01); IR_KEY_FITS(K02);
+IR_KEY_FITS(K10); IR_KEY_FITS(K11); IR_KEY_FITS(K12);
+IR_KEY_FITS(K20); IR_KEY_FITS(K21); IR_KEY_FITS(K22);
+IR_KEY_FITS(K30); IR_KEY_FITS(K31); IR_KEY_FITS(K32);
+IR_KEY_FITS(K40); IR_KEY_FITS(K41); IR_KEY_FITS(K42);
+IR_KEY_FITS(K50); IR_KEY_FITS(K51); IR_KEY_FITS(K52);
+IR_KEY_FITS(K60); IR_KEY_FITS(K61); IR_KEY_FITS(K62);
+IR_KEY_FITS("ts");  //the factory-use key is spelled out in translateIR()
+//irParser() composes gait + direction + '\0' into irCmd[IR_CMD_LEN]
+static_assert(IR_GAIT_LEN + 1 <= IR_CMD_LEN, "IR_GAIT_LEN + a direction does not fit IR_CMD_LEN");
+
 char gait[IR_GAIT_LEN] = "tr";
 char direct = 'F';
 char irCmd[IR_CMD_LEN];  //holds the gait + direction composition, e.g. "trF"
