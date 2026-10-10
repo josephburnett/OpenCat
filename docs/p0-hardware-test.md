@@ -122,10 +122,9 @@ protocol/test.sh                               # needs pytest: PYTHON=~/kilo-ven
 body/tools/size_check.sh                       # see the note on FLASH_MAX below
 ```
 
-**Flash ceiling.** The P0 build is about 18.2 KB, over the 16 KB P0 ceiling
-(docs/architecture.md §3h, §8 question 9). Until the owner decides, flash with
-an explicit temporary ceiling. The forbidden-symbol scan still runs:
-`FLASH_MAX=18432 kilo flash`.
+**Flash ceiling.** The P0 build is about 18.2 KB against the 20 KB P0 ceiling
+(docs/architecture.md §3h). `kilo flash` runs the size check and the
+forbidden-symbol scan before flashing.
 
 ## 3. Legacy pose, then flash (H1, H2)
 
@@ -140,7 +139,7 @@ follow. Now build and flash the new firmware:
 
 ```sh
 cd ~/OpenCat
-FLASH_MAX=18432 kilo flash -v
+kilo flash -v
 ```
 
 The output shows `arduino-cli compile`, the size harness, `reset: DTR

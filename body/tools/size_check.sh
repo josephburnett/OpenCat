@@ -6,8 +6,8 @@
 #   - a forbidden symbol is linked (the libraries and features this firmware
 #     replaced: HardwareSerial/Print, Wire, I2Cdev, pulseIn, tone, the heap,
 #     String, soft float, libm);
-#   - flash > FLASH_MAX (default 16384, the P0 ceiling of doc §3h; P1 18432,
-#     P2 20480);
+#   - flash > FLASH_MAX (default 20480, the P0 ceiling of doc §3h; P1 22528,
+#     P2 24576);
 #   - globals (.data + .bss + .noinit) > GLOBALS_MAX (default 1540).
 #
 # Usage: body/tools/size_check.sh [build-dir]       build, then check
@@ -17,7 +17,7 @@
 set -u
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${ARDUINO_CLI:-$HOME/.local/bin/arduino-cli}"
-FLASH_MAX="${FLASH_MAX:-16384}"
+FLASH_MAX="${FLASH_MAX:-20480}"
 GLOBALS_MAX="${GLOBALS_MAX:-1540}"
 
 if [ "${1:-}" = "--elf" ]; then

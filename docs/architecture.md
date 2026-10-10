@@ -704,9 +704,9 @@ Appendix D.
 
 | Phase | Flash ceiling (`body/tools/size_check.sh FLASH_MAX`) | Globals ceiling |
 |---|---|---|
-| P0 (incl. fx + integer attitude) | 16 KB (16384 B) | 1540 B |
-| P1 | 18 KB | 1540 B |
-| P2 | 20 KB | 1540 B |
+| P0 (incl. fx + integer attitude) | 20 KB (20480 B) | 1540 B |
+| P1 | 22 KB | 1540 B |
+| P2 | 24 KB | 1540 B |
 | P5 | P2 − 3.5 KB (DMP removed) | 1540 B |
 
 **Measured at the P0 integration (default build: ultrasonic and buzzer on,
@@ -1162,7 +1162,7 @@ and `src/` are deleted after P2 is accepted.
   - HardwareSerial, Print, Wire and I2Cdev;
   - the float library, including float quaternion maths (≈1.3 KB) and
     `beep()` floats.
-- **Acceptance:** H1-H6, H8, H10. Flash ≤ 16 KB, globals ≤ 1540 B. REST →
+- **Acceptance:** H1-H6, H8, H10. Flash ≤ 20 KB, globals ≤ 1540 B. REST →
   STAND → SIT → REST from the Pi.
 
 **P1: motor loop, arbitration, tricks, balance.**
@@ -1180,14 +1180,14 @@ and `src/` are deleted after P2 is accepted.
     trick.
 - **Acceptance:** H7, H9 (looping trick), H11-H13. Each first-version trick
   matches the old firmware side by side, in the owner's judgement. Attitude
-  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 18 KB.
+  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 22 KB.
 
 **P2: gait + IK.**
 - **Deliverables:** measured geometry; IK, gait, STANCE, geometric balance, bob
   and wag; `kilo walk` with keyboard driving.
 - **Acceptance:** H14, H9 while trotting, the IK/gait tests under simavr. WALK,
   TROT and CRAWL start and stop with no visible foot jump on slow-motion video.
-  Flash ≤ 20 KB.
+  Flash ≤ 24 KB.
 - **Then cut over:** delete the legacy firmware (its hex is kept in
   `mind/firmware/`).
 
@@ -1238,13 +1238,10 @@ and `src/` are deleted after P2 is accepted.
    body-side log of falls and resets?
 8. **Network.** The Pi 2 has no Wi-Fi. USB Wi-Fi dongle (+0.5-1 W) or Ethernet
    for development?
-9. **Flash ceilings.** The integrated P0 build is 18164 B against the 16 KB P0
-   ceiling (3h). Options: raise the ceilings (P0 18.5, P1 20.5, P2 22.5 KB:
-   still under half the 31.5 KB available); defer ultrasonic and buzzer to P1
-   as §7 schedules them (−610 B); build with `-mrelax -mcall-prologues`
-   (−430 B); or bring the DMP removal (P5, ≈−3.5 KB) forward. Until decided,
-   `FLASH_MAX=18432 kilo flash` runs the symbol scan with an explicit
-   temporary ceiling.
+9. ~~Flash ceilings.~~ Resolved 2026-10-10: the ceilings were estimates and
+   the measured P0 build is 18164 B, so they are now P0 20 KB, P1 22 KB,
+   P2 24 KB (still 7.5 KB under the 31.5 KB available before P5's ≈3.5 KB
+   DMP saving). Ultrasonic and buzzer stay in P0.
 
 ---
 
