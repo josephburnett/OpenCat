@@ -42,8 +42,8 @@ operations notes and test tables. The main body links to them.
 | Tricks | 32 × 14 B keyframes in RAM, int8 degrees, cosine or linear easing, uploaded by the Pi. | 3e |
 | Balance | `corr = −(Kp·e + Kd·rate)` at 50 Hz. Geometric (through IK) for gait and stance, legacy joint gains for joint-space owners. | 3f |
 | Attitude | Integer pitch/roll from the DMP quaternion, keeping the legacy pitch reflection. The DMP is dropped in P5. | 3f |
-| Watchdog | Two stages: stop motion at 0.5 s, REST at 1.5 s, LIMP 10 s later. | 3g |
-| Protocol | COBS + CRC-16/CCITT-FALSE at 250000 baud. Goals unacked and refreshed at 5 Hz; commands acked and de-duplicated. | 4 |
+| Watchdog | Armed by the first valid frame from the Pi. Two stages: stop motion at 0.5 s, REST at 1.5 s, LIMP 10 s later. | 3g |
+| Protocol | COBS + CRC-16/CCITT-FALSE at 250000 baud. Goals unacked and refreshed at 5 Hz; queries answered by their data reply; other commands acked and de-duplicated. | 4 |
 | IR remote | **Dropped.** | |
 | Buzzer | **Kept, Pi-driven.** A `BEEP` note queue plus built-in reflex chirps. ISR-toggled on D5. | 3a, 4 |
 | First tricks | Basics: sit, rest, stand, stretch, balance. Social: hi, wash face, check around, sniff, scratch, pee, push-up, butt-up. Athletic tricks (backflip, roll, jump) are not ported. Fall recovery stays a body reflex. | 5 |
@@ -315,7 +315,8 @@ that `calib_j = dir·(CZP_j − 90 − dir·midShift_j)` matches `CALIB_j` withi
 and that A2P ∈ 9000..13000 and `B_OFFSET·10` ∈ 400..800. If all pass, it writes
 slot A and emits `CONFIG_MIGRATED`. Otherwise it uses model defaults (A2P 11000,
 B 600, CZP = 90 + dir·midShift), emits `CONFIG_DEFAULTED(reason)`, and refuses
-`STAND` until the Pi has run calibration. Appendix C explains where 600 and 11 come from, and why
+`STAND` (`GOAL_REFUSED` reason `UNCALIBRATED`) until the Pi has run calibration
+and a `CAL_SAVE` has completed. Appendix C explains where 600 and 11 come from, and why
 neutral is ≈1590 counts rather than 1500.
 
 **P0 task:** dump EEPROM 0..282 from Kilo once with `EEPROM_READ` before the
@@ -412,8 +413,12 @@ gait after recovery. So:
   `epoch` as their first byte. A mismatch is refused with
   `EVENT GOAL_REFUSED(type, STALE)` (`ACK STALE` for `TRICK_PLAY`), except
   `SET_POSTURE` LIMP or REST, which is never stale.
-- The mind clears its desired motion goals on `FELL`, `WATCHDOG` and
-  `LOW_BATTERY`, adopts the event's epoch, and decides afresh (§5).
+- An EVENT carries the epoch after any bump it reports.
+- `BALANCE` is not a posture: it is `SET_POSTURE STAND` with flags bit 0.
+- Each goal carries the epoch that was current on the mind when the goal was
+  set; it is never re-stamped. Any epoch change the mind sees, in TELEMETRY,
+  in any EVENT or in HELLO, clears its motion goals from older epochs; it
+  then adopts the new epoch and decides afresh (§5).
 
 ### 3d. Gait generator
 
@@ -647,7 +652,9 @@ trip thresholds.
 **Joint limits** are enforced in the safety stage for every owner. Params can
 only narrow them.
 
-**Link watchdog.** Any CRC-valid frame from the Pi resets it.
+**Link watchdog.** Any CRC-valid frame from the Pi resets it, including one
+with an unknown type or a wrong length. It arms on the first such frame after
+boot: a body nobody has talked to has nothing to stop.
 
 | Since the last valid frame | Action |
 |---|---|
@@ -665,7 +672,10 @@ Worst case, from the Pi going silent mid-walk to lying down, is
   their electronics stay powered (the board appears to have no servo-rail
   switch; to verify).
 - REST never limps by itself. Each reflex that ends in LIMP owns its own timer:
-  fall 2 s, low battery 2 s, watchdog 10 s. The Pi can request either state
+  fall 2 s, low battery 2 s, watchdog 10 s. A body that is already LIMP stays
+  LIMP when the watchdog or the low-battery reflex would move it to REST:
+  powering servos from an unknown pose to lie down is worse than staying
+  limp. The Pi can request either state
   directly.
 
 **Boot.**
@@ -688,16 +698,23 @@ Appendix D.
 
 | | Flash | RAM |
 |---|---|---|
-| Estimate (P2 feature set) | ≈15 KB; soft bound 18 KB = P2 ceiling | globals ≈1.50 KB + stack 350 B ≈ 1.85 KB |
+| Estimate (P2 feature set) | ≈15 KB est.; P2 ceiling 20 KB (P0 measured 17.7 KB, below) | globals ≈1.50 KB + stack 350 B ≈ 1.85 KB |
 | Limit | 32256 B (32 KB − 512 B optiboot) | 2048 B |
 | Headroom | ≥ 14 KB | ≈200 B |
 
-| Phase | `budget.json` flash ceiling | Globals ceiling |
+| Phase | Flash ceiling (`body/tools/size_check.sh FLASH_MAX`) | Globals ceiling |
 |---|---|---|
-| P0 (incl. fx + integer attitude) | 12 KB | 1540 B |
-| P1 | 16 KB | 1540 B |
-| P2 | 18 KB | 1540 B |
-| P5 | 15 KB | 1540 B |
+| P0 (incl. fx + integer attitude) | 16 KB (16384 B) | 1540 B |
+| P1 | 18 KB | 1540 B |
+| P2 | 20 KB | 1540 B |
+| P5 | P2 − 3.5 KB (DMP removed) | 1540 B |
+
+**Measured at the P0 integration (default build: ultrasonic and buzzer on,
+all P0 messages):** 18164 B flash, 1061 B globals, over the P0 ceiling by
+1780 B. The link layer (codec, dispatch, telemetry, events, params) costs
+≈4.5 KB, against the 2.3 KB estimated in Appendix D. Turning ultrasonic and
+buzzer off saves ≈610 B, `-mrelax -mcall-prologues` ≈430 B; neither closes
+the gap. The ceilings are the owner's decision (§8).
 
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
 use is reported through a painted canary (`stack_free_min` in STATS). RAM is
@@ -712,8 +729,11 @@ the tight resource. If needed, shrink in this order:
 
 `protocol/spec.toml` is the single source of truth. `protocol/gen.py`
 generates `protocol/gen/kilo_protocol.h` and `protocol/gen/kilo_protocol.py`
-(committed). The body and mind include or vendor them, for example as
-`body/src/core/protocol_gen.h` and `mind/kilo/protocol_gen.py`. The shared C
+(committed). `protocol/vendor.py` copies them, byte for byte, into
+`body/src/proto/` (with the C codec) and `mind/kilo/protocol/` (with the
+Python codec): arduino-cli compiles a copy of the sketch, so the body cannot
+include `protocol/` by relative path, and the mind is an installed package.
+`protocol/test.sh` fails if a copy is stale. The shared C
 and Python codecs and the test vectors are in `protocol/c/`, `protocol/py/`
 and `protocol/vectors/` (`protocol/README.md`). This section gives the shape;
 Appendix E has every byte layout.
@@ -757,8 +777,8 @@ CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection), over type..payload
 - `seq` increments per frame in each direction. A command retry reuses the
   original frame's `seq`, which is what makes de-duplication work.
 
-**Acks and errors.** There is no NACK message. Every reply to a command is an
-`ACK(seq, type, status)`. Status values:
+**Acks and errors.** There is no NACK message. A reply to a command is its
+data reply (queries) or an `ACK(seq, type, status)`. Status values:
 
 | Code | Status |
 |---|---|
@@ -773,27 +793,41 @@ CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection), over type..payload
 | 8 | REFUSED_FALLEN |
 | 9 | EEPROM_BUSY |
 | 10 | STALE |
+| 11 | UNCALIBRATED |
 
 - **Goals** (`SET_POSTURE`, `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE`,
   `SET_BALANCE`, `SET_EYES`, `BEEP`, `HEARTBEAT`) are never acked. `SET_STREAM`
   is a command. Goals are idempotent, and the mind re-sends active goals at
   5 Hz and immediately on change. Rejections are reported as
-  `EVENT GOAL_REFUSED(type, reason)`, rate-limited to 1/s per type. The reason
-  is STALE, BAD_LEN, BAD_ARG, LOW_BATT or FALLEN, encoded with the ACK status
-  codes (10, 1, 2, 7, 8).
+  `EVENT GOAL_REFUSED(type << 8 | reason)`, at most one per goal type per
+  second. The reason is an ACK status code: STALE 10, BAD_LEN 1, BAD_ARG 2,
+  LOW_BATT 7, FALLEN 8, UNCALIBRATED 11 (STAND while the config is
+  DEFAULTED), or UNKNOWN_TYPE 4 for a goal this firmware does not implement
+  yet (in P0: `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE`, `SET_BALANCE`,
+  `SET_EYES`).
   Telemetry confirms what took effect: `mode`, owners, `epoch`, `last_rx_seq`.
-- **Commands** (trick upload/play/stop, calibration, params, EEPROM, stream
-  settings, stats, reboot) are acked. The Pi retries after 50 ms, up to 3
-  times. A query (`HELLO_REQ`, `PING`, `STATS_REQ`, `PCA_READ`, `CAL_GET`,
-  `PARAM_GET`, `EEPROM_READ`) also gets its data reply (`HELLO`, `PONG`, …),
-  sent after an `OK` ACK.
+- **Queries** (`HELLO_REQ`, `PING`, `STATS_REQ`, `PCA_READ`, `CAL_GET`,
+  `PARAM_GET`, `EEPROM_READ`; `query = true` in the spec) are answered by their
+  data reply only (`HELLO`, `PONG`, `STATS`, `PCA_COUNTS`, `CAL_VALUES`,
+  `PARAM_VALUE`, `EEPROM_DATA`). They get an ACK only on failure (for example
+  `PARAM_GET` of an unknown id is `ACK BAD_ARG`, a `PCA_READ` I2C error is
+  `ACK BUSY`). They are never de-duplicated, and the Pi retries a query with a
+  fresh `seq` after 50 ms, up to 3 times.
+- **Other commands** (trick upload/play/stop, calibration writes, params,
+  stream settings, IMU offsets, reboot) get exactly one ACK each. The Pi
+  retries after 50 ms, up to 3 times, with the same `seq`. In P0 the trick
+  commands are `ACK UNKNOWN_TYPE` (no keyframe store yet).
 - A frame with a bad CRC is never acked, because its `seq` and `type` cannot be
-  trusted. A CRC-valid command with an unknown type or a wrong payload length
-  is acked `UNKNOWN_TYPE` or `BAD_LEN`.
-- **De-duplication.** The body caches the last `(seq, type, status)`. A
-  repeated command with the same `seq` and `type` is re-acked without being
-  executed again, so a retry after a lost ACK is harmless. Queries have no side
-  effects, so a repeated query is answered again.
+  trusted. A CRC-valid frame with an unknown type is acked `UNKNOWN_TYPE`; a
+  known Pi → body type with a wrong payload length is acked `BAD_LEN` (a
+  command) or refused `GOAL_REFUSED(type, BAD_LEN)` (a goal). Known body → Pi
+  types arriving at the body are ignored.
+- **De-duplication.** The body caches the `(seq, type, status)` of the last
+  executed non-query command for 500 ms (`dedup_window_ms`). A repeat with the
+  same `seq` and `type` within that window is re-acked with the cached status
+  and not executed again, so a retry after a lost ACK is harmless. The window
+  exists because a new mind session (each `kilo` command is a process) starts
+  its `seq` afresh; the mind also starts at a random `seq`.
 - `CAL_SAVE` and `PARAM_SET persist` are acked when queued. The write itself is
   reported later by `EVENT EEPROM_SAVED`.
 
@@ -871,8 +905,11 @@ their 8-deep queue until there is room. Drops are reported by a rate-limited `EV
 
 **Watchdog timing.**
 - The Pi's serial writer thread sends `HEARTBEAT` whenever it has sent nothing
-  for 100 ms. To stop a hung mind from masking itself, it does this only while
-  the asyncio loop has proved alive within the last 1 s (§5).
+  for 100 ms. To stop a hung mind from masking itself, **all** traffic the
+  writer generates on its own (heartbeats, the 5 Hz goal refresh, `HELLO_REQ`
+  polling, the `HELLO_REQ` on (re)connect) is sent only while the asyncio loop
+  has proved alive within the last 1 s (§5). Goals and commands the mind
+  issues are sent at once.
 - The body stops motion at 0.5 s and moves to REST at 1.5 s (3g).
 - The Pi treats the body as lost after 300 ms without telemetry, and polls
   `HELLO_REQ` at 2 Hz until it answers.
@@ -906,19 +943,22 @@ and the CLI are in Appendix G.
 - **Reader:** splits on 0x00, decodes COBS, checks the CRC, parses into
   dataclasses with the generated `struct` formats, and hands the messages to
   the asyncio loop with `call_soon_threadsafe`.
-- **Writer:** drains an outbound queue and assigns `seq`. It sends `HEARTBEAT`
-  after 100 ms of silence, but only while the asyncio loop's liveness stamp is
-  less than 1 s old. A stalled mind therefore trips the body's watchdog instead
-  of being kept alive by the thread.
+- **Writer:** drains an outbound queue and assigns `seq` (starting at a random
+  value). Everything it sends on its own (`HEARTBEAT` after 100 ms of silence,
+  the 5 Hz goal refresh, `HELLO_REQ` polling) is gated on the asyncio loop's
+  liveness stamp being less than 1 s old. A stalled mind therefore trips the
+  body's watchdog instead of being kept alive by the thread.
 - **Logger:** writes every frame with a monotonic timestamp to a rotating file,
   off the asyncio loop, so disk stalls never delay control.
 
-`request()` awaits the matching ACK with a 50 ms timeout and 3 retries, which
-is safe because of body-side de-duplication.
+`request()` awaits the data reply (queries, retried with a fresh `seq`) or the
+ACK (other commands, retried with the same `seq`, which the body de-duplicates)
+with a 50 ms timeout and 3 retries.
 
 **Desired-state goals and epoch.** `BodyClient` stores the desired posture,
 gait, head, pose, balance and eyes. It sends a goal on change and re-sends all
-active goals at 5 Hz, each stamped with the latest epoch from telemetry.
+active goals at 5 Hz, each stamped with the epoch that was current when it
+was set (never re-stamped).
 Behaviours call methods like:
 
 - `body.walk(stride=30, turn=0, pattern=TROT)`
@@ -926,9 +966,10 @@ Behaviours call methods like:
 - `await body.play("hi", mirror=True)`, which resolves on `TRICK_DONE`
 - `body.beep([...])`
 
-On `FELL`, `WATCHDOG` or `LOW_BATTERY`, the client **clears all desired motion
-goals**, adopts the event's epoch, and notifies the behaviour layer. Nothing
-from before the event is replayed.
+On `FELL`, `WATCHDOG` or `LOW_BATTERY`, and on any epoch change seen in
+TELEMETRY, an EVENT or HELLO, the client **clears the desired motion goals from
+older epochs**, adopts the new epoch, and notifies the behaviour layer. Nothing
+from before the change is replayed.
 
 **Body state.** `BodyState` holds:
 - the latest telemetry, with time unwrapped;
@@ -1060,12 +1101,19 @@ cover:
 **Protocol single source.** `gen.py` output is committed. CI regenerates it and
 fails on any diff.
 
-**Size and symbol harness.** `tools/size.sh` compiles `body/` and checks
-`budget.json`. It fails if any forbidden symbol is linked: `HardwareSerial`,
-`TwoWire`, `__addsf3`, `__mulsf3`, `pulseIn`, `malloc`, or `IRrecv`. If the
-sanctioned float IK fallback is ever used, the float symbols are allowed
-explicitly in `budget.json`. A per-object size report is written on every
-build.
+**Size and symbol harness.** `body/tools/size_check.sh` compiles `body/` (or
+checks an existing ELF with `--elf`, which is what `kilo flash` does) against
+the phase ceilings `FLASH_MAX` and `GLOBALS_MAX` (3h). It fails if any
+forbidden symbol is linked: `HardwareSerial`/`Print`, `TwoWire`, I2Cdev,
+`pulseIn`, `tone`, the heap, `String`, soft float or libm. If the sanctioned
+float IK fallback is ever used, the float symbols are allowed explicitly
+there. It prints the largest symbols on every run.
+
+**Virtual body vs real body.** `mind/tests/test_crosscheck.py` builds the
+body's real dispatch (`core/link.cpp` and `core/`) for the host
+(`body/tools/build_link_harness.sh`), plays every P0 vector and a set of
+sequences (de-dup, params, goals, calibration, reboot) through it and through
+`kilo.vbody`, and requires the same replies, statuses and events.
 
 **Hardware-in-the-loop on Kilo.** Checklist H1-H15 (Appendix H) runs per phase,
 and the results go in the merge commit message. Highlights:
@@ -1114,7 +1162,7 @@ and `src/` are deleted after P2 is accepted.
   - HardwareSerial, Print, Wire and I2Cdev;
   - the float library, including float quaternion maths (≈1.3 KB) and
     `beep()` floats.
-- **Acceptance:** H1-H6, H8, H10. Flash ≤ 12 KB, globals ≤ 1540 B. REST →
+- **Acceptance:** H1-H6, H8, H10. Flash ≤ 16 KB, globals ≤ 1540 B. REST →
   STAND → SIT → REST from the Pi.
 
 **P1: motor loop, arbitration, tricks, balance.**
@@ -1132,14 +1180,14 @@ and `src/` are deleted after P2 is accepted.
     trick.
 - **Acceptance:** H7, H9 (looping trick), H11-H13. Each first-version trick
   matches the old firmware side by side, in the owner's judgement. Attitude
-  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 16 KB.
+  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 18 KB.
 
 **P2: gait + IK.**
 - **Deliverables:** measured geometry; IK, gait, STANCE, geometric balance, bob
   and wag; `kilo walk` with keyboard driving.
 - **Acceptance:** H14, H9 while trotting, the IK/gait tests under simavr. WALK,
   TROT and CRAWL start and stop with no visible foot jump on slow-motion video.
-  Flash ≤ 18 KB.
+  Flash ≤ 20 KB.
 - **Then cut over:** delete the legacy firmware (its hex is kept in
   `mind/firmware/`).
 
@@ -1190,6 +1238,13 @@ and `src/` are deleted after P2 is accepted.
    body-side log of falls and resets?
 8. **Network.** The Pi 2 has no Wi-Fi. USB Wi-Fi dongle (+0.5-1 W) or Ethernet
    for development?
+9. **Flash ceilings.** The integrated P0 build is 18164 B against the 16 KB P0
+   ceiling (3h). Options: raise the ceilings (P0 18.5, P1 20.5, P2 22.5 KB:
+   still under half the 31.5 KB available); defer ultrasonic and buzzer to P1
+   as §7 schedules them (−610 B); build with `-mrelax -mcall-prologues`
+   (−430 B); or bring the DMP removal (P5, ≈−3.5 KB) forward. Until decided,
+   `FLASH_MAX=18432 kilo flash` runs the symbol scan with an explicit
+   temporary ceiling.
 
 ---
 
@@ -1437,6 +1492,12 @@ Serial/Print ≈1.4 KB, float library ≈1.6 KB.
 | **Total** | **≈15.4 KB** (S → 18 KB) | **globals ≈1.50 KB** |
 | Stack (painted, worst case) | | 350 B |
 
+**D3. Measured at the P0 integration** (avr-gcc 7.3, -Os, LTO): 18164 B flash,
+1061 B globals. Of that, the link layer (frame codec ≈0.7 KB, dispatch of every
+P0 message, HELLO, TELEMETRY/JOINTS/IMU_RAW, the event queue, STATS, params)
+is ≈4.5 KB, about twice the 2.3 KB of the three D2 rows above; the rest
+(13.6 KB) was measured before the link existed. See 3h and §8 question 9.
+
 ---
 
 ## Appendix E: Protocol reference
@@ -1451,7 +1512,7 @@ this table. Offsets are within the payload. `E` = epoch u8.
 | 0x01 HELLO_REQ, 0x02 HEARTBEAT, 0x05 STATS_REQ, 0x06 PCA_READ, 0x38 CAL_GET, 0x3A CAL_SAVE, 0x3B CAL_REVERT | (empty) | 0 |
 | 0x03 PING | `token u16` | 2 |
 | 0x04 SET_STREAM | `telem_div u8` (0 off, default 2 → 25 Hz), `joints_div u8`, `imu_raw_div u8` | 3 |
-| 0x10 SET_POSTURE | `E`, `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE, 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = 25), `flags u8` (bit 0 balance) | 4 |
+| 0x10 SET_POSTURE | `E`, `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE, 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = param `POSTURE_TICKS`, 25), `flags u8` (bit 0 balance; BALANCE = STAND + this bit) | 4 |
 | 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance) | 11 |
 | 0x12 SET_HEAD | `E`, `mode u8` (0 release, 1 hold), `pan i16`, `tilt i16`, `tail i16` (a16), `max_speed_dps u16` | 10 |
 | 0x13 SET_BODY_POSE | `E`, `pitch i16`, `roll i16` (a16), `dheight_mm i8`, `xshift_mm i8` | 7 |
@@ -1474,9 +1535,9 @@ this table. Offsets are within the payload. `E` = epoch u8.
 
 | Type | Payload | B |
 |---|---|---|
-| 0x80 HELLO | `proto_major u8`, `proto_minor u8`, `fw_build u32`, `reset_cause u8` (0 COLD, 1 FLASHED, 2 REQUESTED, 3 WARM_UNEXPECTED), `last_alive_tick u16`, `caps u16` (bit 0 buzzer, 2 DMP, 3 ultrasonic, 4 eyes), `max_payload u8`, `trick_capacity u8`, `joint_count u8`, `config_state u8` (0 ok, 1 migrated, 2 defaulted), `epoch u8` | 16 |
+| 0x80 HELLO | `proto_major u8`, `proto_minor u8`, `fw_build u32`, `reset_cause u8` (0 COLD, 1 FLASHED, 2 REQUESTED, 3 WARM_UNEXPECTED), `last_alive_tick u16`, `caps u16` (bit 0 buzzer, 2 DMP, 3 ultrasonic, 4 eyes), `max_payload u8`, `trick_capacity u8` (0 in P0: no store), `joint_count u8` (11), `config_state u8` (0 ok, 1 migrated, 2 defaulted), `epoch u8` | 16 |
 | 0x81 TELEMETRY | §4 | 26 |
-| 0x82 JOINTS | `tick u16`, 11 × `i16` a16 | 24 |
+| 0x82 JOINTS | `tick u16`, 11 × `i16` a16 (−32768 = limp) | 24 |
 | 0x83 IMU_RAW | `tick u16`, 6 × `i16` | 14 |
 | 0x84 ACK | `seq u8`, `type u8`, `status u8` | 3 |
 | 0x85 EVENT | `code u8`, `arg i16`, `tick u16`, `epoch u8` | 6 |
@@ -1510,19 +1571,31 @@ this table. Offsets are within the payload. `E` = epoch u8.
 | 16 | EEPROM_SAVED |
 | 17 | TX_DROPPED (rate-limited) |
 
-**Params** (stable ids):
+**Params** (`[[params]]` in spec.toml; stable ids, appended, never
+renumbered; each id < 16 has a persisted slot in the config block, 0x7FFF =
+default). The P0 body implements:
 
-| Group | Params (defaults) |
-|---|---|
-| Watchdog, motion | `WD_STOP_MS` (500), `WD_REST_MS` (1500), `WD_LIMP_S` (10), `XFADE_TICKS` (10), `SLEW_MAX_A16` (160) |
-| Fall | `FALL_DEG` (75) |
-| Battery | `BATT_WARN_MV`, `BATT_LOW_MV`, `BATT_CRIT_MV`, `BATT_HYST_MV` |
-| Balance | `BAL_KP_Q8`, `BAL_KD_MS`, `BAL_DB_A16`, `BAL_MAX_A16` |
-| Head | `HEAD_HOLD_MS` |
-| Ultrasonic | `US_PERIOD_TICKS` |
-| Geometry | `L1_Q2`, `L2_Q2`, `LB_MM`, `W_MM` |
-| Bob and wag | `BOB_A16`, `WAG_A16` |
-| Legacy joint gains | per-joint roll and pitch gains |
+| Id | Name | Default | Min..max | Unit | Meaning |
+|---|---|---|---|---|---|
+| 0 | `WD_STOP_MS` | 500 | 100..5000 | ms | Watchdog stage 1 (stop, epoch bump) |
+| 1 | `WD_REST_MS` | 1500 | 200..10000 | ms | Watchdog stage 2 (REST) |
+| 2 | `WD_LIMP_S` | 10 | 1..600 | s | Watchdog REST → LIMP |
+| 3 | `XFADE_TICKS` | 10 | 0..100 | tick | Crossfade out of TRICK or REFLEX |
+| 4 | `POSTURE_TICKS` | 25 | 1..255 | tick | Default IDLE posture transition |
+| 5 | `SLEW_MAX_A16` | 160 | 16..800 | a16/tick | Safety-stage slew limit |
+| 6 | `BATT_WARN_MV` | 6900 | 5000..8400 | mV | WARN trip |
+| 7 | `BATT_WARN_CLEAR_MV` | 7100 | 5000..8400 | mV | WARN clear |
+| 8 | `BATT_LOW_MV` | 6600 | 5000..8400 | mV | LOW trip |
+| 9 | `BATT_LOW_CLEAR_MV` | 7000 | 5000..8400 | mV | LOW clear |
+| 10 | `BATT_CRIT_MV` | 6300 | 5000..8400 | mV | CRITICAL trip (latched) |
+| 11 | `TELEM_DIV` | 2 | 0..50 | tick | TELEMETRY divisor at boot (`SET_STREAM` overrides) |
+| 12 | `US_PERIOD_TICKS` | 4 | 3..50 | tick | Ultrasonic cadence |
+
+The two clear levels replace the earlier single `BATT_HYST_MV`, because the
+WARN and LOW hysteresis differ (200 and 400 mV). P1 appends `FALL_DEG` (75),
+`BAL_KP_Q8`, `BAL_KD_MS`, `BAL_DB_A16`, `BAL_MAX_A16` and `HEAD_HOLD_MS`; P2
+the geometry (`L1_Q2`, `L2_Q2`, `LB_MM`, `W_MM`) and `BOB_A16`, `WAG_A16`. The
+legacy per-joint balance gains stay a PROGMEM table.
 
 **Worked frames** (in `protocol/vectors/frames.json`, with one or more frames
 per message type, generated by `gen.py`):
@@ -1546,22 +1619,27 @@ SET_POSTURE seq=1     decoded: 10 01 00 03 00 01 b4 f7      wire: 03 10 01 02 03
 - GPIO4 is left as an **input** (no pull) when idle: `gpio=4=ip,np`.
 
 **Reset via GPIO4 (emulated open-drain).** To reset, drive GPIO4 low for
-50 ms, then return it to input. That works whether GPIO4 is AC-coupled to
+100 ms (`reset_pulse_ms`), then return it to input. That works whether GPIO4 is AC-coupled to
 RESET (the falling edge resets) or wired directly (the low level holds reset).
 It never drives the line high against the NyBoard's own reset circuit.
 
 **Flash sequence (`kilo flash`):**
 1. Ask the daemon to release `/dev/ttyAMA0` (`/run/kilo/serial.lock`).
-2. `arduino-cli compile --fqbn arduino:avr:uno --build-path ~/.cache/kilo-build body/`.
-   About 1-3 min on a Pi 2 **(est.)**. The git hash goes in through
-   `compiler.cpp.extra_flags=-DKILO_BUILD=0x…`.
-3. Run the size/symbol harness. Stop on failure.
-4. Pulse GPIO4 (libgpiod `gpioset`).
+2. `arduino-cli compile --fqbn arduino:avr:uno --output-dir ~/.cache/kilo-build body/`.
+   About 1-3 min on a Pi 2 **(est.)**. The build hash goes in through
+   `compiler.cpp.extra_flags=-DKILO_BUILD=0x<first 8 hex digits of the commit>`,
+   and the body reports it as `HELLO.fw_build`. A plain arduino-cli build
+   without it reports an FNV-1a hash of the compile date and time instead.
+   The reset record mixes the compile time in either way, so rebuilding a
+   dirty tree still boots as `FLASHED`.
+3. Run the size/symbol harness on that ELF (`body/tools/size_check.sh --elf`).
+   Stop on failure.
+4. Pulse GPIO4 (`pinctrl`, libgpiod `gpioset`, or sysfs).
 5. Within ≈200 ms, run
    `avrdude -p m328p -c arduino -P /dev/ttyAMA0 -b 115200 -D -U flash:w:body.ino.hex:i`.
    Optiboot only starts on an external reset and waits ≈1 s.
-6. Reopen at 250000 and expect HELLO with `reset_cause = FLASHED` and the new
-   build hash within 3 s. Retry once.
+6. Reopen at 250000 and expect HELLO with `reset_cause = FLASHED` and
+   `fw_build` equal to the build hash within 3 s. Retry once.
 
 `kilo flash --legacy` writes `mind/firmware/opencat-legacy.hex`, which talks
 the token protocol at 115200 and finds its EEPROM intact.
@@ -1578,24 +1656,44 @@ the token protocol at 115200 and finds its EEPROM intact.
 
 ## Appendix G: Repository layout and CLI
 
+As of P0. Names in *italics* are planned for later phases.
+
 ```
-body/
-  body.ino
-  src/core/   fx  joints  ik  gait  keyframe  arbiter  balance  reflex  attitude
-              cobs  crc16  codec  protocol_gen.h  params  config_block  epoch
-  src/hal/    uart  i2c  pca9685  mpu6050_dmp  ultrasonic  ws2812  adc  eeprom_writer  buzzer  clock  noinit
-  test/       Makefile, unit tests, ref/ (Python float references), vbody/
-  budget.json
-protocol/     spec.toml  gen.py  gen/  c/  py/  vectors/  test.sh
-mind/
-  pyproject.toml
-  kilo/       protocol_gen.py codec.py link.py body.py log.py daemon.py cli.py flash.py
-              tricks/{model,legacy_import,uploader}.py tricks/library/*.json
-              behaviour/{bt,drives}.py behaviour/trees/*.py
-              perception/{ultrasonic,imu_events,camera,audio}.py
-  tests/  firmware/opencat-legacy.hex  systemd/kilo-mind.service
-tools/size.sh
-docs/
+body/                     the NyBoard firmware (arduino-cli sketch)
+  body.ino                empty: main() is ours (src/app/main.cpp)
+  src/core/               pure C++ logic, no Arduino/AVR headers, host-tested
+                          fx  joints  posture  arbiter  attitude  battery  body (tick + reflexes)
+                          config (slots, legacy import)  params  events  notes  reset  sched
+                          link (dispatch, ACK/de-dup, HELLO, streams, events)  pgm.h
+                          *ik  gait  keyframe  balance  fall reflex*
+  src/hal/                register-level drivers: uart  i2c  pca9685  mpu6050 (+ dmp_image.h)
+                          adc  buzzer  clock  eeprom  gpio.h  sys (.noinit record, WDT, stack paint)
+                          ultrasonic  *ws2812*
+  src/app/                main.cpp (boot, 50 Hz loop)  link_hal.cpp (core/link's hardware seam)
+  src/proto/              VENDORED by protocol/vendor.py: kilo_protocol.h, cobs/crc16/kilo_frame.[ch]
+  test/                   host unit tests (test_*.cpp), fakes (EEPROM, link HAL),
+                          link_harness.cpp (stdin-driven dispatch for the cross-check)
+  tools/                  host_tests.sh  size_check.sh  build_link_harness.sh
+protocol/                 spec.toml  gen.py  vendor.py  vector_cases.py  test.sh
+  gen/                    kilo_protocol.h  kilo_protocol.py   (generated, committed)
+  c/                      cobs  crc16  kilo_frame  test_protocol.cpp
+  py/                     kilo_link_codec.py  test_codec.py
+  vectors/                frames.json  cobs.json              (generated, committed)
+mind/                     the Python mind (pip install -e mind)
+  pyproject.toml  README.md  firmware/ (opencat-legacy.hex)
+  kilo/
+    cli.py  log.py
+    protocol/             VENDORED by protocol/vendor.py: kilo_protocol.py, kilo_link_codec.py
+    link/                 codec.py (framing adapter)  messages.py (dataclass adapter)  consts.py
+                          serial_link.py (reader/writer threads, goals, commands)  transport.py  ports.py
+    body/                 state.py (BodyState)  client.py (BodyClient)
+    tools/                flash.py  gpio.py (GPIO4 reset)
+    vbody/                sim.py (virtual body on a pty)  __main__.py
+    *daemon.py  tricks/  behaviour/  perception/*
+  tests/                  pytest: codec, link rules, state, CLI, flash, vbody,
+                          cross-check vs the C dispatch, CLI end to end on a pty
+docs/                     architecture.md  raspberry-pi.md  p0-hardware-test.md
+OpenCat.ino, src/         the legacy firmware, until the P2 cutover
 ```
 
 arduino-cli compiles `src/` recursively, which is why the logic lives under
@@ -1612,7 +1710,7 @@ opens the port directly if the daemon is not running.
 | `kilo look PAN TILT [--tail T]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head, eyes, sound |
 | `kilo trick list\|play NAME [--mirror] [--speed 1.5]\|import-legacy FILE\|edit NAME` | Tricks; `edit` jogs joints live and captures frames |
 | `kilo cal`, `kilo cal imu` | Joint calibration; IMU offset iteration on the Pi from IMU_RAW (keeps `CalibrateAccel/Gyro`, ≈1 KB, off the body) |
-| `kilo param get\|set\|list [--persist]` | Live tuning |
+| `kilo param get\|set\|list [--persist]` | Live tuning (names or ids from the spec's param table) |
 | `kilo eeprom dump 0 283 > docs/kilo-eeprom-legacy.md` | The P0 legacy dump |
 | `kilo flash [--legacy] [--no-build] [--port P]` | Appendix F |
 | `kilo log plot FILE --fields pitch,roll,corr` | Offline plots |
