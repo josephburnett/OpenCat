@@ -1,7 +1,7 @@
 import pytest
 
 from kilo.body.state import BodyState, battery_percent, decode_flags
-from kilo.link.messages import Message
+from kilo.protocol import kilo_protocol as P
 
 
 def tel(**kw):
@@ -9,7 +9,7 @@ def tel(**kw):
              batt_mv=7600, mode=2, owners=0x40, flags=(1 << 2) | (1 << 7), last_rx_seq=0,
              trick_frame=255, gait_phase=0, tick_load=35, rx_err=0, epoch=0)
     f.update(kw)
-    return Message("TELEMETRY", 0x81, f)
+    return P.Telemetry(**f)
 
 
 class Clock:
@@ -31,7 +31,7 @@ def test_battery_curve():
 
 
 def test_flags_decode():
-    assert decode_flags((1 << 0) | (1 << 9)) == {"balance", "no_battery"}
+    assert decode_flags((1 << 0) | (1 << 9)) == {"balance_active", "no_battery"}
 
 
 def test_tick_unwrap_and_backwards():
@@ -57,7 +57,7 @@ def test_derived_values_and_alive():
     assert s.pitch_deg == 10 and s.roll_deg == -5
     assert s.upright is True
     assert s.mode == "IDLE"
-    assert s.owners == ("IDLE", "PI")
+    assert s.owners == ("IDLE", "PI_HOLD")
     assert "servos_powered" in s.flags and "link_ok" in s.flags
     assert not s.moving and not s.fallen
     assert s.battery_pct == 50
@@ -89,9 +89,8 @@ def test_snapshot_shape():
               "reset_cause", "reboots"):
         assert k in snap
     s.on_telemetry(tel(), 0)
-    s.on_hello(Message("HELLO", 0x80, dict(proto_major=1, proto_minor=0, fw_build=1, reset_cause=1,
-                                           last_alive_tick=0, caps=0, max_payload=60,
-                                           trick_capacity=32, joint_count=16, config_state=0,
-                                           epoch=2)), 0, expected_major=1)
+    s.on_hello(P.Hello(proto_major=1, proto_minor=1, fw_build=1, reset_cause=1, last_alive_tick=0,
+                       caps=0, max_payload=60, trick_capacity=0, joint_count=11, config_state=0,
+                       epoch=2), 0, expected_major=1)
     snap = s.snapshot()
     assert snap["reset_cause"] == "FLASHED" and snap["proto_ok"] is True and snap["epoch"] == 2

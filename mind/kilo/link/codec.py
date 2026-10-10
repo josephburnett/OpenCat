@@ -1,14 +1,11 @@
 """Codec interface: framing of (type, seq, payload) records on the wire.
 
 This is the seam between the link and the framing implementation. The real
-framing (COBS + CRC-16/CCITT-FALSE, docs/architecture.md §4) lives in
-protocol/'s ``kilo_link_codec.py``; until it is integrated, ``codec_stub``
-provides a stand-in. Tests use a trivial length-prefixed codec to exercise the
-plumbing independently of the framing.
-
-A codec only frames bytes. It does not know message layouts (that is the
-``Messages`` adapter in ``kilo.link.messages``) and it does not check that the
-payload length matches the type; the message layer does that.
+framing (COBS + CRC-16/CCITT-FALSE, docs/architecture.md §4) is protocol/'s
+``kilo_link_codec.py``, vendored byte for byte into ``kilo.protocol`` by
+``protocol/vendor.py``; ``KiloCodec`` adapts it to this interface. Tests may
+plug in other codecs (e.g. a trivial length-prefixed one) to exercise the
+link's plumbing independently of the framing.
 
 Interface (structural, any object with these methods works)::
 
@@ -28,7 +25,9 @@ from __future__ import annotations
 
 from typing import NamedTuple, Protocol, runtime_checkable
 
-MAX_PAYLOAD = 60  # §4: payload 0..60 B
+from kilo.protocol import kilo_link_codec as _C
+
+MAX_PAYLOAD = _C.MAX_PAYLOAD  # §4: payload 0..60 B
 
 
 class Frame(NamedTuple):
@@ -42,15 +41,18 @@ class Frame(NamedTuple):
 class DecodeError(NamedTuple):
     """A frame that could not be decoded.
 
-    ``kind`` is one of: ``"overflow"`` (more than the maximum frame size before a
-    delimiter; maps to the body's ``rx_overflow``), ``"crc"`` (``rx_crc_err``),
-    ``"cobs"`` (malformed stuffing), ``"short"`` (decoded length < 4). Codecs may
-    add other kinds; the link counts them all as decode errors. ``raw`` holds
-    the offending bytes (possibly truncated) for logging.
+    ``kind`` is one of kilo_link_codec's error kinds: ``"bad_cobs"``,
+    ``"bad_crc"``, ``"bad_length"``, ``"unknown_type"``, ``"overflow"``. For
+    ``bad_length`` on a CRC-valid frame and for ``unknown_type`` the header was
+    trustworthy and ``type``/``seq`` are set (the body ACKs such commands with
+    BAD_LEN / UNKNOWN_TYPE); otherwise they are None. ``raw`` holds the payload
+    when known, for logging.
     """
 
     kind: str
     raw: bytes = b""
+    type: int | None = None
+    seq: int | None = None
 
 
 @runtime_checkable
@@ -65,12 +67,32 @@ class Codec(Protocol):
     def new_decoder(self) -> Decoder: ...
 
 
+class KiloDecoder:
+    """Streaming decoder over kilo_link_codec.StreamDecoder (checks type and length)."""
+
+    def __init__(self) -> None:
+        self._d = _C.StreamDecoder(check_type=True)
+
+    def feed(self, data: bytes) -> list[Frame | DecodeError]:
+        out: list[Frame | DecodeError] = []
+        for r in self._d.feed(bytes(data)):
+            if isinstance(r, _C.FrameError):
+                out.append(DecodeError(r.kind, r.payload or b"", r.type, r.seq))
+            else:
+                out.append(Frame(r.type, r.seq, r.payload))
+        return out
+
+
+class KiloCodec:
+    """The real §4 framing: COBS(type | seq | payload | crc16 LE) | 0x00."""
+
+    def encode(self, type: int, seq: int, payload: bytes) -> bytes:
+        return _C.build_frame(type, seq, bytes(payload))
+
+    def new_decoder(self) -> KiloDecoder:
+        return KiloDecoder()
+
+
 def default_codec() -> Codec:
-    """The codec the CLI and daemon use.
-
-    TODO(protocol): return the protocol/ codec (kilo_link_codec) once it is
-    integrated, adapting it to this interface if its names differ.
-    """
-    from kilo.link.codec_stub import StubCodec
-
-    return StubCodec()
+    """The codec the CLI, daemon and virtual body use."""
+    return KiloCodec()

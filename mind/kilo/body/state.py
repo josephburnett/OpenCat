@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kilo.link import consts
+from kilo.link.messages import fields_of
 
 A16 = 16.0  # a16: 1/16 degree
 TELEMETRY_TIMEOUT_S = 0.300
@@ -271,8 +272,6 @@ class BodyState:
 
 
 def _fields(m: Any) -> dict[str, Any]:
-    if hasattr(m, "as_dict"):
-        return m.as_dict()
     if hasattr(m, "__dataclass_fields__"):
-        return {k: getattr(m, k) for k in m.__dataclass_fields__}
+        return fields_of(m)
     return dict(vars(m))

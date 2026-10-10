@@ -57,7 +57,7 @@ def test_flash_sequence_gpio_stops_and_restarts_link(tmp_path):
 
     res = fl.flash(fl.FlashOptions(port="/dev/ttyAMA0", hex_path=hexf, avrdude="avrdude"),
                    link=link, run=run, reset_backend=FakeReset(calls),
-                   verify=lambda since: True, say=lambda s: None)
+                   verify=lambda since, build: True, say=lambda s: None)
     assert link.calls == ["stop", "start"]
     assert calls == [("pulse", 100.0), ("run", False, "avrdude")]  # link stopped while flashing
     assert res.reset == "gpio" and res.verified is True and res.attempts == 1

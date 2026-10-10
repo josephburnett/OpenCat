@@ -1,87 +1,19 @@
-"""Test plumbing: a trivial length-prefixed codec, a messages adapter with a
-few extra (test-only) layouts, and a scripted peer on a loopback transport.
-
-The length-prefixed codec is deliberately not the real framing: these tests
-exercise the link's plumbing, not COBS/CRC (protocol/ owns those vectors).
+"""Test plumbing: a scripted peer (body end) on a loopback transport, speaking
+the real codec (COBS + CRC) and the generated message layouts.
 """
 
 from __future__ import annotations
 
-import struct
 import threading
 import time
 from typing import Any, Callable
 
 import pytest
 
-from kilo.link.codec import DecodeError, Frame
-from kilo.link.messages import Message
-from kilo.link.messages_stub import StubMessages
+from kilo.link.codec import DecodeError, Frame, KiloCodec
+from kilo.link.messages import KiloMessages
 from kilo.link.serial_link import LinkConfig, SerialLink
 from kilo.link.transport import loopback_pair
-
-
-class LenPrefixDecoder:
-    def __init__(self) -> None:
-        self.buf = bytearray()
-
-    def feed(self, data: bytes) -> list[Frame | DecodeError]:
-        self.buf += data
-        out: list[Frame | DecodeError] = []
-        while self.buf:
-            n = self.buf[0]
-            if n < 2:
-                out.append(DecodeError("short", bytes(self.buf[:1])))
-                del self.buf[:1]
-                continue
-            if len(self.buf) < 1 + n:
-                break
-            body = bytes(self.buf[1:1 + n])
-            del self.buf[:1 + n]
-            out.append(Frame(body[0], body[1], body[2:]))
-        return out
-
-
-class LenPrefixCodec:
-    """len u8 | type u8 | seq u8 | payload"""
-
-    def encode(self, type: int, seq: int, payload: bytes) -> bytes:
-        return bytes((2 + len(payload), type, seq)) + bytes(payload)
-
-    def new_decoder(self) -> LenPrefixDecoder:
-        return LenPrefixDecoder()
-
-
-# test-only layouts: plumbing needs a few goals and replies to exist
-_EXTRA = {
-    "SET_POSTURE": ("<BBBB", ("epoch", "posture", "transition_ticks", "flags")),
-    "SET_HEAD": ("<BBhhhH", ("epoch", "mode", "pan", "tilt", "tail", "max_speed_dps")),
-    "SET_EYES": ("<BBBB", ("led_mask", "r", "g", "b")),
-    "CAL_SET": ("<Bh", ("joint", "offset_a16")),
-    "PING": ("<H", ("token",)),
-    "PONG": ("<HH", ("token", "tick")),
-}
-
-
-class PlumbingMessages(StubMessages):
-    PROTO_MAJOR = 0
-
-    def pack(self, name: str, **fields: Any) -> bytes:
-        if name == "CAL_VALUES":
-            return struct.pack("<16h", *fields["offsets"])
-        if name in _EXTRA:
-            fmt, names = _EXTRA[name]
-            return struct.pack(fmt, *(fields[n] for n in names))
-        return super().pack(name, **fields)
-
-    def unpack(self, type: int, payload: bytes) -> Message:
-        name = self.name_of(type)
-        if name == "CAL_VALUES":
-            return Message(name, type, {"offsets": list(struct.unpack("<16h", payload))})
-        if name in _EXTRA:
-            fmt, names = _EXTRA[name]
-            return Message(name, type, dict(zip(names, struct.unpack(fmt, payload))))
-        return super().unpack(type, payload)
 
 
 class Peer:
@@ -89,8 +21,8 @@ class Peer:
 
     def __init__(self, end: Any, codec: Any = None, msgs: Any = None):
         self.end = end
-        self.codec = codec or LenPrefixCodec()
-        self.msgs = msgs or PlumbingMessages()
+        self.codec = codec or KiloCodec()
+        self.msgs = msgs or KiloMessages()
         self.dec = self.codec.new_decoder()
         self.frames: list[tuple[float, str, int, bytes]] = []
         self.handler: Callable[["Peer", str, Frame], None] | None = None
@@ -145,9 +77,9 @@ class Peer:
         f.update(kw)
         self.send("TELEMETRY", **f)
 
-    def hello(self, epoch: int = 0, reset_cause: int = 0, proto_major: int = 0) -> None:
+    def hello(self, epoch: int = 0, reset_cause: int = 0, proto_major: int = 1) -> None:
         self.send("HELLO", proto_major=proto_major, proto_minor=0, fw_build=0xABCD, reset_cause=reset_cause,
-                  last_alive_tick=0, caps=0, max_payload=60, trick_capacity=32, joint_count=16,
+                  last_alive_tick=0, caps=0, max_payload=60, trick_capacity=32, joint_count=11,
                   config_state=0, epoch=epoch)
 
     def event(self, name: str, arg: int = 0, epoch: int = 0, tick: int = 0) -> None:
@@ -172,7 +104,7 @@ def make_link():
     def factory(**cfg: Any) -> tuple[SerialLink, Peer]:
         a, b = loopback_pair()
         conf = LinkConfig(**{**FAST, **cfg})
-        link = SerialLink(lambda: a, codec=LenPrefixCodec(), messages=PlumbingMessages(), config=conf,
+        link = SerialLink(lambda: a, codec=KiloCodec(), messages=KiloMessages(), config=conf,
                           port_name="loopback")
         peer = Peer(b)
         link.mark_alive()

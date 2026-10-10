@@ -1,65 +1,33 @@
-"""Messages adapter interface: names <-> type codes, fields <-> payload bytes.
+"""Messages adapter: names <-> type codes, fields <-> payload bytes.
 
 The link and the BodyClient never touch payload layouts directly; they go
-through an object with this interface. protocol/ generates dataclasses for
-every message (kilo_protocol); at integration a thin adapter over them
-replaces ``messages_stub``.
+through this adapter over the generated dataclasses in
+``kilo.protocol.kilo_protocol`` (protocol/spec.toml is the single source of
+truth; the module is vendored by protocol/vendor.py).
 
-Interface (structural)::
+Interface (structural; tests may substitute their own)::
 
     messages.PROTO_MAJOR: int | None        expected HELLO.proto_major, None = don't check
     messages.type_of(name: str) -> int      raises KeyError
     messages.name_of(type: int) -> str      "0x??" for unknown types
     messages.pack(name: str, **fields) -> bytes
-        Payload bytes for message ``name``. Raises ProtocolNotImplemented if the
-        layout is not available, ValueError on a bad field.
-    messages.unpack(type: int, payload: bytes) -> Message
-        Raises ProtocolNotImplemented for unknown layouts, ValueError on a
-        length mismatch.
+        Payload bytes for message ``name``. Raises ValueError on a bad or
+        missing field. Count fields of variable arrays (BEEP ``n``,
+        TRICK_FRAMES ``count``) are implied by the list length; list elements
+        may be dicts or the generated element dataclasses.
+    messages.unpack(type: int, payload: bytes) -> dataclass instance
+        Raises ValueError on an unknown type or a length mismatch.
 
-Field names follow Appendix E (``epoch``, ``posture``, ``transition_ticks`` ...).
+Decoded messages are the generated dataclasses: fields are attributes, and
+``fields_of(msg)`` gives a plain dict.
 """
 
 from __future__ import annotations
 
+from dataclasses import fields as dc_fields, is_dataclass
 from typing import Any, Protocol
 
-
-class ProtocolNotImplemented(NotImplementedError):
-    """The message layout is not available yet. TODO(protocol)."""
-
-
-class Message:
-    """A decoded message: the fields as attributes, plus ``msg_name``/``msg_type``.
-
-    (Not ``name``/``type``: ACK has a field called ``type``.) Generated
-    dataclasses can be used instead as long as they expose the same field
-    names; the link reads fields with ``getattr`` only.
-    """
-
-    __slots__ = ("msg_name", "msg_type", "fields")
-
-    def __init__(self, name: str, type: int, fields: dict[str, Any] | None = None):
-        self.msg_name = name
-        self.msg_type = type
-        self.fields = dict(fields or {})
-
-    def __getattr__(self, item: str) -> Any:
-        try:
-            return self.fields[item]
-        except KeyError:
-            raise AttributeError(item) from None
-
-    def as_dict(self) -> dict[str, Any]:
-        return dict(self.fields)
-
-    def __repr__(self) -> str:
-        inner = ", ".join(f"{k}={v!r}" for k, v in self.fields.items())
-        return f"{self.msg_name}({inner})"
-
-    def __eq__(self, other: object) -> bool:
-        return (isinstance(other, Message) and other.msg_name == self.msg_name
-                and other.fields == self.fields)
+from kilo.protocol import kilo_protocol as P
 
 
 class Messages(Protocol):
@@ -71,11 +39,71 @@ class Messages(Protocol):
 
     def pack(self, name: str, **fields: Any) -> bytes: ...
 
-    def unpack(self, type: int, payload: bytes) -> Message: ...
+    def unpack(self, type: int, payload: bytes) -> Any: ...
+
+
+def fields_of(msg: Any) -> dict[str, Any]:
+    """A decoded message as a plain dict (bytes as hex, element structs as dicts)."""
+    return P.to_dict(msg)
+
+
+def _build(cls: type, fields: dict[str, Any]) -> Any:
+    known = {f.name: f for f in dc_fields(cls)}
+    extra = set(fields) - set(known)
+    if extra:
+        raise ValueError(f"{cls.NAME if hasattr(cls, 'NAME') else cls.__name__}: unknown fields {sorted(extra)}")
+    kw: dict[str, Any] = {}
+    for k, v in fields.items():
+        t = str(known[k].type)
+        if t.startswith("list[") and t != "list[int]":
+            ec = getattr(P, t[5:-1])
+            v = [x if is_dataclass(x) else _build(ec, x) for x in v]
+        elif t == "bytes" and isinstance(v, str):
+            v = bytes.fromhex(v)
+        kw[k] = v
+    return cls(**kw)
+
+
+class KiloMessages:
+    PROTO_MAJOR: int | None = P.PROTO_MAJOR
+    PROTO_MINOR: int = P.PROTO_MINOR
+
+    def type_of(self, name: str) -> int:
+        return int(P.MsgId[name])
+
+    def name_of(self, type: int) -> str:
+        try:
+            return P.MsgId(type).name
+        except ValueError:
+            return f"0x{type:02X}"
+
+    def cls_of(self, name: str) -> type:
+        return P.MESSAGES[self.type_of(name)]
+
+    def build(self, name: str, **fields: Any) -> Any:
+        """The dataclass instance for ``name`` (missing scalar fields default to 0)."""
+        try:
+            cls = self.cls_of(name)
+        except KeyError:
+            raise ValueError(f"unknown message {name!r}") from None
+        return _build(cls, fields)
+
+    def pack(self, name: str, **fields: Any) -> bytes:
+        try:
+            return self.build(name, **fields).pack()
+        except P.PayloadError as e:
+            raise ValueError(str(e)) from None
+        except TypeError as e:
+            raise ValueError(f"{name}: {e}") from None
+
+    def unpack(self, type: int, payload: bytes) -> Any:
+        try:
+            return P.decode_payload(type, bytes(payload))
+        except KeyError:
+            raise ValueError(f"unknown message type 0x{type:02X}") from None
+        except P.PayloadError as e:
+            raise ValueError(str(e)) from None
 
 
 def default_messages() -> Messages:
-    """TODO(protocol): return an adapter over the generated kilo_protocol module."""
-    from kilo.link.messages_stub import StubMessages
-
-    return StubMessages()
+    return KiloMessages()

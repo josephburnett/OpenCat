@@ -1,113 +1,65 @@
-"""Protocol constants transcribed from docs/architecture.md §4 and Appendix E.
+"""Protocol constants for the link, state model and CLI, derived from the
+generated module (kilo.protocol.kilo_protocol, from protocol/spec.toml).
 
-TODO(protocol): import these from the generated module (kilo_protocol) once it
-is integrated; spec.toml is authoritative and this file must then disappear.
-Only constants the link, state model and CLI need are here.
+Nothing here is transcribed by hand: change spec.toml, regenerate, re-vendor.
 """
 
 from __future__ import annotations
 
-# --- message type codes (§4 message index) --------------------------------
-TYPES: dict[str, int] = {
-    "HELLO_REQ": 0x01,
-    "HEARTBEAT": 0x02,
-    "PING": 0x03,
-    "SET_STREAM": 0x04,
-    "STATS_REQ": 0x05,
-    "PCA_READ": 0x06,
-    "SET_POSTURE": 0x10,
-    "SET_GAIT": 0x11,
-    "SET_HEAD": 0x12,
-    "SET_BODY_POSE": 0x13,
-    "SET_BALANCE": 0x14,
-    "TRICK_BEGIN": 0x20,
-    "TRICK_FRAMES": 0x21,
-    "TRICK_COMMIT": 0x22,
-    "TRICK_PLAY": 0x23,
-    "TRICK_STOP": 0x24,
-    "SET_EYES": 0x30,
-    "BEEP": 0x31,
-    "CAL_GET": 0x38,
-    "CAL_SET": 0x39,
-    "CAL_SAVE": 0x3A,
-    "CAL_REVERT": 0x3B,
-    "IMU_OFFSETS_SET": 0x3C,
-    "PARAM_GET": 0x3D,
-    "PARAM_SET": 0x3E,
-    "EEPROM_READ": 0x3F,
-    "REBOOT": 0x7E,
-    "HELLO": 0x80,
-    "TELEMETRY": 0x81,
-    "JOINTS": 0x82,
-    "IMU_RAW": 0x83,
-    "ACK": 0x84,
-    "EVENT": 0x85,
-    "CAL_VALUES": 0x86,
-    "PARAM_VALUE": 0x87,
-    "EEPROM_DATA": 0x88,
-    "PONG": 0x89,
-    "STATS": 0x8A,
-    "PCA_COUNTS": 0x8B,
-    "LOG": 0x8F,
-}
+import enum
+
+from kilo.protocol import kilo_protocol as P
+
+# Event codes (EVENT.code). The generator names this enum EventCode because
+# the EVENT message dataclass is called Event.
+EventCode: type[enum.IntEnum] = P.EventCode
+
+PROTO_MAJOR = P.PROTO_MAJOR
+PROTO_MINOR = P.PROTO_MINOR
+
+# --- message type codes -------------------------------------------------------
+TYPES: dict[str, int] = {m.name: int(m) for m in P.MsgId}
 NAMES: dict[int, str] = {v: k for k, v in TYPES.items()}
+_CLS = {c.NAME: c for c in P.MESSAGES.values()}
 
-# Goals are never acked (§4); everything else Pi->body is a command.
-GOAL_TYPES = frozenset(
-    {"HEARTBEAT", "SET_POSTURE", "SET_GAIT", "SET_HEAD", "SET_BODY_POSE",
-     "SET_BALANCE", "SET_EYES", "BEEP"}
-)
-# Goals whose payload starts with the epoch byte ("goal E").
-EPOCH_GOALS = frozenset({"SET_POSTURE", "SET_GAIT", "SET_HEAD", "SET_BODY_POSE"})
-# Desired motion goals cleared on FELL / WATCHDOG / LOW_BATTERY (§5).
+# Goals are never acked; everything else Pi->body is a command.
+GOAL_TYPES = frozenset(n for n, c in _CLS.items() if c.KIND is P.Kind.GOAL)
+COMMAND_TYPES = frozenset(n for n, c in _CLS.items() if c.KIND is P.Kind.COMMAND)
+# Goals and commands whose payload starts with the epoch byte.
+EPOCH_GOALS = frozenset(n for n in GOAL_TYPES if _CLS[n].HAS_EPOCH)
+# Desired motion goals cleared on an epoch change (§5).
 MOTION_GOALS = EPOCH_GOALS
-# Commands answered by a data reply instead of (or as well as) an ACK.
-REPLIES: dict[str, str] = {
-    "HELLO_REQ": "HELLO",
-    "PING": "PONG",
-    "STATS_REQ": "STATS",
-    "PCA_READ": "PCA_COUNTS",
-    "CAL_GET": "CAL_VALUES",
-    "PARAM_GET": "PARAM_VALUE",
-    "EEPROM_READ": "EEPROM_DATA",
-}
+# Queries: answered by their data reply only (an ACK only on failure), never
+# de-duplicated by the body, retried with a fresh seq.
+QUERIES = frozenset(n for n, c in _CLS.items() if c.IS_QUERY)
+REPLIES: dict[str, str] = {NAMES[q]: NAMES[r] for q, r in P.QUERY_REPLY.items()}
 
-# --- ACK status (§4) ---------------------------------------------------------
-ACK_STATUS = {
-    0: "OK", 1: "BAD_LEN", 2: "BAD_ARG", 3: "BUSY", 4: "UNKNOWN_TYPE",
-    5: "CRC_MISMATCH", 6: "NO_TRICK", 7: "REFUSED_LOW_BATT", 8: "REFUSED_FALLEN",
-    9: "EEPROM_BUSY", 10: "STALE",
-}
-OK = 0
-UNKNOWN_TYPE = 4
-STALE = 10
-# GOAL_REFUSED reasons: assumed to share the ACK status codes (§4 does not say).
-REFUSE_REASON = {1: "BAD_LEN", 2: "BAD_ARG", 7: "LOW_BATT", 8: "FALLEN", 10: "STALE"}
+# --- ACK status ------------------------------------------------------------------
+ACK_STATUS: dict[int, str] = {int(s): s.name for s in P.AckStatus}
+OK = int(P.AckStatus.OK)
+BAD_LEN = int(P.AckStatus.BAD_LEN)
+BAD_ARG = int(P.AckStatus.BAD_ARG)
+UNKNOWN_TYPE = int(P.AckStatus.UNKNOWN_TYPE)
+EEPROM_BUSY = int(P.AckStatus.EEPROM_BUSY)
+STALE = int(P.AckStatus.STALE)
+# GOAL_REFUSED reasons reuse the ACK status codes.
+REFUSE_REASON: dict[int, str] = {int(r): r.name for r in P.GoalRefusedReason}
 
-# --- events (Appendix E) -----------------------------------------------------
-EVENTS = {
-    1: "BOOT", 2: "FELL", 3: "RECOVERED", 4: "RECOVERY_FAILED", 5: "LOW_BATTERY",
-    6: "BATTERY_OK", 7: "WATCHDOG", 8: "LINK_RESTORED", 9: "IMU_FAULT",
-    10: "IMU_OK", 11: "TRICK_DONE", 12: "GAIT_STOPPED", 13: "GOAL_REFUSED",
-    14: "CONFIG_MIGRATED", 15: "CONFIG_DEFAULTED", 16: "EEPROM_SAVED",
-    17: "TX_DROPPED",
-}
-EV = {v: k for k, v in EVENTS.items()}
+# --- events ---------------------------------------------------------------------
+EVENTS: dict[int, str] = {int(e): e.name for e in EventCode}
+EV: dict[str, int] = {v: k for k, v in EVENTS.items()}
 CLEARING_EVENTS = frozenset({EV["FELL"], EV["WATCHDOG"], EV["LOW_BATTERY"]})
 
-# --- telemetry enums (§4) ------------------------------------------------------
-MODES = {
-    0: "BOOT", 1: "LIMP", 2: "IDLE", 3: "GAIT", 4: "TRICK", 5: "FALLEN",
-    6: "RECOVERING", 7: "LOW_BATT", 8: "CALIB", 9: "LINK_LOST",
-}
-FLAG_BITS = {
-    0: "balance", 1: "imu_fault", 2: "servos_powered", 3: "gait", 4: "trick",
-    5: "head_held", 6: "batt_warn", 7: "link_ok", 8: "overrun", 9: "no_battery",
-    10: "eeprom_pending", 11: "dist_fresh",
-}
-OWNERS = {0: "IDLE", 1: "GAIT", 2: "TRICK", 3: "REFLEX", 4: "PI"}  # TODO(protocol): numeric owner codes are not in the doc
-RESET_CAUSES = {0: "COLD", 1: "FLASHED", 2: "REQUESTED", 3: "WARM_UNEXPECTED"}
-POSTURES = {"limp": 0, "rest": 1, "sit": 2, "stand": 3, "stance": 4, "calib": 5, "zero": 6}
+# --- telemetry enums -------------------------------------------------------------
+MODES: dict[int, str] = {int(m): m.name for m in P.Mode}
+FLAG_BITS: dict[int, str] = {f.value.bit_length() - 1: f.name.lower() for f in P.TelemetryFlags}
+OWNERS: dict[int, str] = {int(o): o.name for o in P.Owner}
+RESET_CAUSES: dict[int, str] = {int(c): c.name for c in P.ResetCause}
+CONFIG_STATES: dict[int, str] = {int(c): c.name for c in P.ConfigState}
+POSTURES: dict[str, int] = {p.name.lower(): int(p) for p in P.Posture}
+POSTURE_BALANCE_FLAG = int(P.PostureFlags.BALANCE)
 
-REBOOT_MAGIC = 0x4B49
-CAL_JOINTS = 16
+REBOOT_MAGIC = P.REBOOT_MAGIC
+CAL_JOINTS = P.CHANNEL_COUNT
+PARAMS = P.PARAMS
+PARAMS_BY_NAME = P.PARAMS_BY_NAME

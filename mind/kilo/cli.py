@@ -4,7 +4,7 @@
     kilo monitor [--rate HZ] [--duration S]
     kilo posture {limp,rest,stand,sit,balance,...} [--transition TICKS] [--for S]
     kilo cal show | set JOINT DEGREES | save | revert
-    kilo param get ID | set ID VALUE [--persist]
+    kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none]
     kilo vbody [--fall-after S] [--no-keys]
 
@@ -32,12 +32,13 @@ from typing import Any, Sequence
 from kilo import __version__
 from kilo.body.client import POSTURE_CHOICES, BodyClient, ProtocolMismatch
 from kilo.link import consts
-from kilo.link.messages import ProtocolNotImplemented
+from kilo.link.messages import fields_of
 from kilo.link.ports import detect_port
 from kilo.link.serial_link import CommandError, LinkError, SerialLink
 from kilo.link.transport import DEFAULT_BAUD, open_port
+from kilo.protocol import kilo_protocol as P
 
-EXIT_OK, EXIT_ERR, EXIT_USAGE, EXIT_TODO = 0, 1, 2, 3
+EXIT_OK, EXIT_ERR, EXIT_USAGE = 0, 1, 2
 
 
 # ---- argument parsing -------------------------------------------------------------
@@ -67,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="transition length in 20 ms ticks (0 = body default, 25)")
     s.add_argument("--for", dest="hold", type=float, default=None, metavar="S",
                    help="hold for S seconds, then exit")
+    s.add_argument("--pca", action="store_true",
+                   help="print the PCA9685 counts read back at the end of the hold (H2)")
 
     s = sub.add_parser("cal", help="joint calibration")
     cs = s.add_subparsers(dest="cal_cmd", metavar="ACTION")
@@ -80,12 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("param", help="live tuning parameters")
     ps = s.add_subparsers(dest="param_cmd", required=True, metavar="ACTION")
+    ps.add_parser("list", help="every param: value, bounds, default, unit")
     c = ps.add_parser("get")
     c.add_argument("id", help="param id (number) or name")
     c = ps.add_parser("set")
     c.add_argument("id", help="param id (number) or name")
     c.add_argument("value", type=int)
     c.add_argument("--persist", action="store_true", help="also write to EEPROM")
+
+    s = sub.add_parser("pca", help="read back the 16 PCA9685 OFF counts (PCA_READ)")
+
+    s = sub.add_parser("eeprom", help="read the body's EEPROM (EEPROM_READ)")
+    es = s.add_subparsers(dest="eeprom_cmd", required=True, metavar="ACTION")
+    c = es.add_parser("dump", help="hex dump of START..END (END exclusive), e.g. `eeprom dump 0 283`")
+    c.add_argument("start", type=lambda x: int(x, 0))
+    c.add_argument("end", type=lambda x: int(x, 0))
 
     s = sub.add_parser("flash", help="build and flash the body (Appendix F)")
     s.add_argument("--legacy", action="store_true", help="flash mind/firmware/opencat-legacy.hex")
@@ -94,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sketch", type=Path, help="sketch directory (default: <repo>/body)")
     s.add_argument("--build-dir", type=Path, help="arduino-cli output dir (default ~/.cache/kilo-build)")
     s.add_argument("--reset", choices=("auto", "gpio", "dtr", "none"), default="auto")
-    s.add_argument("--reset-ms", type=float, default=100.0, help="GPIO4 low time in ms")
+    s.add_argument("--reset-ms", type=float, default=float(P.RESET_PULSE_MS),
+                   help=f"GPIO4 low time in ms (default {P.RESET_PULSE_MS})")
     s.add_argument("--no-size-check", action="store_true")
     s.add_argument("--no-verify", action="store_true", help="skip the HELLO FLASHED check")
     s.add_argument("--dry-run", action="store_true", help="print the commands only")
@@ -161,26 +174,32 @@ def cmd_status(args: argparse.Namespace, client: BodyClient) -> int:
     if not args.no_stats:
         try:
             stats = client.stats()
-        except ProtocolNotImplemented as e:
-            stats = f"unavailable: {e}"
         except LinkError as e:
             stats = f"unavailable: {e}"
     snap = client.state.snapshot()
-    snap["body_stats"] = stats.as_dict() if hasattr(stats, "as_dict") else stats
+    snap["body_stats"] = fields_of(stats) if hasattr(stats, "__dataclass_fields__") else stats
     if args.json:
         print(json.dumps(snap, default=str, indent=2))
         return EXIT_OK
     h = snap["hello"] or {}
     print(f"port        {snap['port']}  connected={snap['connected']} alive={snap['alive']}")
     print(f"firmware    proto {h.get('proto_major')}.{h.get('proto_minor')}  build "
-          f"{h.get('fw_build', 0):08x}  reset {snap['reset_cause']}  config_state {h.get('config_state')}")
+          f"{h.get('fw_build', 0):08x}  reset {snap['reset_cause']}  last_alive_tick "
+          f"{h.get('last_alive_tick')}  config {consts.CONFIG_STATES.get(h.get('config_state'), h.get('config_state'))}")
     print(f"mode        {snap['mode']}  owners {snap['owners']}  epoch {snap['epoch']}  "
           f"flags {','.join(snap['flags']) or '-'}")
     print(f"attitude    pitch {_fmt(snap['pitch_deg'])}°  roll {_fmt(snap['roll_deg'])}°  "
           f"upright={snap['upright']}")
     print(f"battery     {snap['batt_mv']} mV  ({_fmt(snap['battery_pct'], '{:.0f}')}%)")
     print(f"distance    {_fmt(snap['dist_mm'], '{:.0f}')} mm")
-    print(f"body stats  {snap['body_stats']}")
+    bs = snap["body_stats"]
+    if isinstance(bs, dict):
+        print(f"body stats  uptime {bs['uptime_s']} s  max tick {bs['max_tick_us']} us  overruns "
+              f"{bs['overruns']}  stack free {bs['stack_free_min']} B  dmp {bs['dmp_rate_hz']} Hz")
+        print(f"            rx_crc_err {bs['rx_crc_err']}  rx_overflow {bs['rx_overflow']}  "
+              f"i2c_err {bs['i2c_err']}  imu_stale {bs['imu_stale']}")
+    else:
+        print(f"body stats  {bs}")
     ls = snap["stats"]
     print("link stats  " + " ".join(f"{k}={v}" for k, v in ls.items() if v))
     return EXIT_OK
@@ -249,6 +268,8 @@ def cmd_posture(args: argparse.Namespace, client: BodyClient) -> int:
                 return EXIT_ERR
     except KeyboardInterrupt:
         pass
+    if args.pca:
+        _print_pca(client.pca_counts())
     return EXIT_OK
 
 
@@ -273,17 +294,56 @@ def cmd_cal(args: argparse.Namespace, client: BodyClient) -> int:
 
 def cmd_param(args: argparse.Namespace, client: BodyClient) -> int:
     client.wait_ready(args.timeout, require_telemetry=False)
-    if args.param_cmd == "get":
-        v = client.param_get(args.id)
-        print(v.as_dict() if hasattr(v, "as_dict") else v)
+    if args.param_cmd == "list":
+        for v in client.param_list():
+            print(_param_line(v))
+    elif args.param_cmd == "get":
+        print(_param_line(client.param_get(args.id)))
     else:
+        info = client.param_info(args.id)
         client.param_set(args.id, args.value, args.persist)
-        print(f"param {args.id} = {args.value}" + (" (persist queued)" if args.persist else ""))
+        print(f"{info.name} = {args.value} {info.unit}" + (" (persist queued)" if args.persist else ""))
+    return EXIT_OK
+
+
+def _param_line(v: Any) -> str:
+    info = consts.PARAMS.get(v.id)
+    name = info.name if info else f"#{v.id}"
+    unit = info.unit if info else ""
+    return (f"{v.id:2d} {name:<20} {v.value:>6} {unit:<9} [{v.min}..{v.max}] default {v.default}"
+            + ("" if v.value == v.default else "  *"))
+
+
+def cmd_pca(args: argparse.Namespace, client: BodyClient) -> int:
+    client.wait_ready(args.timeout, require_telemetry=False)
+    _print_pca(client.pca_counts())
+    return EXIT_OK
+
+
+def _print_pca(counts: list[int]) -> None:
+    for ch, c in enumerate(counts):
+        print(f"channel {ch:2d}  " + ("off" if c & P.PCA_FULL_OFF_BIT else f"{c:5d}"))
+
+
+def cmd_eeprom(args: argparse.Namespace, client: BodyClient) -> int:
+    if not 0 <= args.start < args.end <= 1024:
+        raise ValueError("need 0 <= START < END <= 1024")
+    client.wait_ready(args.timeout, require_telemetry=False)
+    data = bytearray()
+    addr = args.start
+    while addr < args.end:
+        n = min(P.EEPROM_READ_MAX, args.end - addr)
+        data += client.eeprom_read(addr, n)
+        addr += n
+    for off in range(0, len(data), 16):
+        row = data[off:off + 16]
+        print(f"{args.start + off:04d}: " + " ".join(f"{b:02x}" for b in row))
     return EXIT_OK
 
 
 def cmd_flash(args: argparse.Namespace) -> int:
-    from kilo.tools.flash import DEFAULT_BUILD_DIR, DEFAULT_SKETCH, FlashError, FlashOptions, flash, verify_hello
+    from kilo.tools.flash import (DEFAULT_BUILD_DIR, DEFAULT_SKETCH, FlashError, FlashOptions, flash,
+                                  reset_method, verify_hello)
 
     port = _resolve_port(args)
     opts = FlashOptions(
@@ -293,12 +353,13 @@ def cmd_flash(args: argparse.Namespace) -> int:
         verify=not args.no_verify, dry_run=args.dry_run)
     holder: dict[str, SerialLink] = {}
 
-    def verify(since: float) -> bool:
+    def verify(since: float, expected_build: int | None) -> bool:
         link = SerialLink(lambda: open_port(port, args.baud), port_name=port)
         holder["link"] = link
         link.mark_alive()
         link.start()
-        return verify_hello(link, since)
+        return verify_hello(link, since, expected_build,
+                            any_cause=reset_method(port, args.reset) == "dtr")
 
     try:
         flash(opts, verify=verify)
@@ -357,7 +418,7 @@ def cmd_vbody(args: argparse.Namespace) -> int:
 
 
 LINK_COMMANDS = {"status": cmd_status, "monitor": cmd_monitor, "posture": cmd_posture,
-                 "cal": cmd_cal, "param": cmd_param}
+                 "cal": cmd_cal, "param": cmd_param, "pca": cmd_pca, "eeprom": cmd_eeprom}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -370,9 +431,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     link, client = open_link(args)
     try:
         return LINK_COMMANDS[args.cmd](args, client)
-    except ProtocolNotImplemented as e:
-        print(f"kilo {args.cmd}: not available yet: {e}", file=sys.stderr)
-        return EXIT_TODO
     except ProtocolMismatch as e:
         print(f"kilo {args.cmd}: {e}", file=sys.stderr)
         return EXIT_ERR

@@ -9,11 +9,12 @@ Threads:
   main loop is busy. User callbacks are handed to ``dispatch`` (inline by
   default; ``attach_asyncio`` routes them through ``call_soon_threadsafe``).
 - **writer**: drains the outbound queue, re-sends latched goals at 5 Hz,
-  polls HELLO_REQ at 2 Hz while the body is lost, and sends HEARTBEAT after
-  100 ms of silence. Autonomous traffic (refresh, polls, heartbeats) is sent
-  only while the mind's liveness stamp (``mark_alive()``) is < 1 s old, so a
-  stalled mind trips the body's watchdog instead of being masked by this
-  thread. Goals set by the mind are sent immediately regardless.
+  polls HELLO_REQ at 2 Hz while the body is lost (and once on every
+  (re)connect), and sends HEARTBEAT after 100 ms of silence. All of this
+  autonomous traffic is sent only while the mind's liveness stamp
+  (``mark_alive()``) is < 1 s old, so a stalled mind trips the body's watchdog
+  instead of being masked by this thread. Goals and commands issued by the
+  mind itself are sent immediately regardless.
 - **logger**: ``kilo.log.JsonlLogger`` (optional) writes every frame off-thread.
 
 Goals and the epoch rule (§3c, §4, §5):
@@ -22,23 +23,27 @@ Goals and the epoch rule (§3c, §4, §5):
   SET_GAIT, SET_HEAD, SET_BODY_POSE) are stamped with the epoch current when
   the mind set them, not re-stamped later, so a goal can never outlive an
   epoch bump it did not see.
-- On EVENT FELL / WATCHDOG / LOW_BATTERY, on a body reboot, and on any epoch
-  change seen in telemetry or HELLO, desired motion goals from the old epoch
-  are cleared and ``goals_cleared`` subscribers are told. Nothing is replayed.
+- On any epoch change seen in TELEMETRY, EVENT (every EVENT carries the
+  post-bump epoch) or HELLO, on EVENT FELL / WATCHDOG / LOW_BATTERY, and on a
+  body reboot, desired motion goals from older epochs are cleared and
+  ``goals_cleared`` subscribers are told. Nothing is replayed.
 - EVENT GOAL_REFUSED with reason STALE drops the refused goal and logs it.
 
 Commands: ``request()`` assigns a seq, waits 50 ms for the matching ACK (or
-the data reply, for queries), and retries up to 3 times. Mutating commands
+the data reply, for queries), and retries up to 3 times. Non-query commands
 retry with the *same* seq so the body's de-dup re-acks without re-executing;
-queries (HELLO_REQ, CAL_GET, ...) retry with a fresh seq, because a de-duped
-retry would be re-acked but its lost reply never re-sent. One request is in
-flight at a time.
+queries (HELLO_REQ, CAL_GET, ...) are answered by their data reply only (an
+ACK only on failure), are never de-duplicated, and retry with a fresh seq.
+One request is in flight at a time. The TX seq starts at a random value per
+link, so a fresh CLI process does not repeat the (seq, type) of the previous
+one inside the body's 500 ms de-dup window.
 """
 
 from __future__ import annotations
 
 import logging
 import queue
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -47,7 +52,7 @@ from typing import Any, Callable
 from kilo.body.state import BodyState
 from kilo.link import consts
 from kilo.link.codec import Codec, DecodeError, Frame, default_codec
-from kilo.link.messages import Message, Messages, ProtocolNotImplemented, default_messages
+from kilo.link.messages import Messages, default_messages, fields_of
 from kilo.link.transport import Transport, TransportFactory
 
 log = logging.getLogger("kilo.link")
@@ -143,7 +148,8 @@ class SerialLink:
         self._broken = threading.Event()
         self._running = threading.Event()
         self._threads: list[threading.Thread] = []
-        self._seq = 0
+        self._seq = random.randrange(256)
+        self._hello_on_connect = False
         self._goals: dict[str, Goal] = {}
         self._req_lock = threading.Lock()
         self._pending: _Pending | None = None
@@ -243,7 +249,7 @@ class SerialLink:
     def set_goal(self, name: str, **fields: Any) -> Goal:
         """Latch a desired-state goal. Sent now, then refreshed at 5 Hz.
 
-        Raises ProtocolNotImplemented / ValueError if the message cannot be
+        Raises ValueError if the message cannot be
         packed, so errors surface at the call site and not in the writer.
         """
         if name not in consts.GOAL_TYPES or name == "HEARTBEAT":
@@ -312,6 +318,9 @@ class SerialLink:
         NotConnected, LinkTimeout, or CommandError (ACK status != OK).
         """
         reply_name = consts.REPLIES.get(name) if reply is _DEFAULT else reply
+        # Queries are retried with a fresh seq (the body never de-dups them);
+        # everything else with the same seq.
+        fresh_seq = name in consts.QUERIES or reply_name is not None
         payload = self.messages.pack(name, **(fields or {}))
         typ = self.messages.type_of(name)
         timeout = self.cfg.ack_timeout_s if timeout is None else timeout
@@ -324,7 +333,7 @@ class SerialLink:
             ok = False
             for attempt in range(retries + 1):
                 with self._lock:
-                    if attempt == 0 or reply_name is not None:
+                    if attempt == 0 or fresh_seq:
                         p.seq = self._next_seq()
                     self._pending = p
                     if name == "HELLO_REQ":
@@ -436,7 +445,7 @@ class SerialLink:
                     g.epoch = have_epoch
                 try:
                     payload = self._pack_goal(g.name, g.fields, g.epoch, epoch_goal)
-                except (ProtocolNotImplemented, ValueError):
+                except ValueError:
                     log.exception("cannot pack goal %s", g.name)
                     continue
                 g.dirty = False
@@ -447,7 +456,9 @@ class SerialLink:
                 st.goal_sends += 1
         if not self.mind_alive():
             return  # a stalled mind sends nothing on its own: let the body's watchdog trip
-        if not self.state.alive and now - self._last_hello_poll >= self.cfg.hello_poll_s:
+        if self._hello_on_connect or (not self.state.alive
+                                      and now - self._last_hello_poll >= self.cfg.hello_poll_s):
+            self._hello_on_connect = False
             self._last_hello_poll = now
             with self._lock:
                 self._hello_solicited_at = now
@@ -492,11 +503,11 @@ class SerialLink:
             self._hello_solicited_at = self.clock()
             for g in self._goals.values():
                 g.dirty = True
+            # first contact: ask who is there (sent by the writer, liveness-gated)
+            self._hello_on_connect = True
         log.info("connected to %s", self.state.port or "transport")
         self._log("link", connected=True, port=self.state.port)
         self._emit("connection", True, False)
-        # first contact: ask who is there (goal-independent, mind-independent)
-        self._txq.put((self.messages.type_of("HELLO_REQ"), None, b"", "HELLO_REQ"))
         return True
 
     def _reader(self) -> None:
@@ -539,13 +550,14 @@ class SerialLink:
         st = self.state.stats
         if isinstance(item, DecodeError):
             st.decode_errors[item.kind] += 1
-            self._log("rx_error", error=item.kind, raw=bytes(item.raw).hex())
+            self._log("rx_error", error=item.kind, raw=bytes(item.raw).hex(), type=item.type,
+                      seq=item.seq)
             return
         st.frames_rx += 1
         name = self.messages.name_of(item.type)
         try:
             msg = self.messages.unpack(item.type, item.payload)
-        except (ProtocolNotImplemented, ValueError) as e:
+        except ValueError as e:
             st.undecodable += 1
             msg = None
             log.debug("undecodable %s: %s", name, e)
@@ -605,11 +617,15 @@ class SerialLink:
             self.state.events.append((now, msg))
         log.info("event %s arg=%s epoch=%s", ev, msg.arg, msg.epoch)
         self._log("event", name=ev, code=code, arg=msg.arg, tick=msg.tick, epoch=msg.epoch)
-        if code in consts.CLEARING_EVENTS:
-            with self._lock:
-                self.state.epoch = msg.epoch
-            self.clear_motion_goals(ev)
-        elif code == consts.EV["GOAL_REFUSED"]:
+        with self._lock:
+            prev_epoch = self.state.epoch
+            self.state.epoch = msg.epoch
+        if code in consts.CLEARING_EVENTS or prev_epoch != msg.epoch:
+            # every EVENT carries the post-bump epoch: goals from older epochs go
+            self.clear_motion_goals(ev if code in consts.CLEARING_EVENTS
+                                    else f"epoch {prev_epoch}->{msg.epoch} ({ev})",
+                                    keep_epoch=msg.epoch)
+        if code == consts.EV["GOAL_REFUSED"]:
             arg = msg.arg & 0xFFFF
             gtype, reason = arg >> 8, arg & 0xFF
             gname = self.messages.name_of(gtype)
@@ -666,8 +682,6 @@ class SerialLink:
 
 
 def _fields(m: Any) -> Any:
-    if isinstance(m, Message):
-        return m.fields
     if hasattr(m, "__dataclass_fields__"):
-        return {k: getattr(m, k) for k in m.__dataclass_fields__}
+        return fields_of(m)
     return repr(m)

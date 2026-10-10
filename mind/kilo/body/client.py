@@ -1,15 +1,10 @@
 """BodyClient: the mind's P0 API to the body (docs/architecture.md §5, §7 P0).
 
 Thin and synchronous: goals go through ``SerialLink.set_goal`` (latched,
-refreshed at 5 Hz, epoch-stamped, cleared on FELL/WATCHDOG/LOW_BATTERY);
-commands go through ``SerialLink.request`` (seq, 50 ms ACK wait, 3 retries,
-de-dup safe). Behaviours built later (walk/look/play/beep) follow the same two
-patterns.
-
-TODO(protocol): every method that builds a payload names the Appendix E
-message and fields; packing goes through the Messages adapter, which in the
-stub raises ProtocolNotImplemented for layouts it does not know. Swap in the
-kilo_protocol adapter and confirm the field names against spec.toml.
+refreshed at 5 Hz, epoch-stamped, cleared on an epoch change); commands go
+through ``SerialLink.request`` (seq, 50 ms wait, 3 retries; queries answered
+by their data reply, other commands by an ACK, de-dup safe). Message layouts
+and field names are the generated ones (protocol/spec.toml, Appendix E).
 """
 
 from __future__ import annotations
@@ -25,9 +20,11 @@ class ProtocolMismatch(LinkError):
     pass
 
 
-# Postures the CLI offers. "balance" is STAND with the balance flag (Appendix E
-# SET_POSTURE flags bit 0); it is not a separate posture code.
+# Postures the CLI offers. "balance" is STAND with the balance flag (SET_POSTURE
+# flags bit 0); it is not a separate posture code.
 POSTURE_CHOICES = ("limp", "rest", "stand", "sit", "balance", "stance", "calib", "zero")
+
+CAL_LIMIT_A16 = 400  # CAL_SET offset_a16 range: ±25°
 
 
 class BodyClient:
@@ -90,17 +87,23 @@ class BodyClient:
 
     # ---- postures (goal) -------------------------------------------------------
     def posture(self, name: str, transition_ticks: int = 0, balance: bool | None = None) -> None:
-        """Latch SET_POSTURE. ``balance`` means STAND with the balance flag."""
+        """Latch SET_POSTURE (epoch, posture, transition_ticks 0 = default, flags).
+
+        ``balance`` sets flags bit 0; the name "balance" means STAND with it.
+        """
         self._check_drivable()
         name = name.lower()
         if name == "balance":
             code, balance = consts.POSTURES["stand"], True if balance is None else balance
         else:
-            code = consts.POSTURES[name]
-        # TODO(protocol): SET_POSTURE fields per Appendix E: E, posture u8,
-        # transition_ticks u8 (0 = 25), flags u8 (bit 0 balance).
+            try:
+                code = consts.POSTURES[name]
+            except KeyError:
+                raise ValueError(f"unknown posture {name!r}") from None
+        if not 0 <= transition_ticks <= 255:
+            raise ValueError("transition_ticks must be 0..255")
         self.link.set_goal("SET_POSTURE", posture=code, transition_ticks=transition_ticks,
-                           flags=1 if balance else 0)
+                           flags=consts.POSTURE_BALANCE_FLAG if balance else 0)
 
     def limp(self) -> None:
         self.posture("limp")
@@ -123,18 +126,16 @@ class BodyClient:
 
     # ---- calibration (commands) ------------------------------------------------
     def cal_get(self) -> list[int]:
-        """CAL_GET -> CAL_VALUES: 16 offsets in a16."""
+        """CAL_GET -> CAL_VALUES: 16 absolute offsets in a16 (1/16°)."""
         msg = self.link.request("CAL_GET")
-        # TODO(protocol): CAL_VALUES field name for the 16 x i16 array.
-        return list(_field(msg, "offsets"))
+        return list(_field(msg, "offset"))
 
     def cal_set(self, joint: int, offset_a16: int) -> None:
         """CAL_SET: absolute offset for one joint, ±25° (±400 a16)."""
         if not 0 <= joint < consts.CAL_JOINTS:
             raise ValueError(f"joint {joint} out of range 0..{consts.CAL_JOINTS - 1}")
-        if not -400 <= offset_a16 <= 400:
+        if not -CAL_LIMIT_A16 <= offset_a16 <= CAL_LIMIT_A16:
             raise ValueError("offset beyond ±25°")
-        # TODO(protocol): CAL_SET fields per Appendix E: joint u8, offset_a16 i16.
         self.link.request("CAL_SET", {"joint": joint, "offset_a16": offset_a16})
 
     def cal_save(self, wait_saved: float | None = 2.0) -> bool:
@@ -151,29 +152,51 @@ class BodyClient:
     def cal_revert(self) -> None:
         self.link.request("CAL_REVERT")
 
+    def imu_offsets_set(self, offsets: list[int], save: bool = False) -> None:
+        """IMU_OFFSETS_SET: accel xyz, gyro xyz (MPU6050 offset registers)."""
+        if len(offsets) != 6:
+            raise ValueError("need 6 offsets: accel x y z, gyro x y z")
+        names = ("accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z")
+        self.link.request("IMU_OFFSETS_SET", {**dict(zip(names, offsets)), "save": 1 if save else 0})
+
     # ---- params (commands) ------------------------------------------------------
-    def param_id(self, name_or_id: str | int) -> int:
+    @staticmethod
+    def param_info(name_or_id: str | int) -> Any:
+        """The generated ParamInfo (id, name, default, min, max, unit, doc)."""
+        pid = BodyClient.param_id(name_or_id)
+        try:
+            return consts.PARAMS[pid]
+        except KeyError:
+            raise KeyError(f"unknown param id {pid}") from None
+
+    @staticmethod
+    def param_id(name_or_id: str | int) -> int:
+        """Param id from a number ("5", "0x05") or a name (case-insensitive)."""
         if isinstance(name_or_id, int):
             return name_or_id
-        s = str(name_or_id)
+        s = str(name_or_id).strip()
         if s.lstrip("-").isdigit() or s.lower().startswith("0x"):
             return int(s, 0)
-        # TODO(protocol): stable param ids come from spec.toml (Appendix E lists names only).
-        ids = getattr(self.link.messages, "PARAM_IDS", None) or {}
         try:
-            return ids[s.upper()]
+            return consts.PARAMS_BY_NAME[s.upper()].id
         except KeyError:
-            raise KeyError(f"unknown param {s!r} (TODO(protocol): name->id table)") from None
+            raise KeyError(f"unknown param {s!r} (known: {', '.join(consts.PARAMS_BY_NAME)})") from None
 
     def param_get(self, pid: str | int) -> Any:
         """PARAM_GET -> PARAM_VALUE(id, value, min, max, default)."""
-        # TODO(protocol): PARAM_GET fields per Appendix E: id u8.
         return self.link.request("PARAM_GET", {"id": self.param_id(pid)})
 
     def param_set(self, pid: str | int, value: int, persist: bool = False) -> None:
-        # TODO(protocol): PARAM_SET fields per Appendix E: id u8, value i16, persist u8.
-        self.link.request("PARAM_SET", {"id": self.param_id(pid), "value": int(value),
-                                        "persist": 1 if persist else 0})
+        """PARAM_SET (acked when applied; with persist, EVENT EEPROM_SAVED follows)."""
+        i = self.param_id(pid)
+        info = consts.PARAMS.get(i)
+        if info is not None and not info.min <= int(value) <= info.max:
+            raise ValueError(f"{info.name} must be {info.min}..{info.max} {info.unit}")
+        self.link.request("PARAM_SET", {"id": i, "value": int(value), "persist": 1 if persist else 0})
+
+    def param_list(self) -> list[Any]:
+        """PARAM_VALUE for every param the mind knows (spec.toml table)."""
+        return [self.param_get(i) for i in sorted(consts.PARAMS)]
 
     # ---- misc -------------------------------------------------------------------
     def stats(self) -> Any:
@@ -182,19 +205,29 @@ class BodyClient:
             self.state.last_stats = msg
         return msg
 
+    def pca_counts(self) -> list[int]:
+        """PCA_READ -> PCA_COUNTS: 16 OFF counts (bit 12 = full-off)."""
+        return list(_field(self.link.request("PCA_READ"), "counts"))
+
+    def eeprom_read(self, addr: int, length: int) -> bytes:
+        """EEPROM_READ -> EEPROM_DATA (≤ 56 bytes per request)."""
+        return bytes(_field(self.link.request("EEPROM_READ", {"addr": addr, "len": length}), "data"))
+
     def ping(self, token: int = 0x1234) -> float:
-        """Round trip time in seconds. TODO(protocol): PING token u16 / PONG."""
+        """PING -> PONG. Round-trip time in seconds."""
         t0 = time.monotonic()
-        self.link.request("PING", {"token": token})
+        msg = self.link.request("PING", {"token": token})
+        if _field(msg, "token") != token:
+            raise LinkError(f"PONG token {msg.token:#06x} != {token:#06x}")
         return time.monotonic() - t0
 
     def set_stream(self, telem_div: int = 2, joints_div: int = 0, imu_raw_div: int = 0) -> None:
-        # TODO(protocol): SET_STREAM fields per Appendix E.
+        """SET_STREAM: divisors of the 50 Hz tick (0 = off)."""
         self.link.request("SET_STREAM", {"telem_div": telem_div, "joints_div": joints_div,
                                          "imu_raw_div": imu_raw_div})
 
     def reboot(self) -> None:
-        # TODO(protocol): REBOOT magic u16 = 0x4B49.
+        """REBOOT (watchdog restart of the application)."""
         self.link.request("REBOOT", {"magic": consts.REBOOT_MAGIC})
 
     def _count_events(self, name: str) -> int:

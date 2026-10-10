@@ -4,7 +4,7 @@ Sequence:
 
 1. Build (optional): ``arduino-cli compile --fqbn arduino:avr:uno --output-dir
    DIR --build-property compiler.cpp.extra_flags=-DKILO_BUILD=0x<git hash>
-   body/``, then ``tools/size.sh`` (the size/symbol harness) if present; stop on
+   body/``, then ``body/tools/size_check.sh`` (the size/symbol harness) if present; stop on
    failure. Building happens *before* the link is stopped, so the body stays
    supervised during the 1-3 min compile on a Pi 2.
 2. Stop the serial link (the in-process ``SerialLink``, if given). The daemon
@@ -19,8 +19,9 @@ Sequence:
 4. ``avrdude -c arduino -p atmega328p -P PORT -b 115200 -D -U flash:w:HEX:i``,
    retried once (with a fresh reset).
 5. Restart the link and, for new firmware, expect HELLO with reset cause
-   FLASHED within 3 s (verification by build hash: TODO(protocol), once
-   fw_build semantics are fixed in spec.toml).
+   FLASHED within 3 s, and (when this run built the firmware) HELLO.fw_build
+   equal to the build hash: the first 8 hex digits of the git commit, passed
+   as ``-DKILO_BUILD=0x<hash>`` and reported by the body as a u32.
 
 ``--legacy`` flashes ``mind/firmware/opencat-legacy.hex`` (token protocol at
 115200), skipping the build and the HELLO check.
@@ -37,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from kilo.protocol.kilo_protocol import RESET_PULSE_MS
 from kilo.tools.gpio import ResetBackend, pick_backend
 
 MIND_DIR = Path(__file__).resolve().parents[2]
@@ -62,7 +64,7 @@ class FlashOptions:
     sketch: Path = DEFAULT_SKETCH
     build_dir: Path = DEFAULT_BUILD_DIR
     reset: str = "auto"  # auto | gpio | dtr | none
-    reset_ms: float = 100.0
+    reset_ms: float = float(RESET_PULSE_MS)
     size_check: bool = True
     verify: bool = True
     dry_run: bool = False
@@ -78,13 +80,14 @@ class FlashResult:
     reset: str = ""
     attempts: int = 0
     verified: bool | None = None
+    expected_build: int | None = None  # HELLO.fw_build to expect, if this run built it
 
 
 def git_hash(repo: Path = REPO_DIR) -> str | None:
     try:
-        out = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=8", "HEAD"],
+        out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                              capture_output=True, text=True, check=True, timeout=10)
-        return out.stdout.strip() or None
+        return out.stdout.strip()[:8] or None  # 8 hex digits = HELLO.fw_build u32
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -128,14 +131,15 @@ def flash(
     link: Any = None,
     run: Callable[..., Any] = subprocess.run,
     reset_backend: ResetBackend | None = None,
-    verify: Callable[[float], bool] | None = None,
+    verify: Callable[[float, int | None], bool] | None = None,
     say: Callable[[str], None] = print,
 ) -> FlashResult:
     """Run the flash sequence. ``link`` (a SerialLink) is stopped and restarted.
 
-    ``verify(since)`` is called after the link restarts for new firmware and
-    should return True once a HELLO with reset cause FLASHED arrived after
-    ``since`` (see ``verify_hello``).
+    ``verify(since, expected_build)`` is called after the link restarts for
+    new firmware and should return True once a HELLO with reset cause FLASHED
+    (and fw_build == expected_build, unless None) arrived after ``since``
+    (see ``verify_hello``).
     """
     if opts.legacy:
         hex_path = opts.hex_path or LEGACY_HEX
@@ -162,11 +166,16 @@ def flash(
         if not (opts.sketch / f"{opts.sketch.name}.ino").exists() and not opts.dry_run:
             raise FlashError(f"no sketch at {opts.sketch} (use --sketch or --no-build --hex)")
         opts.build_dir.mkdir(parents=True, exist_ok=True)
-        sh(compile_cmd(opts.sketch, opts.build_dir, git_hash()), "arduino-cli compile")
-        size_sh = REPO_DIR / "tools" / "size.sh"
+        build_hash = git_hash()
+        if build_hash:
+            res.expected_build = int(build_hash, 16)
+        sh(compile_cmd(opts.sketch, opts.build_dir, build_hash), "arduino-cli compile")
+        size_sh = REPO_DIR / "body" / "tools" / "size_check.sh"
         if opts.size_check:
             if size_sh.exists():
-                sh([str(size_sh)], "size/symbol harness")
+                # Check the ELF that was just built (no second compile on the Pi).
+                sh([str(size_sh), "--elf", str(opts.build_dir / f"{opts.sketch.name}.ino.elf")],
+                   "size/symbol harness")
             else:
                 say(f"warning: {size_sh} not found, size/symbol harness skipped")
     if not hex_path.exists() and not opts.dry_run:
@@ -213,22 +222,28 @@ def flash(
             say("restarting serial link")
             link.start()
     if opts.verify and not opts.legacy and not opts.dry_run and verify is not None:
-        res.verified = verify(t_flash)
-        say("verified: HELLO reset_cause=FLASHED" if res.verified
-            else "warning: no HELLO with reset_cause=FLASHED within 3 s")
+        res.verified = verify(t_flash, res.expected_build)
+        want = "reset_cause=FLASHED" + ("" if res.expected_build is None
+                                        else f" fw_build={res.expected_build:08x}")
+        say(f"verified: HELLO {want}" if res.verified else f"warning: no HELLO with {want} within 3 s")
     return res
 
 
-def verify_hello(link: Any, since: float, timeout: float = 3.0) -> bool:
-    """True once ``link`` saw a HELLO with reset cause FLASHED after ``since``."""
-    from kilo.link import consts
+def verify_hello(link: Any, since: float, expected_build: int | None = None,
+                 timeout: float = 3.0, any_cause: bool = False) -> bool:
+    """True once ``link`` saw a HELLO with reset cause FLASHED after ``since``
+    (and fw_build == ``expected_build`` unless that is None).
 
-    flashed = [k for k, v in consts.RESET_CAUSES.items() if v == "FLASHED"][0]
+    ``any_cause``: accept any reset cause. Over a USB adapter, opening the port
+    to verify pulses DTR and resets the body once more, so the HELLO it sees
+    says WARM_UNEXPECTED rather than FLASHED; the build hash still proves what
+    is running."""
+    from kilo.protocol.kilo_protocol import ResetCause
 
     def ok() -> bool:
         st = link.state
-        return (st.hello is not None and st.hello_at is not None and st.hello_at >= since
-                and st.hello.reset_cause == flashed)
-    # TODO(protocol): also compare HELLO.fw_build with the KILO_BUILD hash once
-    # spec.toml fixes how the git hash maps into fw_build u32.
+        h = st.hello
+        return (h is not None and st.hello_at is not None and st.hello_at >= since
+                and (any_cause or h.reset_cause == ResetCause.FLASHED)
+                and (expected_build is None or h.fw_build == expected_build))
     return link.wait_until(ok, timeout)

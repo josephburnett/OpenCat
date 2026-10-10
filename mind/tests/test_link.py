@@ -8,7 +8,9 @@ from kilo.link import consts
 from kilo.link.serial_link import CommandError, LinkConfig, LinkTimeout, SerialLink
 from kilo.link.transport import loopback_pair
 
-from conftest import FAST, LenPrefixCodec, Peer, PlumbingMessages, keep_alive
+from conftest import FAST, Peer, keep_alive
+from kilo.link.codec import KiloCodec
+from kilo.link.messages import KiloMessages
 
 T = consts.TYPES
 
@@ -211,7 +213,7 @@ def test_reconnect_after_failure():
         ends.append((a, Peer(b)))
         return a
 
-    link = SerialLink(factory, codec=LenPrefixCodec(), messages=PlumbingMessages(),
+    link = SerialLink(factory, codec=KiloCodec(), messages=KiloMessages(),
                       config=LinkConfig(**FAST))
     link.mark_alive()
     link.start()
@@ -245,7 +247,7 @@ def test_open_failure_backoff():
             raise OSError("no such device")
         return a
 
-    link = SerialLink(factory, codec=LenPrefixCodec(), messages=PlumbingMessages(),
+    link = SerialLink(factory, codec=KiloCodec(), messages=KiloMessages(),
                       config=LinkConfig(**FAST))
     link.start()
     try:
@@ -312,7 +314,7 @@ def test_protocol_mismatch_flag(make_link):
 def test_asyncio_dispatch_and_liveness():
     a, b = loopback_pair()
     peer = Peer(b)
-    link = SerialLink(lambda: a, codec=LenPrefixCodec(), messages=PlumbingMessages(),
+    link = SerialLink(lambda: a, codec=KiloCodec(), messages=KiloMessages(),
                       config=LinkConfig(**FAST))
 
     async def main():
