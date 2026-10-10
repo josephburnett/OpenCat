@@ -159,6 +159,27 @@ def validate(spec: dict) -> None:
         raise SpecError("link: max_wire inconsistent")
     if link["frame_overhead"] != link["header_bytes"] + link["crc_bytes"] + 2:
         raise SpecError("link: frame_overhead inconsistent")
+    replied = {m["reply_to"] for m in spec["messages"] if "reply_to" in m}
+    for m in spec["messages"]:
+        if m.get("query"):
+            if m["kind"] != "command" or m["dir"] != "pi_to_body":
+                raise SpecError(f"{m['name']}: only Pi->body commands can be queries")
+            if m["name"] not in replied:
+                raise SpecError(f"{m['name']}: a query needs a reply message (reply_to)")
+        elif m["name"] in replied:
+            raise SpecError(f"{m['name']}: has a reply message but is not a query")
+    pids, pnames = set(), set()
+    for p in spec.get("params", []):
+        if p["id"] in pids or p["name"] in pnames:
+            raise SpecError(f"duplicate param {p['name']} / {p['id']}")
+        pids.add(p["id"])
+        pnames.add(p["name"])
+        if not 0 <= p["id"] < link["param_slots"]:
+            raise SpecError(f"param {p['name']}: id must be < link.param_slots")
+        if not -32768 <= p["min"] <= p["default"] <= p["max"] <= 32767:
+            raise SpecError(f"param {p['name']}: need i16 min <= default <= max")
+    if sorted(pids) != list(range(len(pids))):
+        raise SpecError("param ids must be dense from 0")
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +359,20 @@ def gen_c(spec: dict) -> str:
     w("    }")
     w("}")
     w("")
+    w("/* Nonzero for a query: a command answered by its data reply only (ACK only")
+    w("   on failure), never de-duplicated. */")
+    w("static inline uint8_t kilo_msg_is_query(uint8_t type)")
+    w("{")
+    w("    switch (type) {")
+    for m in spec["messages"]:
+        if m.get("query"):
+            w(f"    case KILO_MSG_{m['name']}:")
+    w("        return 1u;")
+    w("    default:")
+    w("        return 0u;")
+    w("    }")
+    w("}")
+    w("")
     w("/* Nonzero if the type's payload begins with the goal epoch byte. */")
     w("static inline uint8_t kilo_msg_has_epoch(uint8_t type)")
     w("{")
@@ -350,6 +385,25 @@ def gen_c(spec: dict) -> str:
     w("        return 0u;")
     w("    }")
     w("}")
+    w("")
+    params = sorted(spec.get("params", []), key=lambda p: p["id"])
+    w("/* ---- Live parameters (PARAM_GET / PARAM_SET) ---- */")
+    w("enum kilo_param_id {")
+    for p in params:
+        w(f"    KILO_PARAM_{p['name']} = {p['id']}, /* {p['unit']}: {p['doc']} */")
+    w("};")
+    w(f"#define KILO_PARAM_COUNT {len(params)}u")
+    for p in params:
+        w(f"#define KILO_PARAM_{p['name']}_DEFAULT {p['default']}")
+        w(f"#define KILO_PARAM_{p['name']}_MIN {p['min']}")
+        w(f"#define KILO_PARAM_{p['name']}_MAX {p['max']}")
+    w("/* Initializer for an int16_t [KILO_PARAM_COUNT][3] table of {min, max, default}, in id order. */")
+    w("#define KILO_PARAM_TABLE_INIT { \\")
+    for p in params:
+        w(f"    {{{p['min']}, {p['max']}, {p['default']}}}, /* {p['name']} */ \\")
+    w("}")
+    w("/* Initializer for an int16_t [KILO_PARAM_COUNT] array of defaults, in id order. */")
+    w("#define KILO_PARAM_DEFAULTS_INIT { " + ", ".join(str(p["default"]) for p in params) + " }")
     w("")
     # field table for tests / tools (opt-in, costs flash)
     w("#ifdef KILO_PROTOCOL_FIELD_TABLE")
@@ -565,6 +619,7 @@ def gen_py(spec: dict) -> str:
         w(f"    KIND: ClassVar[Kind] = Kind.{m['kind'].upper()}")
         w(f"    DIR: ClassVar[Dir] = Dir.{m['dir'].upper()}")
         w(f"    HAS_EPOCH: ClassVar[bool] = {bool(m.get('epoch'))}")
+        w(f"    IS_QUERY: ClassVar[bool] = {bool(m.get('query'))}")
         w(f"    REPLY_TO: ClassVar[int | None] = {('0x%02X' % next(x['id'] for x in spec['messages'] if x['name'] == m['reply_to'])) if 'reply_to' in m else None}")
         w(f"    MIN_LEN: ClassVar[int] = {lay['min']}")
         w(f"    MAX_LEN: ClassVar[int] = {lay['max']}")
@@ -616,6 +671,40 @@ def gen_py(spec: dict) -> str:
     for m in spec["messages"]:
         w(f"    0x{m['id']:02X}: {camel(m['name'])},")
     w("}")
+    w("")
+    w("")
+    w("# Queries (answered by their data reply only, never de-duplicated) -> reply type.")
+    w("QUERY_REPLY: dict[int, int] = {")
+    for m in spec["messages"]:
+        if "reply_to" in m:
+            q = next(x for x in spec["messages"] if x["name"] == m["reply_to"])
+            w(f"    0x{q['id']:02X}: 0x{m['id']:02X},  # {q['name']} -> {m['name']}")
+    w("}")
+    w("")
+    w("")
+    w("@dataclass(frozen=True)")
+    w("class ParamInfo:")
+    w("    id: int")
+    w("    name: str")
+    w("    default: int")
+    w("    min: int")
+    w("    max: int")
+    w("    unit: str")
+    w("    doc: str")
+    w("")
+    w("")
+    params = sorted(spec.get("params", []), key=lambda p: p["id"])
+    w("class ParamId(enum.IntEnum):")
+    for p in params:
+        w(f"    {p['name']} = {p['id']}")
+    w("")
+    w("")
+    w("PARAMS: dict[int, ParamInfo] = {")
+    for p in params:
+        w(f"    {p['id']}: ParamInfo({p['id']}, {p['name']!r}, {p['default']}, {p['min']}, {p['max']}, {p['unit']!r},")
+        w(f"                         {p['doc']!r}),")
+    w("}")
+    w("PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}")
     w("")
     w("")
     w("def payload_len_status(msg_type: int, payload: bytes) -> int:")

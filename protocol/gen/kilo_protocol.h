@@ -30,7 +30,7 @@ extern "C" {
 
 /* ---- Versions and link constants ---- */
 #define KILO_PROTO_MAJOR 1u
-#define KILO_PROTO_MINOR 0u
+#define KILO_PROTO_MINOR 1u
 #define KILO_BAUD 250000UL
 #define KILO_MAX_PAYLOAD 60u
 #define KILO_HEADER_BYTES 2u
@@ -52,6 +52,7 @@ extern "C" {
 #define KILO_MIND_ALIVE_MS 1000u
 #define KILO_CMD_RETRY_MS 50u
 #define KILO_CMD_MAX_RETRIES 3u
+#define KILO_DEDUP_WINDOW_MS 500u
 #define KILO_WD_STOP_MS 500u
 #define KILO_WD_REST_MS 1500u
 #define KILO_WD_LIMP_S 10u
@@ -64,6 +65,8 @@ extern "C" {
 #define KILO_DEFAULT_TRANSITION_TICKS 25u
 #define KILO_EEPROM_READ_MAX 56u
 #define KILO_REBOOT_MAGIC 0x4B49u
+#define KILO_RESET_PULSE_MS 100u
+#define KILO_PARAM_SLOTS 16u
 #define KILO_TRICK_CAPACITY 32u
 #define KILO_TRICK_FRAMES_PER_MSG 4u
 #define KILO_BEEP_MAX_NOTES 8u
@@ -138,14 +141,17 @@ enum kilo_ack_status {
     KILO_ACK_STATUS_REFUSED_FALLEN = 8,
     KILO_ACK_STATUS_EEPROM_BUSY = 9,
     KILO_ACK_STATUS_STALE = 10,
+    KILO_ACK_STATUS_UNCALIBRATED = 11,
 };
 
 enum kilo_goal_refused_reason {
     KILO_GOAL_REFUSED_REASON_BAD_LEN = 1,
     KILO_GOAL_REFUSED_REASON_BAD_ARG = 2,
+    KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE = 4,
     KILO_GOAL_REFUSED_REASON_LOW_BATT = 7,
     KILO_GOAL_REFUSED_REASON_FALLEN = 8,
     KILO_GOAL_REFUSED_REASON_STALE = 10,
+    KILO_GOAL_REFUSED_REASON_UNCALIBRATED = 11,
 };
 
 enum kilo_event {
@@ -299,7 +305,7 @@ KILO_STATIC_ASSERT(offsetof(kilo_note_t, note) == 0, kilo_sa_note_note);
 KILO_STATIC_ASSERT(offsetof(kilo_note_t, dur_10ms) == 1, kilo_sa_note_dur_10ms);
 
 /* ---- Payloads ---- */
-/* 0x01 HELLO_REQ: command. Ask for HELLO. */
+/* 0x01 HELLO_REQ: command. Ask for HELLO (query). */
 #define KILO_HELLO_REQ_LEN 0u
 
 /* 0x02 HEARTBEAT: goal. Keep the link alive. */
@@ -602,8 +608,8 @@ typedef struct KILO_PACKED kilo_hello_s {
     uint16_t last_alive_tick; /* tick */
     uint16_t caps; /* flags hello_caps */
     uint8_t max_payload;
-    uint8_t trick_capacity;
-    uint8_t joint_count;
+    uint8_t trick_capacity; /* keyframes; 0 = no trick store (P0) */
+    uint8_t joint_count; /* driven joints (11) */
     uint8_t config_state; /* enum config_state */
     uint8_t epoch;
 } kilo_hello_t;
@@ -664,7 +670,7 @@ KILO_STATIC_ASSERT(offsetof(kilo_telemetry_t, epoch) == 25, kilo_sa_telemetry_ep
 #define KILO_JOINTS_LEN 24u
 typedef struct KILO_PACKED kilo_joints_s {
     uint16_t tick; /* tick */
-    int16_t angle[11]; /* deg x 0.0625 */
+    int16_t angle[11]; /* deg x 0.0625; -32768 = limp (no output) */
 } kilo_joints_t;
 KILO_STATIC_ASSERT(sizeof(kilo_joints_t) == 24, kilo_sa_joints_size);
 KILO_STATIC_ASSERT(offsetof(kilo_joints_t, tick) == 0, kilo_sa_joints_tick);
@@ -690,7 +696,7 @@ KILO_STATIC_ASSERT(offsetof(kilo_imu_raw_t, gyro_x) == 8, kilo_sa_imu_raw_gyro_x
 KILO_STATIC_ASSERT(offsetof(kilo_imu_raw_t, gyro_y) == 10, kilo_sa_imu_raw_gyro_y);
 KILO_STATIC_ASSERT(offsetof(kilo_imu_raw_t, gyro_z) == 12, kilo_sa_imu_raw_gyro_z);
 
-/* 0x84 ACK: event. Reply to every command: echoes its seq and type. */
+/* 0x84 ACK: event. Reply to every non-query command, and to a query only on failure: echoes its seq and type. */
 #define KILO_ACK_LEN 3u
 typedef struct KILO_PACKED kilo_ack_s {
     uint8_t seq;
@@ -953,6 +959,24 @@ static inline uint8_t kilo_msg_kind(uint8_t type)
     }
 }
 
+/* Nonzero for a query: a command answered by its data reply only (ACK only
+   on failure), never de-duplicated. */
+static inline uint8_t kilo_msg_is_query(uint8_t type)
+{
+    switch (type) {
+    case KILO_MSG_HELLO_REQ:
+    case KILO_MSG_PING:
+    case KILO_MSG_STATS_REQ:
+    case KILO_MSG_PCA_READ:
+    case KILO_MSG_CAL_GET:
+    case KILO_MSG_PARAM_GET:
+    case KILO_MSG_EEPROM_READ:
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
 /* Nonzero if the type's payload begins with the goal epoch byte. */
 static inline uint8_t kilo_msg_has_epoch(uint8_t type)
 {
@@ -967,6 +991,81 @@ static inline uint8_t kilo_msg_has_epoch(uint8_t type)
         return 0u;
     }
 }
+
+/* ---- Live parameters (PARAM_GET / PARAM_SET) ---- */
+enum kilo_param_id {
+    KILO_PARAM_WD_STOP_MS = 0, /* ms: Link watchdog stage 1: stop motion, epoch bump, EVENT WATCHDOG (20 ms resolution). */
+    KILO_PARAM_WD_REST_MS = 1, /* ms: Link watchdog stage 2: REFLEX -> REST (never earlier than stage 1). */
+    KILO_PARAM_WD_LIMP_S = 2, /* s: Watchdog REST -> LIMP after this long. */
+    KILO_PARAM_XFADE_TICKS = 3, /* tick: Crossfade length out of TRICK or REFLEX. */
+    KILO_PARAM_POSTURE_TICKS = 4, /* tick: Default IDLE posture transition (SET_POSTURE transition_ticks = 0). */
+    KILO_PARAM_SLEW_MAX_A16 = 5, /* a16/tick: Safety-stage slew limit per joint per tick (160 = 10 deg/tick = 500 deg/s). */
+    KILO_PARAM_BATT_WARN_MV = 6, /* mV: Battery WARN trip (filtered, held 5 s). */
+    KILO_PARAM_BATT_WARN_CLEAR_MV = 7, /* mV: Battery WARN clear (held 10 s). */
+    KILO_PARAM_BATT_LOW_MV = 8, /* mV: Battery LOW trip: epoch bump, REST, LIMP 2 s later. */
+    KILO_PARAM_BATT_LOW_CLEAR_MV = 9, /* mV: Battery LOW clear (held 10 s). */
+    KILO_PARAM_BATT_CRIT_MV = 10, /* mV: Battery CRITICAL trip (held 1 s, latched): LIMP now. */
+    KILO_PARAM_TELEM_DIV = 11, /* tick: TELEMETRY divisor at boot (SET_STREAM telem_div overrides it until the next boot); 0 = off. */
+    KILO_PARAM_US_PERIOD_TICKS = 12, /* tick: Ultrasonic ranging cadence (4 = 80 ms). */
+};
+#define KILO_PARAM_COUNT 13u
+#define KILO_PARAM_WD_STOP_MS_DEFAULT 500
+#define KILO_PARAM_WD_STOP_MS_MIN 100
+#define KILO_PARAM_WD_STOP_MS_MAX 5000
+#define KILO_PARAM_WD_REST_MS_DEFAULT 1500
+#define KILO_PARAM_WD_REST_MS_MIN 200
+#define KILO_PARAM_WD_REST_MS_MAX 10000
+#define KILO_PARAM_WD_LIMP_S_DEFAULT 10
+#define KILO_PARAM_WD_LIMP_S_MIN 1
+#define KILO_PARAM_WD_LIMP_S_MAX 600
+#define KILO_PARAM_XFADE_TICKS_DEFAULT 10
+#define KILO_PARAM_XFADE_TICKS_MIN 0
+#define KILO_PARAM_XFADE_TICKS_MAX 100
+#define KILO_PARAM_POSTURE_TICKS_DEFAULT 25
+#define KILO_PARAM_POSTURE_TICKS_MIN 1
+#define KILO_PARAM_POSTURE_TICKS_MAX 255
+#define KILO_PARAM_SLEW_MAX_A16_DEFAULT 160
+#define KILO_PARAM_SLEW_MAX_A16_MIN 16
+#define KILO_PARAM_SLEW_MAX_A16_MAX 800
+#define KILO_PARAM_BATT_WARN_MV_DEFAULT 6900
+#define KILO_PARAM_BATT_WARN_MV_MIN 5000
+#define KILO_PARAM_BATT_WARN_MV_MAX 8400
+#define KILO_PARAM_BATT_WARN_CLEAR_MV_DEFAULT 7100
+#define KILO_PARAM_BATT_WARN_CLEAR_MV_MIN 5000
+#define KILO_PARAM_BATT_WARN_CLEAR_MV_MAX 8400
+#define KILO_PARAM_BATT_LOW_MV_DEFAULT 6600
+#define KILO_PARAM_BATT_LOW_MV_MIN 5000
+#define KILO_PARAM_BATT_LOW_MV_MAX 8400
+#define KILO_PARAM_BATT_LOW_CLEAR_MV_DEFAULT 7000
+#define KILO_PARAM_BATT_LOW_CLEAR_MV_MIN 5000
+#define KILO_PARAM_BATT_LOW_CLEAR_MV_MAX 8400
+#define KILO_PARAM_BATT_CRIT_MV_DEFAULT 6300
+#define KILO_PARAM_BATT_CRIT_MV_MIN 5000
+#define KILO_PARAM_BATT_CRIT_MV_MAX 8400
+#define KILO_PARAM_TELEM_DIV_DEFAULT 2
+#define KILO_PARAM_TELEM_DIV_MIN 0
+#define KILO_PARAM_TELEM_DIV_MAX 50
+#define KILO_PARAM_US_PERIOD_TICKS_DEFAULT 4
+#define KILO_PARAM_US_PERIOD_TICKS_MIN 3
+#define KILO_PARAM_US_PERIOD_TICKS_MAX 50
+/* Initializer for an int16_t [KILO_PARAM_COUNT][3] table of {min, max, default}, in id order. */
+#define KILO_PARAM_TABLE_INIT { \
+    {100, 5000, 500}, /* WD_STOP_MS */ \
+    {200, 10000, 1500}, /* WD_REST_MS */ \
+    {1, 600, 10}, /* WD_LIMP_S */ \
+    {0, 100, 10}, /* XFADE_TICKS */ \
+    {1, 255, 25}, /* POSTURE_TICKS */ \
+    {16, 800, 160}, /* SLEW_MAX_A16 */ \
+    {5000, 8400, 6900}, /* BATT_WARN_MV */ \
+    {5000, 8400, 7100}, /* BATT_WARN_CLEAR_MV */ \
+    {5000, 8400, 6600}, /* BATT_LOW_MV */ \
+    {5000, 8400, 7000}, /* BATT_LOW_CLEAR_MV */ \
+    {5000, 8400, 6300}, /* BATT_CRIT_MV */ \
+    {0, 50, 2}, /* TELEM_DIV */ \
+    {3, 50, 4}, /* US_PERIOD_TICKS */ \
+}
+/* Initializer for an int16_t [KILO_PARAM_COUNT] array of defaults, in id order. */
+#define KILO_PARAM_DEFAULTS_INIT { 500, 1500, 10, 10, 25, 160, 6900, 7100, 6600, 7000, 6300, 2, 4 }
 
 #ifdef KILO_PROTOCOL_FIELD_TABLE
 /* Scalar field layout, for host tests and tools. Not for the AVR build. */

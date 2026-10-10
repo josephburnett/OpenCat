@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, ClassVar
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 0
+PROTO_MINOR = 1
 BAUD = 250000
 MAX_PAYLOAD = 60
 HEADER_BYTES = 2
@@ -34,6 +34,7 @@ HEARTBEAT_IDLE_MS = 100
 MIND_ALIVE_MS = 1000
 CMD_RETRY_MS = 50
 CMD_MAX_RETRIES = 3
+DEDUP_WINDOW_MS = 500
 WD_STOP_MS = 500
 WD_REST_MS = 1500
 WD_LIMP_S = 10
@@ -46,6 +47,8 @@ EVENT_QUEUE_DEPTH = 8
 DEFAULT_TRANSITION_TICKS = 25
 EEPROM_READ_MAX = 56
 REBOOT_MAGIC = 0x4B49
+RESET_PULSE_MS = 100
+PARAM_SLOTS = 16
 TRICK_CAPACITY = 32
 TRICK_FRAMES_PER_MSG = 4
 BEEP_MAX_NOTES = 8
@@ -126,14 +129,17 @@ class AckStatus(enum.IntEnum):
     REFUSED_FALLEN = 8
     EEPROM_BUSY = 9
     STALE = 10
+    UNCALIBRATED = 11
 
 
 class GoalRefusedReason(enum.IntEnum):
     BAD_LEN = 1
     BAD_ARG = 2
+    UNKNOWN_TYPE = 4
     LOW_BATT = 7
     FALLEN = 8
     STALE = 10
+    UNCALIBRATED = 11
 
 
 class Event(enum.IntEnum):
@@ -361,12 +367,13 @@ class Note:
 
 @dataclass
 class HelloReq:
-    """0x01 HELLO_REQ (command). Ask for HELLO."""
+    """0x01 HELLO_REQ (command). Ask for HELLO (query)."""
     ID: ClassVar[int] = 0x01
     NAME: ClassVar[str] = 'HELLO_REQ'
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -403,6 +410,7 @@ class Heartbeat:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -439,6 +447,7 @@ class Ping:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 2
     MAX_LEN: ClassVar[int] = 2
@@ -478,6 +487,7 @@ class SetStream:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 3
@@ -523,6 +533,7 @@ class StatsReq:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -559,6 +570,7 @@ class PcaRead:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -595,6 +607,7 @@ class SetPosture:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = True
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 4
     MAX_LEN: ClassVar[int] = 4
@@ -643,6 +656,7 @@ class SetGait:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = True
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 11
     MAX_LEN: ClassVar[int] = 11
@@ -709,6 +723,7 @@ class SetHead:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = True
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 10
     MAX_LEN: ClassVar[int] = 10
@@ -763,6 +778,7 @@ class SetBodyPose:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = True
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 7
     MAX_LEN: ClassVar[int] = 7
@@ -814,6 +830,7 @@ class SetBalance:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 5
     MAX_LEN: ClassVar[int] = 5
@@ -865,6 +882,7 @@ class TrickBegin:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 9
     MAX_LEN: ClassVar[int] = 9
@@ -925,6 +943,7 @@ class TrickFrames:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 16
     MAX_LEN: ClassVar[int] = 58
@@ -974,6 +993,7 @@ class TrickCommit:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 3
@@ -1016,6 +1036,7 @@ class TrickPlay:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = True
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 4
     MAX_LEN: ClassVar[int] = 4
@@ -1064,6 +1085,7 @@ class TrickStop:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 1
     MAX_LEN: ClassVar[int] = 1
@@ -1103,6 +1125,7 @@ class SetEyes:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 4
     MAX_LEN: ClassVar[int] = 4
@@ -1151,6 +1174,7 @@ class Beep:
     KIND: ClassVar[Kind] = Kind.GOAL
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 17
@@ -1197,6 +1221,7 @@ class CalGet:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -1233,6 +1258,7 @@ class CalSet:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 3
@@ -1275,6 +1301,7 @@ class CalSave:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -1311,6 +1338,7 @@ class CalRevert:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 0
     MAX_LEN: ClassVar[int] = 0
@@ -1347,6 +1375,7 @@ class ImuOffsetsSet:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 13
     MAX_LEN: ClassVar[int] = 13
@@ -1404,6 +1433,7 @@ class ParamGet:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 1
     MAX_LEN: ClassVar[int] = 1
@@ -1443,6 +1473,7 @@ class ParamSet:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 4
     MAX_LEN: ClassVar[int] = 4
@@ -1488,6 +1519,7 @@ class EepromRead:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = True
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 3
@@ -1530,6 +1562,7 @@ class Reboot:
     KIND: ClassVar[Kind] = Kind.COMMAND
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 2
     MAX_LEN: ClassVar[int] = 2
@@ -1569,6 +1602,7 @@ class Hello:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x01
     MIN_LEN: ClassVar[int] = 16
     MAX_LEN: ClassVar[int] = 16
@@ -1580,8 +1614,8 @@ class Hello:
     last_alive_tick: int = 0  # tick
     caps: int = 0  # flags hello_caps
     max_payload: int = 0
-    trick_capacity: int = 0
-    joint_count: int = 0
+    trick_capacity: int = 0  # keyframes; 0 = no trick store (P0)
+    joint_count: int = 0  # driven joints (11)
     config_state: int = 0  # enum config_state
     epoch: int = 0
 
@@ -1638,6 +1672,7 @@ class Telemetry:
     KIND: ClassVar[Kind] = Kind.STREAM
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 26
     MAX_LEN: ClassVar[int] = 26
@@ -1725,12 +1760,13 @@ class Joints:
     KIND: ClassVar[Kind] = Kind.STREAM
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 24
     MAX_LEN: ClassVar[int] = 24
     _FMT: ClassVar[struct.Struct] = struct.Struct('<Hhhhhhhhhhhh')
     tick: int = 0  # tick
-    angle: list[int] = field(default_factory=lambda: [0] * 11)  # deg x 0.0625
+    angle: list[int] = field(default_factory=lambda: [0] * 11)  # deg x 0.0625; -32768 = limp (no output)
 
     def _fixed_values(self) -> list:
         v: list = []
@@ -1769,6 +1805,7 @@ class ImuRaw:
     KIND: ClassVar[Kind] = Kind.STREAM
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 14
     MAX_LEN: ClassVar[int] = 14
@@ -1820,12 +1857,13 @@ class ImuRaw:
 
 @dataclass
 class Ack:
-    """0x84 ACK (event). Reply to every command: echoes its seq and type."""
+    """0x84 ACK (event). Reply to every non-query command, and to a query only on failure: echoes its seq and type."""
     ID: ClassVar[int] = 0x84
     NAME: ClassVar[str] = 'ACK'
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 3
@@ -1871,6 +1909,7 @@ class Event:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 6
     MAX_LEN: ClassVar[int] = 6
@@ -1919,6 +1958,7 @@ class CalValues:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x38
     MIN_LEN: ClassVar[int] = 32
     MAX_LEN: ClassVar[int] = 32
@@ -1960,6 +2000,7 @@ class ParamValue:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x3D
     MIN_LEN: ClassVar[int] = 9
     MAX_LEN: ClassVar[int] = 9
@@ -2011,6 +2052,7 @@ class EepromData:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x3F
     MIN_LEN: ClassVar[int] = 3
     MAX_LEN: ClassVar[int] = 58
@@ -2058,6 +2100,7 @@ class Pong:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x03
     MIN_LEN: ClassVar[int] = 4
     MAX_LEN: ClassVar[int] = 4
@@ -2100,6 +2143,7 @@ class Stats:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x05
     MIN_LEN: ClassVar[int] = 19
     MAX_LEN: ClassVar[int] = 19
@@ -2163,6 +2207,7 @@ class PcaCounts:
     KIND: ClassVar[Kind] = Kind.EVENT
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x06
     MIN_LEN: ClassVar[int] = 32
     MAX_LEN: ClassVar[int] = 32
@@ -2204,6 +2249,7 @@ class Log:
     KIND: ClassVar[Kind] = Kind.STREAM
     DIR: ClassVar[Dir] = Dir.BODY_TO_PI
     HAS_EPOCH: ClassVar[bool] = False
+    IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
     MIN_LEN: ClassVar[int] = 1
     MAX_LEN: ClassVar[int] = 60
@@ -2282,6 +2328,76 @@ MESSAGES: dict[int, type] = {
     0x8B: PcaCounts,
     0x8F: Log,
 }
+
+
+# Queries (answered by their data reply only, never de-duplicated) -> reply type.
+QUERY_REPLY: dict[int, int] = {
+    0x01: 0x80,  # HELLO_REQ -> HELLO
+    0x38: 0x86,  # CAL_GET -> CAL_VALUES
+    0x3D: 0x87,  # PARAM_GET -> PARAM_VALUE
+    0x3F: 0x88,  # EEPROM_READ -> EEPROM_DATA
+    0x03: 0x89,  # PING -> PONG
+    0x05: 0x8A,  # STATS_REQ -> STATS
+    0x06: 0x8B,  # PCA_READ -> PCA_COUNTS
+}
+
+
+@dataclass(frozen=True)
+class ParamInfo:
+    id: int
+    name: str
+    default: int
+    min: int
+    max: int
+    unit: str
+    doc: str
+
+
+class ParamId(enum.IntEnum):
+    WD_STOP_MS = 0
+    WD_REST_MS = 1
+    WD_LIMP_S = 2
+    XFADE_TICKS = 3
+    POSTURE_TICKS = 4
+    SLEW_MAX_A16 = 5
+    BATT_WARN_MV = 6
+    BATT_WARN_CLEAR_MV = 7
+    BATT_LOW_MV = 8
+    BATT_LOW_CLEAR_MV = 9
+    BATT_CRIT_MV = 10
+    TELEM_DIV = 11
+    US_PERIOD_TICKS = 12
+
+
+PARAMS: dict[int, ParamInfo] = {
+    0: ParamInfo(0, 'WD_STOP_MS', 500, 100, 5000, 'ms',
+                         'Link watchdog stage 1: stop motion, epoch bump, EVENT WATCHDOG (20 ms resolution).'),
+    1: ParamInfo(1, 'WD_REST_MS', 1500, 200, 10000, 'ms',
+                         'Link watchdog stage 2: REFLEX -> REST (never earlier than stage 1).'),
+    2: ParamInfo(2, 'WD_LIMP_S', 10, 1, 600, 's',
+                         'Watchdog REST -> LIMP after this long.'),
+    3: ParamInfo(3, 'XFADE_TICKS', 10, 0, 100, 'tick',
+                         'Crossfade length out of TRICK or REFLEX.'),
+    4: ParamInfo(4, 'POSTURE_TICKS', 25, 1, 255, 'tick',
+                         'Default IDLE posture transition (SET_POSTURE transition_ticks = 0).'),
+    5: ParamInfo(5, 'SLEW_MAX_A16', 160, 16, 800, 'a16/tick',
+                         'Safety-stage slew limit per joint per tick (160 = 10 deg/tick = 500 deg/s).'),
+    6: ParamInfo(6, 'BATT_WARN_MV', 6900, 5000, 8400, 'mV',
+                         'Battery WARN trip (filtered, held 5 s).'),
+    7: ParamInfo(7, 'BATT_WARN_CLEAR_MV', 7100, 5000, 8400, 'mV',
+                         'Battery WARN clear (held 10 s).'),
+    8: ParamInfo(8, 'BATT_LOW_MV', 6600, 5000, 8400, 'mV',
+                         'Battery LOW trip: epoch bump, REST, LIMP 2 s later.'),
+    9: ParamInfo(9, 'BATT_LOW_CLEAR_MV', 7000, 5000, 8400, 'mV',
+                         'Battery LOW clear (held 10 s).'),
+    10: ParamInfo(10, 'BATT_CRIT_MV', 6300, 5000, 8400, 'mV',
+                         'Battery CRITICAL trip (held 1 s, latched): LIMP now.'),
+    11: ParamInfo(11, 'TELEM_DIV', 2, 0, 50, 'tick',
+                         'TELEMETRY divisor at boot (SET_STREAM telem_div overrides it until the next boot); 0 = off.'),
+    12: ParamInfo(12, 'US_PERIOD_TICKS', 4, 3, 50, 'tick',
+                         'Ultrasonic ranging cadence (4 = 80 ms).'),
+}
+PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}
 
 
 def payload_len_status(msg_type: int, payload: bytes) -> int:

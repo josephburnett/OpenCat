@@ -868,6 +868,41 @@
    "note": "GAIT refused STALE"
   },
   {
+   "name": "event_goal_refused_uncalibrated",
+   "msg": "EVENT",
+   "type": 133,
+   "dir": "body_to_pi",
+   "kind": "event",
+   "seq": 17,
+   "fields": {
+    "code": 13,
+    "arg": 4107,
+    "tick": 4200,
+    "epoch": 0
+   },
+   "payload": "0d0b10681000",
+   "decoded": "85110d0b10681000b983",
+   "wire": "0885110d0b10681003b98300",
+   "note": "STAND refused: config DEFAULTED"
+  },
+  {
+   "name": "ack_eeprom_busy",
+   "msg": "ACK",
+   "type": 132,
+   "dir": "body_to_pi",
+   "kind": "event",
+   "seq": 18,
+   "fields": {
+    "seq": 25,
+    "type": 58,
+    "status": 9
+   },
+   "payload": "193a09",
+   "decoded": "8412193a0990ea",
+   "wire": "088412193a0990ea00",
+   "note": "CAL_SAVE while a save runs"
+  },
+  {
    "name": "cal_values_zero",
    "msg": "CAL_VALUES",
    "type": 134,

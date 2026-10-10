@@ -17,7 +17,18 @@
 #     out-of-range values are BAD_ARG (they never change the frame length).
 #   * `enum` / `flags` name entries of [enums.*] / [flags.*].
 #   * kind: goal    = Pi->body, never acked, idempotent, refreshed at 5 Hz;
-#           command = Pi->body, always ACKed, retried, de-duplicated;
+#                     rejections are EVENT GOAL_REFUSED(type << 8 | reason),
+#                     reason = an ack_status code, rate-limited per type;
+#           command = Pi->body. Two classes:
+#             query = true: answered by its data reply only (the message whose
+#                     reply_to names it); an ACK only on failure (status != OK).
+#                     Never de-duplicated: a repeated query is answered again,
+#                     and the mind retries a query with a fresh seq.
+#             otherwise: always exactly one ACK. The body caches the last
+#                     (seq, type, status) of an executed non-query command for
+#                     dedup_window_ms; a repeat with the same seq and type is
+#                     re-ACKed with the cached status and not executed again.
+#                     The mind retries with the same seq.
 #           stream  = body->Pi periodic, droppable (drop_order: lowest first);
 #           event   = body->Pi, never dropped, never acked by the Pi
 #                     (`reply_to` names the command it answers, if any).
@@ -25,7 +36,7 @@
 
 [meta]
 proto_major = 1
-proto_minor = 0
+proto_minor = 1
 
 # ---------------------------------------------------------------------------
 [link]
@@ -50,6 +61,7 @@ heartbeat_idle_ms = 100        # mind sends HEARTBEAT after this long with nothi
 mind_alive_ms = 1000           # ...but only while its asyncio loop proved alive within this
 cmd_retry_ms = 50              # command retry timeout
 cmd_max_retries = 3
+dedup_window_ms = 500          # body forgets the cached (seq, type, status) after this (a new mind session reuses seqs)
 wd_stop_ms = 500               # body watchdog stage 1: stop motion, epoch bump, EVENT WATCHDOG
 wd_rest_ms = 1500              # body watchdog stage 2: REST
 wd_limp_s = 10                 # LIMP this long after watchdog REST
@@ -62,6 +74,8 @@ event_queue_depth = 8
 default_transition_ticks = 25  # SET_POSTURE transition_ticks = 0 means this
 eeprom_read_max = 56
 reboot_magic = 0x4B49          # "KI"
+reset_pulse_ms = 100           # GPIO4 low time for the flash reset (Appendix F)
+param_slots = 16               # persisted param slots in the config block; param ids < this
 trick_capacity = 32            # keyframes in the body's store
 trick_frames_per_msg = 4
 beep_max_notes = 8
@@ -83,14 +97,17 @@ REFUSED_LOW_BATT = 7
 REFUSED_FALLEN = 8
 EEPROM_BUSY = 9
 STALE = 10              # epoch mismatch
+UNCALIBRATED = 11       # STAND refused while config_state is DEFAULTED (no calibration)
 
-# EVENT GOAL_REFUSED reason: a subset of ack_status values.
+# EVENT GOAL_REFUSED reason: a subset of ack_status values (same codes).
 [enums.goal_refused_reason]
 BAD_LEN = 1
 BAD_ARG = 2
+UNKNOWN_TYPE = 4        # a goal this firmware does not implement yet (e.g. SET_GAIT in P0)
 LOW_BATT = 7
 FALLEN = 8
 STALE = 10
+UNCALIBRATED = 11
 
 [enums.event]
 BOOT = 1                # arg = reset_cause
@@ -238,10 +255,11 @@ fields = [
 
 [[messages]]
 name = "HELLO_REQ"
+query = true
 id = 0x01
 dir = "pi_to_body"
 kind = "command"
-doc = "Ask for HELLO."
+doc = "Ask for HELLO (query)."
 fields = []
 
 [[messages]]
@@ -254,6 +272,7 @@ fields = []
 
 [[messages]]
 name = "PING"
+query = true
 id = 0x03
 dir = "pi_to_body"
 kind = "command"
@@ -276,6 +295,7 @@ fields = [
 
 [[messages]]
 name = "STATS_REQ"
+query = true
 id = 0x05
 dir = "pi_to_body"
 kind = "command"
@@ -284,6 +304,7 @@ fields = []
 
 [[messages]]
 name = "PCA_READ"
+query = true
 id = 0x06
 dir = "pi_to_body"
 kind = "command"
@@ -459,6 +480,7 @@ fields = [
 
 [[messages]]
 name = "CAL_GET"
+query = true
 id = 0x38
 dir = "pi_to_body"
 kind = "command"
@@ -510,6 +532,7 @@ fields = [
 
 [[messages]]
 name = "PARAM_GET"
+query = true
 id = 0x3D
 dir = "pi_to_body"
 kind = "command"
@@ -532,6 +555,7 @@ fields = [
 
 [[messages]]
 name = "EEPROM_READ"
+query = true
 id = 0x3F
 dir = "pi_to_body"
 kind = "command"
@@ -569,8 +593,8 @@ fields = [
   { name = "last_alive_tick", type = "u16", unit = "tick" },
   { name = "caps", type = "u16", flags = "hello_caps" },
   { name = "max_payload", type = "u8" },
-  { name = "trick_capacity", type = "u8" },
-  { name = "joint_count", type = "u8" },
+  { name = "trick_capacity", type = "u8", note = "keyframes; 0 = no trick store (P0)" },
+  { name = "joint_count", type = "u8", note = "driven joints (11)" },
   { name = "config_state", type = "u8", enum = "config_state" },
   { name = "epoch", type = "u8" },
 ]
@@ -611,7 +635,7 @@ drop_order = 2
 doc = "11 output angles."
 fields = [
   { name = "tick", type = "u16", unit = "tick" },
-  { name = "angle", type = "i16", count = 11, unit = "deg", scale = 0.0625 },
+  { name = "angle", type = "i16", count = 11, unit = "deg", scale = 0.0625, note = "-32768 = limp (no output)" },
 ]
 
 [[messages]]
@@ -636,7 +660,7 @@ name = "ACK"
 id = 0x84
 dir = "body_to_pi"
 kind = "event"
-doc = "Reply to every command: echoes its seq and type."
+doc = "Reply to every non-query command, and to a query only on failure: echoes its seq and type."
 fields = [
   { name = "seq", type = "u8" },
   { name = "type", type = "u8" },
@@ -746,3 +770,128 @@ doc = "Debug builds only. ASCII text, 1..60 B, no terminator."
 fields = [
   { name = "text", type = "bytes", min = 1, max = 60 },
 ]
+
+# ---------------------------------------------------------------------------
+# Live parameters (PARAM_GET / PARAM_SET). Ids are stable: append, never
+# renumber. id < link.param_slots (each id has a persisted slot in the body's
+# config block). value/min/max/default are i16 in `unit`. These are the
+# params the P0 body implements; P1 adds FALL_DEG, BAL_KP_Q8, BAL_KD_MS,
+# BAL_DB_A16, BAL_MAX_A16, HEAD_HOLD_MS (and P2 the geometry and bob/wag
+# amplitudes) with the next free ids.
+
+[[params]]
+name = "WD_STOP_MS"
+id = 0
+default = 500
+min = 100
+max = 5000
+unit = "ms"
+doc = "Link watchdog stage 1: stop motion, epoch bump, EVENT WATCHDOG (20 ms resolution)."
+
+[[params]]
+name = "WD_REST_MS"
+id = 1
+default = 1500
+min = 200
+max = 10000
+unit = "ms"
+doc = "Link watchdog stage 2: REFLEX -> REST (never earlier than stage 1)."
+
+[[params]]
+name = "WD_LIMP_S"
+id = 2
+default = 10
+min = 1
+max = 600
+unit = "s"
+doc = "Watchdog REST -> LIMP after this long."
+
+[[params]]
+name = "XFADE_TICKS"
+id = 3
+default = 10
+min = 0
+max = 100
+unit = "tick"
+doc = "Crossfade length out of TRICK or REFLEX."
+
+[[params]]
+name = "POSTURE_TICKS"
+id = 4
+default = 25
+min = 1
+max = 255
+unit = "tick"
+doc = "Default IDLE posture transition (SET_POSTURE transition_ticks = 0)."
+
+[[params]]
+name = "SLEW_MAX_A16"
+id = 5
+default = 160
+min = 16
+max = 800
+unit = "a16/tick"
+doc = "Safety-stage slew limit per joint per tick (160 = 10 deg/tick = 500 deg/s)."
+
+[[params]]
+name = "BATT_WARN_MV"
+id = 6
+default = 6900
+min = 5000
+max = 8400
+unit = "mV"
+doc = "Battery WARN trip (filtered, held 5 s)."
+
+[[params]]
+name = "BATT_WARN_CLEAR_MV"
+id = 7
+default = 7100
+min = 5000
+max = 8400
+unit = "mV"
+doc = "Battery WARN clear (held 10 s)."
+
+[[params]]
+name = "BATT_LOW_MV"
+id = 8
+default = 6600
+min = 5000
+max = 8400
+unit = "mV"
+doc = "Battery LOW trip: epoch bump, REST, LIMP 2 s later."
+
+[[params]]
+name = "BATT_LOW_CLEAR_MV"
+id = 9
+default = 7000
+min = 5000
+max = 8400
+unit = "mV"
+doc = "Battery LOW clear (held 10 s)."
+
+[[params]]
+name = "BATT_CRIT_MV"
+id = 10
+default = 6300
+min = 5000
+max = 8400
+unit = "mV"
+doc = "Battery CRITICAL trip (held 1 s, latched): LIMP now."
+
+[[params]]
+name = "TELEM_DIV"
+id = 11
+default = 2
+min = 0
+max = 50
+unit = "tick"
+doc = "TELEMETRY divisor at boot (SET_STREAM telem_div overrides it until the next boot); 0 = off."
+
+[[params]]
+name = "US_PERIOD_TICKS"
+id = 12
+default = 4
+min = 3
+max = 50
+unit = "tick"
+doc = "Ultrasonic ranging cadence (4 = 80 ms)."
