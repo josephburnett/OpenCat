@@ -1,5 +1,3 @@
-const char mind0[] PROGMEM = "iRand";
-const char mind1[] PROGMEM = "i";
 const char mind2[] PROGMEM = "ksit";
 const char mind3[] PROGMEM = "kstr";
 const char mind4[] PROGMEM = "khi";
@@ -41,30 +39,6 @@ byte choiceWeight[] = {
 
 byte randomMindListLength = sizeof(mindList) / 2;
 int randomBase = 0;
-void allRandom() {
-  char tokenSet[] = { T_INDEXED_SIMULTANEOUS_BIN, T_INDEXED_SEQUENTIAL_BIN };
-  int8_t jointSet[] = {
-    0,
-    1,
-    2,
-  };  // 8, 9,  12, 13, 14, 15};
-  byte rangeSet[] = {
-    30,
-    30,
-    30,
-  };  // 10, 10, 20, 20, 10, 10};
-
-  token = tokenSet[random() % 2];
-  cmdLen = sizeof(jointSet);  //random() % 2 + 2;
-  for (byte r = 0; r < cmdLen; r++) {
-    byte j = random() % sizeof(jointSet);
-    newCmd[r * 2] = jointSet[j];
-    newCmd[r * 2 + 1] = (int8_t)min(max(currentAng[jointSet[j]] - currentAdjust[jointSet[j]] + random() % rangeSet[j] - rangeSet[j] / 2, -90), 90);
-    //    PT(jointSet[j]); PT('\t'); PTL(int(newCmd[r * 2 + 1]));
-  }
-  cmdLen *= 2;
-  // newCmd[cmdLen] = '~';
-}
 void randomMind() {
   long current = millis();
   if (current - idleTimer > randomInterval) {  //every randomInterval throw a dice
@@ -84,7 +58,6 @@ void randomMind() {
         strcpy(newCmd, (char *)newCmd + 1);  // this is duable only because newCmd+1 is after newCmd!
       else
         strcpy((char *)newCmd, (char *)newCmd + 1);  // this is duable only because newCmd+1 is after newCmd!
-      //      PTL(newCmd);
     }
     newCmdIdx = 100;
   }

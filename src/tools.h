@@ -34,8 +34,6 @@ template<typename T> void printList(T *arr, byte len = DOF) {
   for (byte i = 0; i < len; i++) {
     temp += String(T(arr[i]));
     temp += ",\t";
-    //PT((T)(arr[i]));
-    //PT('\t');
   }
   PTL(temp);
 }
@@ -72,10 +70,6 @@ template<typename T> void printCmdByType(char t, T *data) {
   }
 }
 
-// template<typename T, typename T1> void arrayNCPY(T *destination, const T1 *source, int len) {  //deep copy regardless of '\0'
-//   for (int i = 0; i < len; i++)
-//     destination[i] = min((T1)125, max((T1)-125, source[i]));
-// }
 template<typename T, typename T1> void arrayNCPY(T *destination, const T1 *source, int len) {  //deep copy regardless of '\0'
   for (int i = 0; i < len; i++)
     destination[i] = source[i];
@@ -92,29 +86,6 @@ template<typename T> void getExtreme(T *arr, T *extreme, int len = DOF) {
   }
 }
 
-long loopTimer;
-byte fps = 0;
-void FPS() {
-  if (millis() - loopTimer < 1000)
-    fps++;
-  else {
-    PT("FPS:\t");
-    PTL(fps);
-    fps = 0;
-    loopTimer = millis();
-  }
-}
-
-void printCmd() {
-  PTF("lastT:");
-  PT(lastToken);
-  PTF("\tT:");
-  PT(token);
-  PTF("\tLastCmd:");
-  PT(lastCmd);
-  PTF("\tCmd:");
-  printCmdByType(token, newCmd);
-}
 
 void resetCmd() {
   if (token == T_SKILL && newCmd[0] != '\0' && strcmp(newCmd, "rc")) {
@@ -126,14 +97,4 @@ void resetCmd() {
     token = '\0';
   newCmd[0] = '\0';
   cmdLen = 0;
-}
-
-char *strGet(char *s, int i) {  //allow negative index
-  int len = strlen(s);
-  if (abs(i) <= len)
-    return s + (i < 0 ? len + i : i);
-  else {
-    PTL("Invalid index!");
-    return s;
-  }
 }

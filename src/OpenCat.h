@@ -103,17 +103,10 @@ byte pwm_pin[] = { 12, 11, 4, 3,
 #define T_SKILL 'k'
 #define T_SKILL_DATA 'K'
 #define T_INDEXED_SEQUENTIAL_ASC 'm'  //m jointIndex1 jointAngle1 jointIndex2 jointAngle2 ... e.g. m0 70 0 -70 8 -20 9 -20
-// #define T_MELODY 'o'
 #define T_PAUSE 'p'
-// #define T_SLOPE 'l'
 #define T_SAVE 's'  //save the calibration values
-// #define T_TILT 't'
-// #define T_MEOW 'u'
 #define T_PRINT_GYRO 'v'            //print the Gyro data once
 #define T_VERBOSELY_PRINT_GYRO 'V'  //toggle verbosely print Gyro data
-// #define T_XLEG        'x'
-// #define T_ACCELERATE  '.'
-// #define T_DECELERATE  ','
 #define T_RANDOM_MIND 'z'  //toggle random behaviors in the RANDOM_MIND mode
 #define T_QUERY '?'
 
@@ -126,7 +119,6 @@ byte pwm_pin[] = { 12, 11, 4, 3,
 #ifdef BINARY_COMMAND
 #define T_BEEP_BIN 'B'    //B note1 duration1 note2 duration2 ... e.g. B12 8 14 8 16 8 17 8 19 4
 #define T_LISTED_BIN 'L'  //a list of the DOFx joint angles: angle0 angle1 angle2 ... angle15
-// #define T_SERVO_MICROSECOND 'w'  //PWM width modulation
 #define T_TEMP 'T'  //call the last 'K' skill data received from the serial port
 #endif
 
@@ -175,11 +167,8 @@ char lowerToken;
 char lastToken;
 byte newCmdIdx = 0;
 int cmdLen = 0;
-int8_t periodGlobal = 0;
 #define CMD_LEN 10    //the last char will be '\0' so only CMD_LEN-1 elements are allowed
 #define BUFF_LEN 467  //452
-// char *newCmd = new char[BUFF_LEN + 1];
-// char *lastCmd = new char[CMD_LEN + 1];  //the last char must be '\0' for safe so CMD_LEN+1 elements are required
 char newCmd[BUFF_LEN + 1];
 char lastCmd[CMD_LEN + 1];
 int spaceAfterStoringData = BUFF_LEN;
@@ -201,8 +190,6 @@ bool autoSwitch = true;
 bool fineAdjust = true;
 bool gyroBalanceQ = true;
 bool printGyro = false;
-bool walkingQ = false;
-// bool serialDominateQ = false;
 bool manualHeadQ = false;
 bool nonHeadJointQ = false;
 bool hardServoQ = true;
@@ -217,9 +204,6 @@ byte transformSpeed = 2;
 float protectiveShift;  //reduce the wearing of the potentiometer
 
 #include "MemoryFree/MemoryFree.h"  //http://playground.arduino.cc/Code/AvailableMemory
-#ifdef DEVELOPER
-// #include "MemoryFree/MemoryFree.h"  //http://playground.arduino.cc/Code/AvailableMemory
-#endif
 #include <EEPROM.h>
 
 #include "tools.h"

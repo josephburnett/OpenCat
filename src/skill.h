@@ -20,12 +20,6 @@ public:
   int8_t* dutyAngles;  //the data array for skill angles and parameters
 
   Skill() {
-    //      period = 0;
-    //      transformSpeed = 2;
-    //      expectedRollPitch[0] = yprTilt[2] = 0;
-    //      expectedRollPitch[1] = yprTilt[1] = 0;
-    //      dutyAngles = NULL;
-    //      jointIndex = 0;
   }
 
   void copyDataFromBufferToI2cEeprom(unsigned int eeAddress, int8_t* newCmd) {  // eeAddress should not be changed out of this function
@@ -54,9 +48,7 @@ public:
       //self-increment may not work as expected
       Wire.endTransmission();
       delay(6);  // needs 5ms for page write
-      //PTL("\nwrote " + String(writtenToWire) + " bytes.");
     }
-    //PTLF("finish copying to I2C EEPROM");
   }
 #ifndef MAIN_SKETCH
   void copyDataFromPgmToI2cEeprom(unsigned int& eeAddress, unsigned int pgmAddress) {  // eeAddress should be updated after this function
@@ -85,9 +77,7 @@ public:
       //self-increment may not work as expected
       Wire.endTransmission();
       delay(6);  // needs 5ms for page write
-      //PTL("\nwrote " + String(writtenToWire) + " bytes.");
     }
-    //PTLF("finish copying to I2C EEPROM");
   }
 
   void saveSkillInfoFromProgmemToOnboardEeprom() {
@@ -100,7 +90,6 @@ public:
       theLastEEaddress = i2cEepromAddress;
       byte len = strlen(skillNameWithType[s]);               //len includes type. the saved value doesn't
       EEPROM.update(SKILLS + skillAddressShift++, len - 1);  //the last char in name denotes skill type, I(nstinct) on external eeprom, N(ewbility) on progmem
-      // PT(skillNameWithType[s][len - 1]== 'I' ? "I nstinct\t" : "N ewbility\t");
       for (byte l = 0; l < len; l++) {
         PT(skillNameWithType[s][l]);
         EEPROM.update(SKILLS + skillAddressShift++, skillNameWithType[s][l]);
@@ -109,14 +98,12 @@ public:
       int8_t period = pgm_read_byte(progmemPointer[s]);
       EEPROM.update(SKILLS + skillAddressShift++, period);
 
-      //PTL("Current EEPROM address is " + String(SKILLS + skillAddressShift));
 #ifdef I2C_EEPROM
       if (!EEPROMOverflow)
         if (skillNameWithType[s][len - 1] == 'I') {  //  if there's instinct and there's i2c eeprom, and user decide to update.
           // save the data array to i2c eeprom. its address will be saved to onboard eeprom
           EEPROMWriteInt(SKILLS + skillAddressShift, i2cEepromAddress);
           copyDataFromPgmToI2cEeprom(i2cEepromAddress, (unsigned int)progmemPointer[s]);
-          //            PT(int(SKILLS + skillAddressShift + 2)); PT(" I2C EE "); PTL(int(i2cEepromAddress));
         }
 #endif
       skillAddressShift += 2;  // one int (2 bytes) for address
@@ -143,15 +130,9 @@ public:
     int skillAddressShift = 0;
     PTLF("Skill");
     for (byte s = 0; s < sizeof(progmemPointer) / 2; s++) {  //save skill info to on-board EEPROM, load skills to SkillList
-      //        PTL(s);
       byte nameLen = EEPROM.read(SKILLS + skillAddressShift++);  //without last type character
-      //    for (int n = 0; n < nameLen; n++)
-      //      PT((char)EEPROM.read(SKILLS + skillAddressShift + n));
       skillAddressShift += nameLen;
       char skillType = EEPROM.read(SKILLS + skillAddressShift++);
-      //    PT(skillType);
-      //    PT('\t');
-      //    PTL((int8_t)EEPROM.read(SKILLS + skillAddressShift));
 #ifdef I2C_EEPROM
       if (skillType == 'N')  // the address of I(nstinct) has been written in previous operation: saveSkillNameFromProgmemToOnboardEEPROM() in instinct.ino
                              // if skillType == N(ewbility), save pointer address of progmem data array to onboard eeprom.
@@ -164,7 +145,6 @@ public:
 #endif
       skillAddressShift += 3;
     }
-    //  PTLF("Load finished!");
   }
 
   int lookupAddressByName(const char* key) {
@@ -175,7 +155,6 @@ public:
     char lr = key[keyLen - 1];
     for (byte s = 0; s < nSkills; s++) {  //save skill info to on-board EEPROM, load skills to SkillList
       byte nameLen = EEPROM.read(SKILLS + skillAddressShift++);
-      // char* readName = new char[nameLen + 1];
       char readName[CMD_LEN + 1];
       for (byte l = 0; l < nameLen; l++) {
         readName[l] = EEPROM.read(SKILLS + skillAddressShift++);
@@ -189,15 +168,12 @@ public:
 #endif
       if (s == randSkillIdx          //random skill
           || !strcmp(readName, key)  //exact match: gait type + F or L, behavior
-          // || readName[nameLen - 1] == 'L' && !strncmp(readName, key, nameLen - 1)  //gait type + R
           || readName[nameLen - 1] != 'F' && strcmp(readName, "bk") && !strncmp(readName, key, keyLen - 1) && (lr == 'L' || lr == 'R' || lr == 'X')  // L, R or X
       ) {
-        // delete[] readName;
         period = EEPROM.read(SKILLS + skillAddressShift + 1);
         int bufferLen = dataLen(period);
         return SKILLS + skillAddressShift;
       }
-      // delete[] readName;
       skillAddressShift += 4;  //1 byte type, 1 byte period, 1 int address
     }
     PT('?');  //key not found
@@ -216,12 +192,9 @@ public:
   }
 
   void loadDataFromProgmem(unsigned int pgmAddress) {
-    //      newCmd = new int8_t [bufferLen + 1];
-    //      newCmd[0] = pgm_read_byte(pgmAddress++);
     int bufferLen = dataLen(period);
     for (int i = 0; i < bufferLen; i++)
       newCmd[i] = pgm_read_byte(pgmAddress++);
-    //      newCmd[bufferLen] = '\0';
   }
 
   void loadDataFromI2cEeprom(unsigned int eeAddress) {
@@ -232,31 +205,19 @@ public:
     Wire.requestFrom((uint8_t)DEVICE_ADDRESS, (uint8_t)1);
     period = newCmd[0] = Wire.read();
     int bufferLen = dataLen(period);
-    //      int tail = bufferLen;
     int readFromEE = 0;
     int readToWire = 0;
     while (bufferLen > 0) {
-      //PTL("request " + String(min(WIRE_BUFFER, len)));
       Wire.requestFrom((uint8_t)DEVICE_ADDRESS, (uint8_t)min(WIRE_BUFFER, bufferLen));
       readToWire = 0;
       do {
         if (Wire.available()) newCmd[1 + readFromEE++] = Wire.read();
-        /*PT( (int8_t)dutyAngles[readFromEE - 1]);
-            PT('\t')*/
       } while (--bufferLen > 0 && ++readToWire < WIRE_BUFFER);
-      //PTL();
     }
-    //      newCmd[tail] = '\0';
   }
   void inplaceShift() {
     int angleLen = abs(period) * frameSize;                 // need one extra byte for terminator '~'
-    int shiftRequiredByNewCmd = CMD_LEN - skillHeader + 1;  // required shift to store CMD_LEN + 1 chars. it can hold a command with CMD_LEN chars. the additioanl byte is required by '\0'.
     spaceAfterStoringData = BUFF_LEN - angleLen - 1;        // the bytes before the dutyAngles. The allowed command's bytes needs to -1
-    // PTH("request", shiftRequiredByNewCmd);
-    // PTH("aloShft", BUFF_LEN - (skillHeader + angleLen));
-    // if (CMD_LEN > spaceAfterStoringData)
-    //   PTF("LMT");
-    // PTL(spaceAfterStoringData);
     for (int i = 0; i <= angleLen; i++)
       newCmd[BUFF_LEN - i] = newCmd[skillHeader + angleLen - i];
     newCmd[BUFF_LEN] = '~';
@@ -277,27 +238,13 @@ public:
     postureOrWalkingFactor = (period == 1 ? 1 : POSTURE_WALKING_FACTOR);
 #endif
     firstMotionJoint = (period <= 1) ? 0 : DOF - WALKING_DOF;
-    // dutyAngles = newCmd + skillHeader;
     inplaceShift();
-    periodGlobal = period;
-    // PTL(periodGlobal);
 #ifdef DEVELOPER
     info();
 #endif
   }
 
-  //    void skillByName(const char* skillName, byte angleDataRatio = 1, float speedRatio = 1, bool shutServoAfterward = true) {
-  //      loadFrame(skillName);
-  //      transform(dutyAngles, angleDataRatio, speedRatio);
-  //      if (shutServoAfterward) {
-  //        pwm.shutServos();
-  //        token = 'd';
-  //      }
-  //    }
-
   void loadFrameByDataBuffer() {
-    //      period = newCmd[0];
-    //      dataLen(period);
     formatSkill();
     frame = 0;
     transform(dutyAngles + frame * frameSize, angleDataRatio, transformSpeed, firstMotionJoint);
@@ -324,15 +271,10 @@ public:
       protectiveShift = (strcmp(newCmd, "calib") && period == 1) ? random() % 100 / 10.0 - 5 : 0;
       for (byte i = 0; i < DOF; i++)
         dutyAngles[i] += protectiveShift;
-      // info();
       if (lr == 'R' || (lr == 'X' || lr != 'L') && random(100) % 2)
         mirror();
       frame = 0;
       transform(dutyAngles + frame * frameSize, angleDataRatio, transformSpeed, firstMotionJoint);
-      // #ifdef NYBBLE
-      //       for (byte i = 0; i < HEAD_GROUP_LEN; i++)
-      //         targetHead[i] = currentAng[i];
-      // #endif
     }
   }
 
@@ -398,8 +340,6 @@ public:
     if (period < 0) {  //behaviors
       int8_t repeat = loopCycle[2] >= 0 && loopCycle[2] < 2 ? 0 : loopCycle[2] - 1;
       for (byte c = 0; c < abs(period); c++) {  //the last two in the row are transition speed and delay
-                                                //          PT("step "); PTL(c);
-                                                //          printList(dutyAngles + c * frameSize);
         if (Serial.available()) {
           loadFrame("up");
           return;
@@ -413,14 +353,9 @@ public:
 
           float currentYpr = ypr[abs(triggerAxis)];
           float previousYpr = currentYpr;
-          //            long triggerTimer = millis();
           while (1) {
             read_IMU();
             currentYpr = ypr[abs(triggerAxis)];
-            //              print6Axis();
-            //              PT(currentYpr);
-            //              PT('\t');
-            //              PTL(triggerAngle);
             if ((180 - fabs(currentYpr) > 2)                                                                                           //skip the angle when the reading jumps from 180 to -180
                 && (triggerAxis * currentYpr > triggerAxis * triggerAngle && triggerAxis * previousYpr < triggerAxis * triggerAngle))  //the sign of triggerAxis will deterine whether the current angle should be larger or smaller than the trigger angle
               break;
@@ -436,8 +371,7 @@ public:
         }
       }
     } else {          //postures and gaits
-#if defined GYRO_PIN  //&& !defined RANDOM_MIND
-      // if (imuUpdated)
+#if defined GYRO_PIN
       if (gyroBalanceQ && !(frame % imuSkip)) {
         for (byte i = 0; i < 2; i++) {
           RollPitchDeviation[i] = ypr[2 - i] - expectedRollPitch[i];                                                                          //all in degrees
@@ -447,7 +381,6 @@ public:
 #endif
       if (jointIndex >= DOF) {
         jointIndex = 0;
-        // timer = (timer + 1) % abs(skill.period);
         frame += tStep;
         if (frame >= abs(period)) {
           frame = 0;
@@ -472,7 +405,7 @@ public:
       } else
         duty = dutyAngles[frame * frameSize + jointIndex - firstMotionJoint] * angleDataRatio;
       calibratedPWM(jointIndex, duty
-#if defined GYRO_PIN  //&& !defined RANDOM_MIND
+#if defined GYRO_PIN
                                   + gyroBalanceQ * (!exceptions ? (!(frame % imuSkip) ? adjust(jointIndex) : currentAdjust[jointIndex]) : 0)
 #endif
       );
@@ -483,39 +416,12 @@ public:
 
 Skill skill;
 
-int8_t expect[] = {
-  51,
-  39,
-  -57,
-  -43,
-  -18,
-  7,
-  19,
-  -7,
-};
-
-int testEEPROM(char* skillData) {
-  skill.loadFrame(skillData);
-  PTL(skill.period);
-  int len = 0;
-  while (len < 8) {
-    if (skill.dutyAngles[len] != expect[len])
-      return 0;
-    PT(int8_t(skill.dutyAngles[len]));
-    PT('\t');
-    len++;
-  }
-  return 1;
-}
-
 #ifndef MAIN_SKETCH
 void writeConst() {
-  //  flushEEPROM();
   int melodyAddress = MELODY_NORMAL;
   saveMelody(melodyAddress, melodyNormalBoot, sizeof(melodyNormalBoot));
   saveMelody(melodyAddress, melodyInit, sizeof(melodyInit));
   saveMelody(melodyAddress, melodyLowBattery, sizeof(melodyLowBattery));
-  // saveMelody(melodyAddress, melody1, sizeof(melody1));
   EEPROM.update(BOOTUP_SOUND_STATE, 1);  //always turn on the boot up sound after reset
 #if !defined AUTO_INIT
   playMelody(MELODY_INIT);
@@ -543,7 +449,6 @@ void writeConst() {
     }
     delay(6);
   }
-  //PTL();
 }
 
 int configureEEPROM() {

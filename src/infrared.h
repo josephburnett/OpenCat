@@ -116,11 +116,9 @@ String translateIR()    // takes action based on IR code received
 #endif
     default:
       {
-        //PTL(results.value, HEX);
       }
       return "";  //PTL("null");
   }               // End Case
-  //delay(100); // Do not get immediate repeat //no need because the main loop is slow
 
   // The control could be organized in another way, such as:
   // forward/backward to change the gaits corresponding to different speeds.
@@ -132,17 +130,13 @@ String gait = "tr";
 char direct = 'F';
 
 String irParser(String raw) {
-  //  PT(raw); PT('\t'); PT(gait); PT('\t'); PTL(direct);
   if (raw == "B") {
-    gait = "bk";  //(gait == "vt") ? "bk" : "vt";
+    gait = "bk";
     return gait;
   }
   if (raw == "F" || raw == "L" || raw == "R") {
     direct = raw[0];
     if (direct == 'F' && gait == "bk") {
-      //      if (gait == "bk")
-      //        gait = "vt";
-      //      else if (gait == "vt")
       gait = "tr";
     }
     return gait + direct;
@@ -159,7 +153,6 @@ String irParser(String raw) {
 void read_infrared() {
   if (irrecv.decode(&results)) {
     String IRsig = irParser(translateIR());
-    // PTL(IRsig);
     if (IRsig != "") {
       if (IRsig.length() == 1)
         token = IRsig[0];

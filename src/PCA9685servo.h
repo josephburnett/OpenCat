@@ -134,18 +134,11 @@ public:
     // (angle * (usMax - usMin) / angleRange) * k_us2pulse + servoPWMFreq / DEFAULT_FREQ * SERVOMIN;
     k_angle2pulse[servoNum] = (usMax - usMin) / angleRange * k_us2pulse;
     return k_angle2pulse[servoNum];
-    //      Serial.print(servoNum); Serial.print('\t');
-    //      Serial.println(k_angle2pulse[PWM_pin[servoNum]]);
   }
 #endif
   void writeAngle(uint8_t servoNum, float angle) {
     int clipped = min(max(EEPROMReadInt(ANGLE2PULSE_FACTOR + servoNum * 2) / 1000.0 * angle + (byte)eeprom(B_OFFSET) * 10, 500), 2500);
     setPWM(eeprom(PWM_PIN, servoNum), 0, clipped);
-    //      if (servoNum == 1) {
-    //        Serial.print(servoNum); Serial.print('\t');
-    //        Serial.print(EEPROMReadInt(ANGLE2PULSE_FACTOR + servoNum * 2) / 1000.0 * angle + (byte)eeprom(B_OFFSET) * 10); Serial.print('\t');
-    //        Serial.println(clipped);
-    //      }
   }
   void shutServos(byte s0 = 0, byte s1 = DOF) {
     //todo:
@@ -206,7 +199,6 @@ byte match = 0;
 void calibratePCA9685() {
   delay(10);
   if (!calibrated && !digitalRead(PWM_READ_PIN)) {  //the pins are connected
-    //    for (byte i = 0; i < 16; i++)
     pwm.writeMicroseconds(eeprom(PWM_PIN, 3), 1500);
     int actualPulseWidth;
     actualPulseWidth = 0;
@@ -248,24 +240,6 @@ void servoSetup() {
   if (initValue < F_MIN || initValue > F_MAX)
     initValue = 25000;
   PTL(float(initValue) / 1000);
-  // PTF("MHz");
   pwm.setup(DOF, long(initValue) * 1000);
   pwm.shutServos();
-}
-
-void testLoop() {
-  for (int an = -180; an < 180; an += 90) {  //0,90,180,270,
-    for (int servonum = 0; servonum < 16; servonum++)
-      pwm.writeAngle(servonum, an);
-    //    calibratedPWM(servonum, an);
-    delay(1000);
-  }
-  for (int an = 180; an > -180; an -= 90) {  //180,90
-    for (int servonum = 0; servonum < 16; servonum++)
-      pwm.writeAngle(servonum, an);
-    //    calibratedPWM(servonum, an);
-    delay(1000);
-  }
-  //  pwm.shutServos();
-  //  delay(3000);
 }

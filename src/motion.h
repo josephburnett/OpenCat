@@ -46,11 +46,9 @@ float RollPitchDeviation[2];
 int8_t slope = 1;
 
 float adjust(byte i) {
-  float rollAdj, pitchAdj, adj;
+  float rollAdj;
   if (i == 1 || i > 3) {  //check idx = 1
     bool leftQ = (i - 1) % 4 > 1 ? true : false;
-    //bool frontQ = i % 4 < 2 ? true : false;
-    //bool upperQ = i / 4 < 3 ? true : false;
     float leftRightFactor = 1;
     if ((leftQ && slope * RollPitchDeviation[0] > 0)  // operator * is higher than &&
         || (!leftQ && slope * RollPitchDeviation[0] < 0))
@@ -65,7 +63,7 @@ float adjust(byte i) {
 #endif
 
                           rollAdj
-                        - /*slope * */ eeprom(ADAPT_PARAM, i, 1, 2) * ((i % 4 < 2) ? (RollPitchDeviation[1]) : RollPitchDeviation[1]));
+                        - eeprom(ADAPT_PARAM, i, 1, 2) * ((i % 4 < 2) ? (RollPitchDeviation[1]) : RollPitchDeviation[1]));
 #ifdef ADJUSTMENT_DAMPER
   currentAdjust[i] += max(min(idealAdjust - currentAdjust[i], float(ADJUSTMENT_DAMPER)), -float(ADJUSTMENT_DAMPER));
 #else
@@ -76,9 +74,6 @@ float adjust(byte i) {
 
 
 void calibratedPWM(byte i, float angle, float speedRatio = 0) {
-  /*float angle = max(-SERVO_ANG_RANGE/2, min(SERVO_ANG_RANGE/2, angle));
-    if (i > 3 && i < 8)
-    angle = max(-5, angle);*/
   angle = max(float(loadAngleLimit(i, 0)), min(float(loadAngleLimit(i, 1)), angle));
   int duty0 = EEPROMReadInt(CALIBRATED_ZERO_POSITIONS + i * 2) + currentAng[i] * eeprom(ROTATION_DIRECTION, i);
   currentAng[i] = angle;
@@ -119,10 +114,6 @@ template<typename T> void transform(T *target, byte angleDataRatio = 1, float sp
       diff[i - offset] = currentAng[i] - target[i - offset] * angleDataRatio;
       maxDiff = max(maxDiff, abs(diff[i - offset]));
     }
-    // if (maxDiff == 0) {
-    //   delete[] diff;
-    //   return;
-    // }
     int steps = speedRatio > 0 ? int(round(maxDiff / 1.0 /*degreeStep*/ / speedRatio)) : 0;  //default speed is 1 degree per step
     for (int s = 0; s <= steps; s++) {
       for (byte i = offset; i < DOF; i++) {

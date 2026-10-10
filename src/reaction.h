@@ -1,14 +1,6 @@
 void dealWithExceptions() {
   if (gyroBalanceQ && exceptions) {  //the gyro reaction switch can be toggled on/off by the 'g' token
-//  soundFallOver();
-//  for (int m = 0; m < 2; m++)
-//    meow(30 - m * 12, 42 - m * 12, 20);
-//  beep(15, 100, 100, 2);
-#ifdef T_MEOW
-    meow();
-#else
     beep(20, 50, 25, 5);
-#endif
     token = T_SKILL;
     strcpy(newCmd, "rc");
     newCmdIdx = -1;
@@ -35,19 +27,6 @@ bool lowBattery() {
 
       if (eeprom(BOOTUP_SOUND_STATE))
         playMelody(MELODY_LOW_BATTERY);
-      //    int8_t bStep = 1;
-      //    for (byte brightness = 1; brightness > 0; brightness += bStep) {
-      //#ifdef NEOPIXEL_PIN
-      //      pixel.setPixelColor(0, pixel.Color(brightness, 0, 0));
-      //      pixel.show();
-      //#endif
-      //#if defined LED_PIN
-      //      analogWrite(LED_PIN, 255 - brightness);
-      //#endif
-      //      if (brightness == 255)
-      //        bStep = -1;
-      //      delay(5);
-      //    }
       lastVoltage = voltage;
       return true;
     }
@@ -62,15 +41,12 @@ void reaction() {
     lowerToken = tolower(token);
 #ifdef MAIN_SKETCH
     if (newCmdIdx < 5 && lowerToken != T_BEEP
-#ifdef T_MEOW
-        && token != T_MEOW
-#endif
 #ifdef BINARY_COMMAND
         && token != T_LISTED_BIN && token != T_INDEXED_SIMULTANEOUS_BIN
 #endif
     )
       beep(15 + newCmdIdx, 5);                    //ToDo: check the muted sound when newCmdIdx = -1
-    if (hardServoQ && (lowerToken == T_SKILL)) {  //|| lowerToken == T_INDEXED_SEQUENTIAL_ASC || lowerToken == T_INDEXED_SIMULTANEOUS_ASC)) {
+    if (hardServoQ && (lowerToken == T_SKILL)) {
       setServoP(P_SOFT);
       hardServoQ = false;
     }
@@ -105,9 +81,6 @@ void reaction() {
 
 #ifdef RANDOM_MIND
       case T_RANDOM_MIND:
-#endif
-#ifdef T_SLOPE
-      case T_SLOPE:
 #endif
         {
           if (token == T_GYRO_FINENESS) {
@@ -148,12 +121,6 @@ void reaction() {
             token = autoSwitch ? 'Z' : 'z';  //Z for active random mind
           } else
 #endif
-#ifdef T_SLOPE
-            if (token == T_SLOPE) {  //reverse the adjustment direction
-            slope = -slope;
-            token = slope > 0 ? 'R' : 'r';
-          }
-#endif
           {}  //must have in cases the else combines with break
           break;
         }
@@ -176,13 +143,6 @@ void reaction() {
             printTable(currentAng);
           break;
         }
-#ifdef T_MELODY
-      case T_MELODY:
-        {
-          playMelody(MELODY_1);
-          break;
-        }
-#endif
 #ifdef ULTRASONIC
       case T_COLOR:
         {
@@ -194,18 +154,6 @@ void reaction() {
             long color = ((long)(uint8_t(newCmd[0])) << 16) + ((long)(uint8_t(newCmd[1])) << 8) + (long)(uint8_t(newCmd[2]));
             ultrasonic.SetRgbEffect(E_RGB_INDEX(uint8_t(newCmd[3])), color, uint8_t(newCmd[4]));
           }
-          break;
-        }
-#endif
-#ifdef T_SERVO_MICROSECOND
-      case ';':
-        {
-          setServoP(P_SOFT);
-          break;
-        }
-      case ':':
-        {
-          setServoP(P_HARD);
           break;
         }
 #endif
@@ -226,19 +174,7 @@ void reaction() {
       case T_CALIBRATE:                 //calibration
       case T_INDEXED_SEQUENTIAL_ASC:    //move multiple indexed joints to angles once at a time (ASCII format entered in the serial monitor)
       case T_INDEXED_SIMULTANEOUS_ASC:  //move multiple indexed joints to angles simultaneously (ASCII format entered in the serial monitor)
-#ifdef T_SERVO_MICROSECOND
-      case T_SERVO_MICROSECOND:  //send pulse with unit of microsecond to a servo
-#endif
-#ifdef T_TILT
-      case T_TILT:  //tilt the robot, format: t axis angle. 0:yaw, 1:pitch, 2:roll
-#endif
-#ifdef T_MEOW
-      case T_MEOW:  //meow
-#endif
       case T_BEEP:  //beep(tone, duration): tone 0 is pause. the duration corresponds to 1/duration second
-#ifdef T_TUNER
-      case T_TUNER:
-#endif
         {
           if (token == T_INDEXED_SIMULTANEOUS_ASC && cmdLen == 0)
             manualHeadQ = false;
@@ -248,7 +184,6 @@ void reaction() {
             for (int i = 0; i < DOF; i++) {
               targetFrame[i] = currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0);
             }
-            // arrayNCPY(targetFrame, currentAng, DOF);
             char *pch;
             pch = strtok(newCmd, " ,");
             do {  //it supports combining multiple commands at one time
@@ -278,36 +213,14 @@ void reaction() {
                   skill.loadFrame(newCmd);  //ensure it's correctly compared in load skill for protective shifts.
                 }
                 if (inLen == 2) {
-                  //                if (target[1] >= 1001) { // Using 1001 for incremental calibration. 1001 is adding 1 degree, 1002 is adding 2 and 1009 is adding 9 degrees
-                  //                  target[1] += (servoCalib[target[0]] - 1000);
-                  //                } else if (target[1] <= -1001) { // Using -1001 for incremental calibration. -1001 is removing 1 degree, 1002 is removing 2 and 1009 is removing 9 degrees
-                  //                  target[1] += (servoCalib[target[0]] + 1000);
-                  //                }
                   servoCalib[target[0]] = target[1];
                 }
                 int duty = EEPROMReadInt(ZERO_POSITIONS + target[0] * 2) + float(servoCalib[target[0]]) * eeprom(ROTATION_DIRECTION, target[0]);
                 pwm.writeAngle(target[0], duty);
                 printTable(servoCalib);
-                // PT(token);
-                // printList(target, 2);
               } else if (token == T_INDEXED_SEQUENTIAL_ASC) {
                 transform(targetFrame, 1, 2);
               }
-#ifdef T_SERVO_MICROSECOND
-              else if (token == T_SERVO_MICROSECOND) {
-                pwm.writeMicroseconds(eeprom(PWM_PIN, target[0]), target[1]);
-              }
-#endif
-#ifdef T_TILT
-              else if (token == T_TILT) {
-                yprTilt[target[0]] = target[1];
-              }
-#endif
-#ifdef T_MEOW
-              else if (token == T_MEOW) {
-                meow(random() % 3 + 1, (random() % 4 + 2) * 5);
-              }
-#endif
               else if (token == T_BEEP) {
                 if (inLen == 0)  //toggle the melody on/off
                                  //the terminator of upper-case tokens is not '\n'. it may cause error when entered in the Arduino serial monitor
@@ -316,28 +229,8 @@ void reaction() {
                   beep(target[0], 1000 / target[1]);
               }
 
-#ifdef T_TUNER
-              else if (token == T_TUNER) {
-                if (inLen > 1) {
-                  *par[target[0]] = target[1];
-                  PT(target[0]);
-                  PT('\t');
-                  PTL(target[1]);
-                }
-              }
-#endif
             } while (pch != NULL);
-#ifdef T_TUNER
-            if (token == T_TUNER) {
-              for (byte p = 0; p < sizeof(initPars) / sizeof(int8_t); p++) {
-                PT(*par[p]);
-                PT('\t');
-              }
-              PTL();
-            }
-#endif
             if ((token == T_INDEXED_SEQUENTIAL_ASC || token == T_INDEXED_SIMULTANEOUS_ASC) && (nonHeadJointQ || lastToken != T_SKILL)) {
-              // PTL(token);
               transform(targetFrame, 1, 4);  // if (token == T_INDEXED_SEQUENTIAL_ASC) it will be useless
               skill.convertTargetToPosture(targetFrame);
             }
@@ -357,7 +250,6 @@ void reaction() {
             for (int i = 0; i < DOF; i++) {
               targetFrame[i] = currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0);
             }
-            // arrayNCPY(targetFrame, currentAng, DOF);
             byte group = 2;
             for (int i = 0; i < cmdLen; i += group) {
               if (newCmd[i] >= 0 && newCmd[i] < DOF) {
@@ -373,7 +265,6 @@ void reaction() {
               }
             }
             if (nonHeadJointQ || lastToken != T_SKILL) {
-              // PTL(token);
               transform(targetFrame, 1, 4);  // if (token == T_INDEXED_SEQUENTIAL_BIN) it will be useless
               skill.convertTargetToPosture(targetFrame);
             }
@@ -383,7 +274,6 @@ void reaction() {
 #ifdef BINARY_COMMAND
       case T_LISTED_BIN:
         {
-          // PTL(token);                                      //make real-time motion instructions more timely
           //list of all 16 joint: angle0, angle2,... angle15 (binary encoding)
           transform((int8_t *)newCmd, 1, transformSpeed);  //need to add angleDataRatio if the angles are large
           break;
@@ -408,8 +298,6 @@ void reaction() {
 #ifdef T_SKILL_DATA
       case T_SKILL_DATA:
         {  //takes in the skill array from the serial port, load it as a regular skill object and run it locally without continuous communication with the master
-          // unsigned int i2cEepromAddress = EEPROMReadInt(SERIAL_BUFF) + random() % (EEPROM_SIZE - EEPROMReadInt(SERIAL_BUFF)) - 500;
-          // EEPROMWriteInt(SERIAL_BUFF_RAND, i2cEepromAddress);  //randomize the address of K data to protect the EEPROM. unnecessary when the address is fixed.
           unsigned int i2cEepromAddress = EEPROMReadInt(SERIAL_BUFF);
           skill.copyDataFromBufferToI2cEeprom(i2cEepromAddress, (int8_t *)newCmd);  //must be before the loading to set the period
           skill.loadFrameByDataBuffer();
@@ -427,17 +315,9 @@ void reaction() {
               || skill.period <= 1) {     // for repeating behaviors. if it's set < 1, won't repeat the last behavior
 
             skill.loadFrame(newCmd);
-            // skill.info();
-            // PTH("mem",freeMemory());
           }
           break;
         }
-
-        // case T_TASK_QUEUE:
-        //   {
-        //     tQueue->createTask();
-        //     break;
-        //   }
 
 #endif
       case T_REST:
@@ -460,9 +340,6 @@ void reaction() {
 #ifdef T_PRINT_GYRO
               || lowerToken == T_PRINT_GYRO
 #endif
-#ifdef T_TILT
-              || token == T_TILT
-#endif
               ))
         token = T_SKILL;
     }
@@ -478,24 +355,15 @@ void reaction() {
 #endif
     if (skill.period < 0) {  //behaviors
       {                      //use the last frame as a posture
-        // newCmd[0] = '\0';
-        // arrayNCPY(skill.dutyAngles, skill.dutyAngles + (abs(skill.period) - 1) * skill.frameSize, DOF);
-        // skill.period = 1;
-        // frame = 0;
         skill.convertTargetToPosture(currentAng);
       }
       for (int i = 0; i < DOF; i++)
         currentAdjust[i] = 0;
-      // if (strcmp(newCmd, ""))
-      //   skill.loadFrame(newCmd);
       PTL(token);  //behavior can confirm completion by sending the token back
-      //      PTL("lastT:" + String(lastToken) + "\tT:" + String(token) + "\tLastCmd:" + String(lastCmd) + "\tCmd:" + String(newCmd));
     }
-    if (exceptions && lastCmd[strlen(lastCmd) - 1] < 'L' && skill.lookupAddressByName(lastCmd) > 0) {  //lastToken == T_SKILL && lastSkill->period > 0) {
-                                                                                                       // if the last command is not a behavior and not a turning gait. case wkF, wkL, wkR, rlL, rlR
+    if (exceptions && lastCmd[strlen(lastCmd) - 1] < 'L' && skill.lookupAddressByName(lastCmd) > 0) {  // if the last command is not a behavior and not a turning gait. case wkF, wkL, wkR, rlL, rlR
       if (lastCmd[0] != '\0')
         skill.loadFrame(lastCmd);
-      // read_IMU();
     }
   }
 #endif

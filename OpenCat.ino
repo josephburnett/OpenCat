@@ -32,9 +32,8 @@
 
 /*
   To configure the board:
-  1. Select your robot and board version.
-  2. Comment out #define MAIN_SKETCH and upload. Upload and follow the serial prompts to proceed.
-  3. Uncomment #define MAIN_SKETCH to make it active. Then upload the program for main functions.
+  1. Comment out #define MAIN_SKETCH and upload. Upload and follow the serial prompts to proceed.
+  2. Uncomment #define MAIN_SKETCH to make it active. Then upload the program for main functions.
 */
 
 #define MAIN_SKETCH  //the Petoi App only works when this mode is on
@@ -56,16 +55,10 @@
 void setup() {
   Serial.begin(BAUD_RATE);
   Serial.setTimeout(SERIAL_TIMEOUT);
-  // while (Serial.available() && Serial.read());  // empty buffer
 
   // join I2C bus (I2Cdev library doesn't do this automatically)
-  //#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
   Wire.begin();
-  //  TWBR = 24; // 400kHz I2C clock (200kHz if CPU is 8MHz)
   Wire.setClock(500000L);
-  //#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-  //  Fastwire::setup(400, true);
-  //#endif
   initRobot();
 }
 
