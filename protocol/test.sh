@@ -20,6 +20,9 @@ mkdir -p "$BUILD"
 echo "== generator up to date"
 "$PYTHON" "$HERE/gen.py" --check
 
+echo "== vendored copies (body/src/proto, mind/kilo/protocol) up to date"
+"$PYTHON" "$HERE/vendor.py" --check
+
 echo "== C build (host, sanitizers)"
 for f in cobs crc16 kilo_frame; do
     "$CC" -std=c99 -pedantic $WARN $SAN -g -O1 -I"$HERE/gen" -c "$HERE/c/$f.c" -o "$BUILD/$f.o"
