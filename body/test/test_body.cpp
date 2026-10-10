@@ -68,7 +68,7 @@ int main() {
     bool moved = false;
     for (int k = 0; k < DRIVEN_COUNT; k++) {
       int16_t d = (int16_t)(b.arb.out[k] - prev[k]);
-      CHECK(std::abs(d) <= SLEW_MAX_A16);
+      CHECK(std::abs(d) <= PARAM(SLEW_MAX_A16));
       int16_t dir = (int16_t)(posture_angle(POSTURE_STAND, (uint8_t)k) - posture_angle(POSTURE_REST, (uint8_t)k));
       CHECK((long)d * dir >= 0);  // never moves backwards
       if (d) moved = true;

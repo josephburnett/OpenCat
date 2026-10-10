@@ -7,7 +7,8 @@
 #include "main.h"
 #include <avr/interrupt.h>
 #include "../core/joints.h"
-#include "../core/link_iface.h"
+#include "../core/link.h"
+#include "../core/params.h"
 #include "../core/sched.h"
 #include "../hal/adc.h"
 #include "../hal/buzzer.h"
@@ -21,18 +22,23 @@
 #include "../hal/uart.h"
 #include "../hal/ultrasonic.h"
 
-// Build id for the reset record and HELLO. `kilo flash` passes the git hash
-// as -DKILO_BUILD=0x...; otherwise hash the compile date and time (FNV-1a).
-#ifdef KILO_BUILD
-#define BUILD_ID ((uint32_t)(KILO_BUILD))
-#else
+// Build ids. HELLO.fw_build is the git hash that `kilo flash` passes as
+// -DKILO_BUILD=0x<8 hex digits> (git rev-parse --short=8), so the mind can
+// check it flashed what it built; without it (a plain arduino-cli build) it
+// is an FNV-1a hash of the compile date and time. The reset record needs a
+// value that differs between any two builds (a rebuilt dirty tree has the
+// same git hash), so it also mixes in the compile time.
 static constexpr uint32_t fnv(const char* s, uint32_t h) {
   return *s ? fnv(s + 1, (h ^ (uint8_t)*s) * 16777619u) : h;
 }
 // constexpr variable: forces the hash at compile time (no string in RAM).
-static constexpr uint32_t BUILD_HASH = fnv(__DATE__ " " __TIME__, 2166136261u);
-#define BUILD_ID BUILD_HASH
+static constexpr uint32_t BUILD_TIME_HASH = fnv(__DATE__ " " __TIME__, 2166136261u);
+#ifdef KILO_BUILD
+#define FW_BUILD ((uint32_t)(KILO_BUILD))
+#else
+#define FW_BUILD BUILD_TIME_HASH
 #endif
+#define RESET_BUILD_ID (FW_BUILD ^ BUILD_TIME_HASH ^ 0x4B494C4FUL)
 
 // Side peripherals that §7 schedules for P1 (ultrasonic, buzzer). They are
 // implemented and on by default; -DKILO_ULTRASONIC=0 / -DKILO_BUZZER=0 drop
@@ -51,12 +57,12 @@ Body g_body;
 Config g_config;
 BodyStats g_stats;
 uint16_t g_counts[16];
+uint8_t g_pkt[DMP_PACKET_SIZE];
 
 static Sched sched;
 static uint8_t imu_present;   // the DMP came up at boot or after a re-init
 static uint8_t imu_reinit;    // runtime re-init in progress (LIMP only)
 static uint32_t imu_retry_at; // after a failed attempt, wait before the next
-static uint8_t pkt[DMP_PACKET_SIZE];
 
 static void run_tick(void) {
   uint32_t t0 = clock_micros();
@@ -66,8 +72,8 @@ static void run_tick(void) {
   in.batt_valid = 0;
   // 1. IMU: whole packets from the FIFO, keep the newest. 2. Attitude.
   if (imu_present && !b.imu_fault && !imu_reinit) {
-    in.imu = mpu_fifo_read(pkt);
-    if (in.imu == IMU_FRESH && !attitude_from_packet(pkt, in.att)) in.imu = IMU_NONE;
+    in.imu = mpu_fifo_read(g_pkt);
+    if (in.imu == IMU_FRESH && !attitude_from_packet(g_pkt, in.att)) in.imu = IMU_NONE;
   }
   // 3. Goals that arrived during the IMU read.
   link_poll();
@@ -87,7 +93,7 @@ static void run_tick(void) {
   pca_write_all(g_counts);
   // 9. Side sensors on their own cadences.
 #if KILO_ULTRASONIC
-  if (b.tick % US_PERIOD_TICKS == 0) us_trigger(clock_micros());
+  if (b.tick % (uint8_t)PARAM(US_PERIOD_TICKS) == 0) us_trigger(clock_micros());
 #endif
   if (b.tick % BATT_PERIOD_TICKS == 0) adc_start();
 #if KILO_BUZZER
@@ -97,8 +103,10 @@ static void run_tick(void) {
   link_tick();
   sys_wdt_kick();
   sys_reset_record.alive_tick = b.tick;
-  uint32_t dt = clock_micros() - t0;
-  if (dt > g_stats.max_tick_us) g_stats.max_tick_us = (uint16_t)(dt > 0xFFFF ? 0xFFFF : dt);
+  uint32_t dt32 = clock_micros() - t0;
+  uint16_t dt = (uint16_t)(dt32 > 0xFFFF ? 0xFFFF : dt32);
+  if (dt > g_stats.max_tick_us) g_stats.max_tick_us = dt;
+  if (dt > g_stats.tick_us_window) g_stats.tick_us_window = dt;
   g_stats.overruns = sched.overruns;
 }
 
@@ -141,8 +149,8 @@ static void background(void) {
 
 int main(void) {
   // 1. Reset record (before anything can overwrite it) and the UART.
-  g_stats.build = BUILD_ID;
-  g_stats.reset_cause = reset_classify(sys_reset_record, BUILD_ID, g_stats.last_alive_tick);
+  g_stats.build = FW_BUILD;
+  g_stats.reset_cause = reset_classify(sys_reset_record, RESET_BUILD_ID, g_stats.last_alive_tick);
   clock_init();
   uart_init();
   led_init();
@@ -157,6 +165,7 @@ int main(void) {
   // Config first: it is only EEPROM reads, and the warm-boot pose needs the
   // calibration to turn counts back into angles.
   config_boot(g_config);
+  params_load(g_config.img);
   // 2. I2C and the PCA9685: warm (keep the pose it is driving) or cold.
   i2c_init();
   int16_t warm[DRIVEN_COUNT];
@@ -175,8 +184,10 @@ int main(void) {
   led_off();
   body_init(g_body, &g_config, is_warm ? warm : 0, imu_present);
   // 4. HELLO and EVENT BOOT, then the watchdog.
-  link_init(&g_body, 0);
-  link_boot(g_stats.reset_cause, g_stats.last_alive_tick, g_config.state, g_config.reason);
+  uint16_t caps = (KILO_BUZZER ? KILO_HELLO_CAPS_BUZZER : 0) | (imu_present ? KILO_HELLO_CAPS_DMP : 0) |
+                  (KILO_ULTRASONIC ? KILO_HELLO_CAPS_ULTRASONIC : 0);
+  link_init(FW_BUILD, caps);
+  link_boot(g_stats.reset_cause, g_stats.last_alive_tick);
   events_push(g_body.ev, EV_BOOT, g_stats.reset_cause, 0, 0);
   if (g_config.state == CFG_MIGRATED) events_push(g_body.ev, EV_CONFIG_MIGRATED, 0, 0, 0);
   if (g_config.state == CFG_DEFAULTED) events_push(g_body.ev, EV_CONFIG_DEFAULTED, g_config.reason, 0, 0);

@@ -30,7 +30,16 @@ if [ -n "$bad" ]; then echo "$bad"; echo "lint FAILED"; fail=$((fail + 1)); else
 CXX="${CXX:-g++}"
 FLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined
        -ffp-contract=off -DREPO_ROOT="\"$REPO\"")
-CORE=("$BODY"/src/core/*.cpp "$BODY"/test/fake_eeprom.cpp)
+# The vendored protocol C files (src/proto, kept identical to protocol/ by
+# protocol/vendor.py) are C99: compile them with the C compiler.
+CC="${CC:-gcc}"
+PROTO=()
+for f in "$BODY"/src/proto/*.c; do
+  o="$OUT/proto_$(basename "$f" .c).o"
+  "$CC" -std=c99 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -c "$f" -o "$o" || fail=$((fail + 1))
+  PROTO+=("$o")
+done
+CORE=("$BODY"/src/core/*.cpp "$BODY"/test/fake_eeprom.cpp "$BODY"/test/fake_link_hal.cpp "${PROTO[@]}")
 for t in "$BODY"/test/test_*.cpp; do
   name=$(basename "$t" .cpp)
   echo "== $name"
@@ -39,6 +48,13 @@ for t in "$BODY"/test/test_*.cpp; do
   fi
   if ! "$OUT/$name"; then fail=$((fail + 1)); fi
 done
+
+# 4. The stdin-driven dispatch harness used by mind/tests/test_crosscheck.py
+#    must keep building.
+echo "== link_harness (build only; run by mind/tests/test_crosscheck.py)"
+if ! "$BODY/tools/build_link_harness.sh" "$OUT/link_harness"; then
+  echo "link_harness: BUILD FAILED"; fail=$((fail + 1))
+fi
 
 if [ "$fail" -eq 0 ]; then echo "host tests: ALL PASSED"; else echo "host tests: $fail FAILED"; fi
 exit "$fail"

@@ -1,12 +1,9 @@
 #include "battery.h"
+#include "params.h"
 #include "pgm.h"
 
-// Thresholds (doc §3g table). Become params later (BATT_*_MV).
-#define WARN_TRIP 6900
-#define WARN_CLEAR 7100
-#define LOW_TRIP 6600
-#define LOW_CLEAR 7000
-#define CRIT_TRIP 6300
+// Thresholds (doc §3g table) are live params: BATT_WARN_MV, BATT_LOW_MV,
+// BATT_CRIT_MV and the two clear levels.
 #define NOBATT_BELOW 3000
 #define NOBATT_ABOVE 5000
 // Dwell times in 10 Hz samples.
@@ -71,9 +68,9 @@ BattLevel battery_sample(Battery& b, uint16_t mv) {
     return b.level;
   }
   uint16_t f = battery_mv(b);
-  hyst_step(b.warn, f, WARN_TRIP, WARN_CLEAR, TRIP_5S, CLEAR_10S, false);
-  hyst_step(b.low, f, LOW_TRIP, LOW_CLEAR, TRIP_5S, CLEAR_10S, false);
-  hyst_step(b.crit, f, CRIT_TRIP, 0, CRIT_1S, 0, true);  // latched until reboot
+  hyst_step(b.warn, f, (uint16_t)PARAM(BATT_WARN_MV), (uint16_t)PARAM(BATT_WARN_CLEAR_MV), TRIP_5S, CLEAR_10S, false);
+  hyst_step(b.low, f, (uint16_t)PARAM(BATT_LOW_MV), (uint16_t)PARAM(BATT_LOW_CLEAR_MV), TRIP_5S, CLEAR_10S, false);
+  hyst_step(b.crit, f, (uint16_t)PARAM(BATT_CRIT_MV), 0, CRIT_1S, 0, true);  // latched until reboot
   b.level = b.crit.active ? BATT_CRITICAL
             : b.low.active ? BATT_LOW
             : b.warn.active ? BATT_WARN

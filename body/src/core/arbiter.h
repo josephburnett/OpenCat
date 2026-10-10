@@ -18,9 +18,9 @@
 
 enum Owner : uint8_t { OWN_IDLE = 0, OWN_GAIT = 1, OWN_TRICK = 2, OWN_REFLEX = 3 };
 
-#define XFADE_TICKS 10        // out of TRICK or REFLEX (param XFADE_TICKS)
-#define POSTURE_TICKS 25      // default IDLE posture transition (0.5 s)
-#define SLEW_MAX_A16 160      // 10 deg per tick = 500 deg/s (param SLEW_MAX_A16)
+// Tunables are live params (core/params.h): XFADE_TICKS (out of TRICK or
+// REFLEX, 10), POSTURE_TICKS (default IDLE transition, 25 = 0.5 s) and
+// SLEW_MAX_A16 (160 = 10 deg per tick = 500 deg/s).
 
 // Moves all driven joints from a snapshot to a posture with cosine easing.
 // IDLE and REFLEX each own one.

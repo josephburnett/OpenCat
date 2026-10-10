@@ -19,6 +19,8 @@ enum MpuInit : uint8_t { MPU_BUSY = 0, MPU_DONE = 1, MPU_FAIL = 2 };
 void mpu_init_begin(const int16_t offsets[6]);
 // One step. now_us: clock_micros(), for the two 100 ms reset waits.
 MpuInit mpu_init_step(uint32_t now_us);
+// Write the six offset registers now (IMU_OFFSETS_SET). I2C error or 0.
+uint8_t mpu_set_offsets(const int16_t offsets[6]);
 // Boot convenience: up to `attempts` full bring-ups, blocking (~300 ms each).
 bool mpu_init_blocking(const int16_t offsets[6], uint8_t attempts);
 

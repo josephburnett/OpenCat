@@ -6,7 +6,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include "../src/core/crc16.h"
+#include "../src/proto/crc16.h"
 #include "../src/core/events.h"
 #include "../src/core/notes.h"
 #include "../src/core/posture.h"
@@ -71,7 +71,7 @@ int main() {
   r.alive_tick = 4242;
   CHECK(reset_classify(r, 78, last) == RESET_WARM_UNEXPECTED && last == 4242);
   // ---- CRC-16/CCITT-FALSE check value.
-  CHECK(crc16((const uint8_t*)"123456789", 9) == 0x29B1);
+  CHECK(kilo_crc16((const uint8_t*)"123456789", 9) == 0x29B1);
   // ---- notes: legacy pitches, rests, clamp, timing.
   CHECK(note_hz(0) == 0 && note_hz(12) == 2092 && note_hz(23) == 3950 && note_hz(70) == 3950);
   CHECK(note_hz(1) == 1108 && note_hz(-60) == 32 && note_hz(-100) == 32);

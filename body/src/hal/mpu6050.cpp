@@ -104,6 +104,17 @@ static bool upload_chunk(uint8_t n) {
   return true;
 }
 
+uint8_t mpu_set_offsets(const int16_t offsets[6]) {
+  // MPU6050 layout (legacy setAccelOffset/setGyroOffset with an ID below
+  // 0x38): accel at XA_OFFS_H + 2 axis, gyro at XG_OFFS_USRH + 2 axis.
+  uint8_t e = 0;
+  for (uint8_t i = 0; i < 3; i++) {
+    e |= write16((uint8_t)(XA_OFFS_H + 2 * i), offsets[i]);
+    e |= write16((uint8_t)(XG_OFFS_USRH + 2 * i), offsets[3 + i]);
+  }
+  return e;
+}
+
 void mpu_init_begin(const int16_t offsets[6]) {
   for (uint8_t i = 0; i < 6; i++) offs[i] = offsets[i];
   pc = 0;
@@ -137,12 +148,7 @@ MpuInit mpu_init_step(uint32_t now) {
       if (++chunk < N_CHUNKS) return MPU_BUSY;
       break;
     case OP_OFFSETS:
-      // MPU6050 layout (legacy setAccelOffset/setGyroOffset with an ID below
-      // 0x38): accel at XA_OFFS_H + 2 axis, gyro at XG_OFFS_USRH + 2 axis.
-      for (uint8_t i = 0; i < 3; i++) {
-        e |= write16((uint8_t)(XA_OFFS_H + 2 * i), offs[i]);
-        e |= write16((uint8_t)(XG_OFFS_USRH + 2 * i), offs[3 + i]);
-      }
+      e = mpu_set_offsets(offs);
       break;
     default:
       e = i2c_write_byte(MPU_ADDR, reg, val);

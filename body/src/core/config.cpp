@@ -1,5 +1,5 @@
 #include "config.h"
-#include "crc16.h"
+#include "../proto/crc16.h"
 #include "pgm.h"
 
 // Legacy addresses (src/OpenCat.h; Appendix C4).
@@ -86,7 +86,7 @@ ConfigReason config_migrate(ConfigSlot& s) {
 }
 
 static uint16_t slot_crc(const ConfigSlot& s) {
-  return crc16((const uint8_t*)&s, CFG_SLOT_SIZE - 2);
+  return kilo_crc16((const uint8_t*)&s, CFG_SLOT_SIZE - 2);
 }
 
 void config_seal(ConfigSlot& s) {
@@ -181,6 +181,19 @@ void config_writer_step(Config& c) {
   c.writing = 0;
   c.newest = c.target;
   c.saved = 1;
+  // A calibration written by the Pi replaces the model defaults: STAND is
+  // no longer refused as UNCALIBRATED.
+  if (c.state == CFG_DEFAULTED) c.state = CFG_OK;
+}
+
+void config_set_calib_a16(ConfigSlot& s, uint8_t j, int16_t calib_a16) {
+  int8_t dir = joint_dir(j);
+  s.cal.zero_a16[j] = (int16_t)(90 * 16 + dir * joint_mid_shift(j) * 16 + dir * calib_a16);
+}
+
+void config_revert(Config& c) {
+  if (c.newest != 0xFF && load_slot(c.img, c.newest)) return;
+  config_migrate(c.img);
 }
 
 int16_t config_calib_a16(const ConfigSlot& s, uint8_t j) {

@@ -13,11 +13,12 @@
 #include "config.h"
 #include "events.h"
 #include "notes.h"
+#include "params.h"
 
-// Durations in 20 ms ticks (become params WD_STOP_MS, WD_REST_MS, WD_LIMP_S).
-#define WD_STOP_TICKS 25     // 0.5 s without a valid frame: stop
-#define WD_REST_TICKS 75     // 1.5 s: lie down
-#define WD_LIMP_TICKS 500    // 10 s after REST: limp
+// Durations in 20 ms ticks. The watchdog's are live params (core/params.h).
+#define WD_STOP_TICKS param_ms_ticks(KILO_PARAM_WD_STOP_MS)        // 0.5 s without a valid frame: stop
+#define WD_REST_TICKS param_ms_ticks(KILO_PARAM_WD_REST_MS)        // 1.5 s: lie down
+#define WD_LIMP_TICKS ((uint16_t)(PARAM(WD_LIMP_S) * 50))          // 10 s after REST: limp
 #define REST_MOVE_TICKS 50   // reflex moves to REST take 1 s
 #define BATT_LIMP_TICKS 100  // low battery: limp 2 s after REST
 #define WARM_HOLD_TICKS 50   // warm boot: hold at most 1 s waiting for the IMU
@@ -29,13 +30,14 @@ enum ImuStatus : uint8_t { IMU_NONE = 0, IMU_FRESH = 1, IMU_ERR = 2 };
 // Who holds the REFLEX owner. A higher value may take it from a lower one.
 enum ReflexHolder : uint8_t { RH_NONE = 0, RH_WARM_HOLD = 1, RH_WATCHDOG = 2, RH_BATTERY = 3 };
 
-// Goal results (mapped to GOAL_REFUSED reasons / ACK status by the link layer).
+// Goal results. The values are the ACK status codes, which EVENT
+// GOAL_REFUSED reuses as its reason (core/link.cpp static_asserts them).
 enum GoalResult : uint8_t {
   GOAL_OK = 0,
-  GOAL_STALE = 1,
   GOAL_BAD_ARG = 2,
-  GOAL_LOW_BATT = 3,
-  GOAL_UNCALIBRATED = 4,  // STAND refused while CONFIG_DEFAULTED (doc §3b)
+  GOAL_LOW_BATT = 7,
+  GOAL_STALE = 10,
+  GOAL_UNCALIBRATED = 11,  // STAND refused while CONFIG_DEFAULTED (doc §3b)
 };
 
 struct TickIn {

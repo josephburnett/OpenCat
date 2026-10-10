@@ -95,6 +95,13 @@ void config_writer_step(Config& c);
 
 // "calib" as the protocol exposes it: dir*(zero - 90 - dir*midShift), a16.
 int16_t config_calib_a16(const ConfigSlot& s, uint8_t j);
+// CAL_SET: the inverse, zero = 90 + dir*midShift + dir*calib.
+void config_set_calib_a16(ConfigSlot& s, uint8_t j, int16_t calib_a16);
+
+// CAL_REVERT: reload the image from the newest valid slot, or, if no slot
+// has been written yet, redo the legacy migration (model defaults if that
+// fails). Not while config_busy().
+void config_revert(Config& c);
 
 inline uint16_t config_slot_addr(uint8_t slot) { return slot ? CFG_SLOT_B : CFG_SLOT_A; }
 

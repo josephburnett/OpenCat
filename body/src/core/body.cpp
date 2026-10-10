@@ -200,8 +200,8 @@ GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ti
 }
 
 uint8_t body_mode(const Body& b) {
-  if (b.batt.level >= BATT_LOW) return 7;
-  if (b.wd.stage) return 9;
-  if (arbiter_idle_posture(b.arb) == POSTURE_LIMP && !b.arb.reflex_active) return 1;
-  return 2;
+  if (b.batt.level >= BATT_LOW) return KILO_MODE_LOW_BATT;
+  if (b.wd.stage) return KILO_MODE_LINK_LOST;
+  if (arbiter_idle_posture(b.arb) == POSTURE_LIMP && !b.arb.reflex_active) return KILO_MODE_LIMP;
+  return KILO_MODE_IDLE;
 }

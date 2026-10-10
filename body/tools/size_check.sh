@@ -6,28 +6,35 @@
 #   - a forbidden symbol is linked (the libraries and features this firmware
 #     replaced: HardwareSerial/Print, Wire, I2Cdev, pulseIn, tone, the heap,
 #     String, soft float, libm);
-#   - flash > FLASH_MAX (default 12288, the doc's P0 ceiling, §3h);
+#   - flash > FLASH_MAX (default 16384, the P0 ceiling of doc §3h; P1 18432,
+#     P2 20480);
 #   - globals (.data + .bss + .noinit) > GLOBALS_MAX (default 1540).
 #
-# Usage: body/tools/size_check.sh [build-dir]
+# Usage: body/tools/size_check.sh [build-dir]       build, then check
+#        body/tools/size_check.sh --elf FILE.elf       check an existing build
+#                                                      (what `kilo flash` does)
 # Env:   ARDUINO_CLI, FLASH_MAX, GLOBALS_MAX, EXTRA_FLAGS (e.g. -DKILO_BUZZER=0)
 set -u
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${ARDUINO_CLI:-$HOME/.local/bin/arduino-cli}"
-BUILD="${1:-${TMPDIR:-/tmp}/kilo-body-build}"
 FLASH_MAX="${FLASH_MAX:-16384}"
 GLOBALS_MAX="${GLOBALS_MAX:-1540}"
-mkdir -p "$BUILD"
 
-args=(compile --fqbn arduino:avr:uno --build-path "$BUILD")
-if [ -n "${EXTRA_FLAGS:-}" ]; then args+=(--build-property "compiler.cpp.extra_flags=$EXTRA_FLAGS"); fi
-if ! out=$("$CLI" "${args[@]}" "$BODY" 2>&1); then
-  echo "$out"
-  echo "size_check: BUILD FAILED"
-  exit 1
+if [ "${1:-}" = "--elf" ]; then
+  ELF="${2:?--elf needs a file}"
+  [ -f "$ELF" ] || { echo "size_check: no such ELF: $ELF"; exit 1; }
+else
+  BUILD="${1:-${TMPDIR:-/tmp}/kilo-body-build}"
+  mkdir -p "$BUILD"
+  args=(compile --fqbn arduino:avr:uno --build-path "$BUILD")
+  if [ -n "${EXTRA_FLAGS:-}" ]; then args+=(--build-property "compiler.cpp.extra_flags=$EXTRA_FLAGS"); fi
+  if ! out=$("$CLI" "${args[@]}" "$BODY" 2>&1); then
+    echo "$out"
+    echo "size_check: BUILD FAILED"
+    exit 1
+  fi
+  ELF="$BUILD/body.ino.elf"
 fi
-
-ELF="$BUILD/body.ino.elf"
 TOOLS=$(ls -d "$HOME"/.arduino15/packages/arduino/tools/avr-gcc/*/bin 2>/dev/null | sort | tail -1)
 NM="$TOOLS/avr-nm"
 SIZE="$TOOLS/avr-size"

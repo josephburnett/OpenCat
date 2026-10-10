@@ -2,6 +2,7 @@
 #include "pgm.h"
 #include "fx.h"
 #include "posture.h"
+#include "params.h"
 
 // ---- Hooks for the owners of later phases --------------------------------
 // TRICK (P1, keyframe player) and GAIT (P2, gait generator + IK) plug in
@@ -61,7 +62,7 @@ void arbiter_init(Arbiter& a, const int16_t* warm) {
 
 void arbiter_set_idle(Arbiter& a, uint8_t posture, uint8_t ticks) {
   if (posture == a.idle.posture) return;
-  mover_start(a.idle, posture, ticks ? ticks : POSTURE_TICKS, a.out);
+  mover_start(a.idle, posture, ticks ? ticks : (uint8_t)PARAM(POSTURE_TICKS), a.out);
 }
 
 uint8_t arbiter_idle_posture(const Arbiter& a) { return a.idle.posture; }
@@ -106,7 +107,7 @@ void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT]) 
     if (own != a.owner[k]) {
       a.owner[k] = own;
       a.xsrc[k] = a.base[k];
-      a.xn[k] = (own == OWN_TRICK || own == OWN_REFLEX) ? 0 : XFADE_TICKS;
+      a.xn[k] = (own == OWN_TRICK || own == OWN_REFLEX) ? 0 : (uint8_t)PARAM(XFADE_TICKS);
       a.xi[k] = 0;
     }
     int16_t b = raw;
@@ -126,8 +127,9 @@ void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT]) 
     }
     int16_t t = joint_clamp(j, b);
     int16_t d = (int16_t)(t - a.last_on[k]);
-    if (d > SLEW_MAX_A16) d = SLEW_MAX_A16;
-    if (d < -SLEW_MAX_A16) d = -SLEW_MAX_A16;
+    int16_t slew = PARAM(SLEW_MAX_A16);
+    if (d > slew) d = slew;
+    if (d < -slew) d = (int16_t)-slew;
     int16_t o = (int16_t)(a.last_on[k] + d);
     a.last_on[k] = a.out[k] = o;
     counts[joint_channel(j)] = joint_counts(cal, j, o);
