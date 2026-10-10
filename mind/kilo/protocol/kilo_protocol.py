@@ -142,7 +142,7 @@ class GoalRefusedReason(enum.IntEnum):
     UNCALIBRATED = 11
 
 
-class Event(enum.IntEnum):
+class EventCode(enum.IntEnum):
     BOOT = 1
     FELL = 2
     RECOVERED = 3

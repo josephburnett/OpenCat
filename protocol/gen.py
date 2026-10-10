@@ -323,25 +323,57 @@ def gen_c(spec: dict) -> str:
     w("/* ---- Per-type helpers ---- */")
     w("enum kilo_len_status { KILO_LEN_OK = 0, KILO_LEN_BAD = 1, KILO_LEN_UNKNOWN_TYPE = 2 };")
     w("")
+    msgs = spec["messages"]
+    max_id = max(m["id"] for m in msgs)
+    var_msgs = [m for m in msgs if layout(spec, m)["tail"]]
+    w("/* Lookup tables live in flash on the AVR (avr-libc's pgmspace, not Arduino)")
+    w("   and are plain const data elsewhere. */")
+    w("#if defined(__AVR__)")
+    w("#include <avr/pgmspace.h>")
+    w("#define KILO_TABLE_ATTR PROGMEM")
+    w("#define KILO_TABLE_BYTE(p) pgm_read_byte(p)")
+    w("#else")
+    w("#define KILO_TABLE_ATTR")
+    w("#define KILO_TABLE_BYTE(p) (*(p))")
+    w("#endif")
+    w(f"#define KILO_MAX_MSG_ID 0x{max_id:02X}u")
+    w("")
     w("/* Check a payload's length against its type's rule. Variable-length types")
-    w("   also require their count field to match the length. */")
+    w("   also require their count field to match the length. Table entries: the")
+    w("   fixed length, 0x80 + i for the i-th variable-length type, 0xFF unknown. */")
     w("static inline uint8_t kilo_payload_len_check(uint8_t type, const uint8_t *payload, uint8_t len)")
     w("{")
-    w("    (void)payload;")
-    w("    switch (type) {")
-    for m in spec["messages"]:
+    by_id = {m["id"]: m for m in msgs}
+    entries = []
+    for i in range(max_id + 1):
+        m = by_id.get(i)
+        if m is None:
+            entries.append("0xFF")
+        elif m in var_msgs:
+            entries.append(f"0x{0x80 + var_msgs.index(m):02X}")
+        else:
+            entries.append(str(layout(spec, m)["fixed"]))
+    w("    static const uint8_t t[KILO_MAX_MSG_ID + 1u] KILO_TABLE_ATTR = {")
+    for i in range(0, len(entries), 16):
+        w("        " + ", ".join(entries[i:i + 16]) + f",  /* 0x{i:02X} */")
+    w("    };")
+    w("    uint8_t e;")
+    w("    if (type > KILO_MAX_MSG_ID) return KILO_LEN_UNKNOWN_TYPE;")
+    w("    e = KILO_TABLE_BYTE(&t[type]);")
+    w("    if (e == 0xFFu) return KILO_LEN_UNKNOWN_TYPE;")
+    w("    if (e < 0x80u) return len == e ? KILO_LEN_OK : KILO_LEN_BAD;")
+    w("    switch (e) {")
+    for i, m in enumerate(var_msgs):
         lay = layout(spec, m)
         t = lay["tail"]
-        w(f"    case KILO_MSG_{m['name']}:")
-        if not t:
-            w(f"        return len == {lay['fixed']}u ? KILO_LEN_OK : KILO_LEN_BAD;")
-        elif "count_offset" in t:
+        w(f"    case 0x{0x80 + i:02X}u: /* {m['name']} */")
+        if "count_offset" in t:
             w(f"        if (len < {lay['min']}u || len > {lay['max']}u) return KILO_LEN_BAD;")
             w(f"        return len == {lay['fixed']}u + {t['elem']}u * payload[{t['count_offset']}] ? KILO_LEN_OK : KILO_LEN_BAD;")
         else:
             w(f"        return (len >= {lay['min']}u && len <= {lay['max']}u) ? KILO_LEN_OK : KILO_LEN_BAD;")
     w("    default:")
-    w("        return KILO_LEN_UNKNOWN_TYPE;")
+    w("        return KILO_LEN_BAD;")
     w("    }")
     w("}")
     w("")
@@ -350,7 +382,7 @@ def gen_c(spec: dict) -> str:
     w("{")
     w("    switch (type) {")
     for k in KINDS:
-        ms = [m for m in spec["messages"] if m["kind"] == k]
+        ms = [m for m in msgs if m["kind"] == k]
         for m in ms:
             w(f"    case KILO_MSG_{m['name']}:")
         w(f"        return KILO_KIND_{k.upper()};")
@@ -359,33 +391,32 @@ def gen_c(spec: dict) -> str:
     w("    }")
     w("}")
     w("")
-    w("/* Nonzero for a query: a command answered by its data reply only (ACK only")
-    w("   on failure), never de-duplicated. */")
-    w("static inline uint8_t kilo_msg_is_query(uint8_t type)")
-    w("{")
-    w("    switch (type) {")
-    for m in spec["messages"]:
-        if m.get("query"):
-            w(f"    case KILO_MSG_{m['name']}:")
-    w("        return 1u;")
-    w("    default:")
-    w("        return 0u;")
-    w("    }")
-    w("}")
-    w("")
-    w("/* Nonzero if the type's payload begins with the goal epoch byte. */")
-    w("static inline uint8_t kilo_msg_has_epoch(uint8_t type)")
-    w("{")
-    w("    switch (type) {")
-    for m in spec["messages"]:
-        if m.get("epoch"):
-            w(f"    case KILO_MSG_{m['name']}:")
-    w("        return 1u;")
-    w("    default:")
-    w("        return 0u;")
-    w("    }")
-    w("}")
-    w("")
+
+    def mask_fn(name: str, doc: str, pred) -> None:
+        groups: dict[int, int] = {}
+        for m in msgs:
+            if pred(m):
+                groups[m["id"] >> 4] = groups.get(m["id"] >> 4, 0) | (1 << (m["id"] & 15))
+        names = ", ".join(m["name"] for m in msgs if pred(m))
+        w(f"/* {doc} ({names}). A bit mask per high nibble: smaller than a switch on AVR. */")
+        w(f"static inline uint8_t {name}(uint8_t type)")
+        w("{")
+        w("    uint16_t m;")
+        w("    switch (type >> 4) {")
+        for g in sorted(groups):
+            w(f"    case {g}u: m = 0x{groups[g]:04X}u; break;")
+        w("    default: return 0u;")
+        w("    }")
+        w("    return (uint8_t)((m >> (type & 15u)) & 1u);")
+        w("}")
+        w("")
+
+    mask_fn("kilo_msg_is_goal", "Nonzero for a goal: never acked; rejections are EVENT GOAL_REFUSED",
+            lambda m: m["kind"] == "goal")
+    mask_fn("kilo_msg_is_query", "Nonzero for a query: a command answered by its data reply only (ACK only on failure), never de-duplicated",
+            lambda m: bool(m.get("query")))
+    mask_fn("kilo_msg_has_epoch", "Nonzero if the type's payload begins with the goal epoch byte",
+            lambda m: bool(m.get("epoch")))
     params = sorted(spec.get("params", []), key=lambda p: p["id"])
     w("/* ---- Live parameters (PARAM_GET / PARAM_SET) ---- */")
     w("enum kilo_param_id {")
@@ -586,8 +617,11 @@ def gen_py(spec: dict) -> str:
         w(f"    {m['name']} = 0x{m['id']:02X}")
     w("")
     w("")
+    msg_classes = {camel(m["name"]) for m in spec["messages"]}
     for ename, vals in spec["enums"].items():
-        w(f"class {camel(ename)}(enum.IntEnum):")
+        # [enums.event] would shadow (or be shadowed by) the EVENT message class.
+        cname = camel(ename) + ("Code" if camel(ename) in msg_classes else "")
+        w(f"class {cname}(enum.IntEnum):")
         for vn, vv in vals.items():
             w(f"    {vn} = {vv}")
         w("")

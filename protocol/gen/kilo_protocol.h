@@ -813,96 +813,52 @@ KILO_STATIC_ASSERT(offsetof(kilo_log_t, text) == 0, kilo_sa_log_text);
 /* ---- Per-type helpers ---- */
 enum kilo_len_status { KILO_LEN_OK = 0, KILO_LEN_BAD = 1, KILO_LEN_UNKNOWN_TYPE = 2 };
 
+/* Lookup tables live in flash on the AVR (avr-libc's pgmspace, not Arduino)
+   and are plain const data elsewhere. */
+#if defined(__AVR__)
+#include <avr/pgmspace.h>
+#define KILO_TABLE_ATTR PROGMEM
+#define KILO_TABLE_BYTE(p) pgm_read_byte(p)
+#else
+#define KILO_TABLE_ATTR
+#define KILO_TABLE_BYTE(p) (*(p))
+#endif
+#define KILO_MAX_MSG_ID 0x8Fu
+
 /* Check a payload's length against its type's rule. Variable-length types
-   also require their count field to match the length. */
+   also require their count field to match the length. Table entries: the
+   fixed length, 0x80 + i for the i-th variable-length type, 0xFF unknown. */
 static inline uint8_t kilo_payload_len_check(uint8_t type, const uint8_t *payload, uint8_t len)
 {
-    (void)payload;
-    switch (type) {
-    case KILO_MSG_HELLO_REQ:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_HEARTBEAT:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PING:
-        return len == 2u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_STREAM:
-        return len == 3u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_STATS_REQ:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PCA_READ:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_POSTURE:
-        return len == 4u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_GAIT:
-        return len == 11u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_HEAD:
-        return len == 10u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_BODY_POSE:
-        return len == 7u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_BALANCE:
-        return len == 5u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_TRICK_BEGIN:
-        return len == 9u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_TRICK_FRAMES:
+    static const uint8_t t[KILO_MAX_MSG_ID + 1u] KILO_TABLE_ATTR = {
+        0xFF, 0, 0, 2, 3, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x00 */
+        4, 11, 10, 7, 5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x10 */
+        9, 0x80, 3, 4, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x20 */
+        4, 0x81, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 3, 0, 0, 13, 1, 4, 3,  /* 0x30 */
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x40 */
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x50 */
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x60 */
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 2, 0xFF,  /* 0x70 */
+        16, 26, 24, 14, 3, 6, 32, 9, 0x82, 4, 19, 32, 0xFF, 0xFF, 0xFF, 0x83,  /* 0x80 */
+    };
+    uint8_t e;
+    if (type > KILO_MAX_MSG_ID) return KILO_LEN_UNKNOWN_TYPE;
+    e = KILO_TABLE_BYTE(&t[type]);
+    if (e == 0xFFu) return KILO_LEN_UNKNOWN_TYPE;
+    if (e < 0x80u) return len == e ? KILO_LEN_OK : KILO_LEN_BAD;
+    switch (e) {
+    case 0x80u: /* TRICK_FRAMES */
         if (len < 16u || len > 58u) return KILO_LEN_BAD;
         return len == 2u + 14u * payload[1] ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_TRICK_COMMIT:
-        return len == 3u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_TRICK_PLAY:
-        return len == 4u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_TRICK_STOP:
-        return len == 1u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_SET_EYES:
-        return len == 4u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_BEEP:
+    case 0x81u: /* BEEP */
         if (len < 3u || len > 17u) return KILO_LEN_BAD;
         return len == 1u + 2u * payload[0] ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_CAL_GET:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_CAL_SET:
-        return len == 3u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_CAL_SAVE:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_CAL_REVERT:
-        return len == 0u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_IMU_OFFSETS_SET:
-        return len == 13u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PARAM_GET:
-        return len == 1u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PARAM_SET:
-        return len == 4u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_EEPROM_READ:
-        return len == 3u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_REBOOT:
-        return len == 2u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_HELLO:
-        return len == 16u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_TELEMETRY:
-        return len == 26u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_JOINTS:
-        return len == 24u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_IMU_RAW:
-        return len == 14u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_ACK:
-        return len == 3u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_EVENT:
-        return len == 6u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_CAL_VALUES:
-        return len == 32u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PARAM_VALUE:
-        return len == 9u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_EEPROM_DATA:
+    case 0x82u: /* EEPROM_DATA */
         return (len >= 3u && len <= 58u) ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PONG:
-        return len == 4u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_STATS:
-        return len == 19u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_PCA_COUNTS:
-        return len == 32u ? KILO_LEN_OK : KILO_LEN_BAD;
-    case KILO_MSG_LOG:
+    case 0x83u: /* LOG */
         return (len >= 1u && len <= 60u) ? KILO_LEN_OK : KILO_LEN_BAD;
     default:
-        return KILO_LEN_UNKNOWN_TYPE;
+        return KILO_LEN_BAD;
     }
 }
 
@@ -959,37 +915,41 @@ static inline uint8_t kilo_msg_kind(uint8_t type)
     }
 }
 
-/* Nonzero for a query: a command answered by its data reply only (ACK only
-   on failure), never de-duplicated. */
-static inline uint8_t kilo_msg_is_query(uint8_t type)
+/* Nonzero for a goal: never acked; rejections are EVENT GOAL_REFUSED (HEARTBEAT, SET_POSTURE, SET_GAIT, SET_HEAD, SET_BODY_POSE, SET_BALANCE, SET_EYES, BEEP). A bit mask per high nibble: smaller than a switch on AVR. */
+static inline uint8_t kilo_msg_is_goal(uint8_t type)
 {
-    switch (type) {
-    case KILO_MSG_HELLO_REQ:
-    case KILO_MSG_PING:
-    case KILO_MSG_STATS_REQ:
-    case KILO_MSG_PCA_READ:
-    case KILO_MSG_CAL_GET:
-    case KILO_MSG_PARAM_GET:
-    case KILO_MSG_EEPROM_READ:
-        return 1u;
-    default:
-        return 0u;
+    uint16_t m;
+    switch (type >> 4) {
+    case 0u: m = 0x0004u; break;
+    case 1u: m = 0x001Fu; break;
+    case 3u: m = 0x0003u; break;
+    default: return 0u;
     }
+    return (uint8_t)((m >> (type & 15u)) & 1u);
 }
 
-/* Nonzero if the type's payload begins with the goal epoch byte. */
+/* Nonzero for a query: a command answered by its data reply only (ACK only on failure), never de-duplicated (HELLO_REQ, PING, STATS_REQ, PCA_READ, CAL_GET, PARAM_GET, EEPROM_READ). A bit mask per high nibble: smaller than a switch on AVR. */
+static inline uint8_t kilo_msg_is_query(uint8_t type)
+{
+    uint16_t m;
+    switch (type >> 4) {
+    case 0u: m = 0x006Au; break;
+    case 3u: m = 0xA100u; break;
+    default: return 0u;
+    }
+    return (uint8_t)((m >> (type & 15u)) & 1u);
+}
+
+/* Nonzero if the type's payload begins with the goal epoch byte (SET_POSTURE, SET_GAIT, SET_HEAD, SET_BODY_POSE, TRICK_PLAY). A bit mask per high nibble: smaller than a switch on AVR. */
 static inline uint8_t kilo_msg_has_epoch(uint8_t type)
 {
-    switch (type) {
-    case KILO_MSG_SET_POSTURE:
-    case KILO_MSG_SET_GAIT:
-    case KILO_MSG_SET_HEAD:
-    case KILO_MSG_SET_BODY_POSE:
-    case KILO_MSG_TRICK_PLAY:
-        return 1u;
-    default:
-        return 0u;
+    uint16_t m;
+    switch (type >> 4) {
+    case 1u: m = 0x000Fu; break;
+    case 2u: m = 0x0008u; break;
+    default: return 0u;
     }
+    return (uint8_t)((m >> (type & 15u)) & 1u);
 }
 
 /* ---- Live parameters (PARAM_GET / PARAM_SET) ---- */
