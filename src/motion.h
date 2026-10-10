@@ -107,7 +107,7 @@ template<typename T> void transform(T *target, byte angleDataRatio = 1, float sp
     }
 #endif
   } else {
-    int *diff = new int[DOF - offset], maxDiff = 0;
+    int diff[DOF], maxDiff = 0;  //a stack array, so there's no heap allocation. only diff[0..DOF-offset-1] is used
     for (byte i = offset; i < DOF; i++) {
       if (manualHeadQ && i < HEAD_GROUP_LEN && token == T_SKILL)  // the head motion will be handled by skill.perform()
         continue;
@@ -123,6 +123,5 @@ template<typename T> void transform(T *target, byte angleDataRatio = 1, float sp
         calibratedPWM(i, dutyAng);
       }
     }
-    delete[] diff;
   }
 }

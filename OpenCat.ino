@@ -42,11 +42,15 @@
 // it may increase the code size and crash the bootloader.
 // make sure you know ISP and how to reset the bootloader!!!
 
-// you can also activate the following modes (they will disable the gyro to save programming space)
+#define GYRO  //read the IMU (gyro + accelerometer) for self-balancing and fall detection. \
+              // comment out this line to save programming space when you enable the modules below
+
+// you can also activate the following modes
 // allowed combinations: RANDOM_MIND + ULTRASONIC, RANDOM_MIND, ULTRASONIC
 // #define RANDOM_MIND  //advanced random behaviors. use token 'z' to activate/deactivate
 // #define TASK_QUEUE  //allow executing a sequence of tasks, if you enabled the other modules, the task queue will be automatically enabled. \
-                    // because it takes up memory, it will be disabled if the GYRO is enabled. See "#undef TASK_QUEUE" under ifdef GYRO
+                    // because it takes up memory, it will be disabled when both the GYRO and the IR remote are enabled \
+                    // and no module needs it. See "#undef TASK_QUEUE" in src/OpenCat.h
 // #define ULTRASONIC      //for Nybble's ultrasonic sensor
 
 #define IR_PIN 4  // Signal Pin of IR receiver to Arduino Digital Pin 4

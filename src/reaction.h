@@ -234,7 +234,6 @@ void reaction() {
               transform(targetFrame, 1, 4);  // if (token == T_INDEXED_SEQUENTIAL_ASC) it will be useless
               skill.convertTargetToPosture(targetFrame);
             }
-            delete[] pch;
           }
           break;
         }

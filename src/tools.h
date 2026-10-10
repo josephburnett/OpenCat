@@ -30,12 +30,11 @@ void printRange(int r0 = 0, int r1 = 0) {
 }
 
 template<typename T> void printList(T *arr, byte len = DOF) {
-  String temp = "";
-  for (byte i = 0; i < len; i++) {
-    temp += String(T(arr[i]));
-    temp += ",\t";
+  for (byte i = 0; i < len; i++) {  //print directly instead of building a String, to keep the heap out of the sketch
+    PT(T(arr[i]));
+    PTF(",\t");
   }
-  PTL(temp);
+  PTL();
 }
 
 template<typename T> void printTable(T *list) {

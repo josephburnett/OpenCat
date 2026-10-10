@@ -43,81 +43,83 @@ decode_results results;
 #define K62 "T"    //call the last skill data received from the serial port
 
 #define SHORT_ENCODING  // activating this line will use a shorter encoding of the HEX values
-String translateIR()    // takes action based on IR code received
-// describing Remote IR codes.
-{
+
+// takes action based on IR code received, describing Remote IR codes.
+// returns a pointer to a PROGMEM string, so it has to be read with strcpy_P().
+// Arduino String was used here before. it pulled malloc/realloc/free into the sketch.
+const char *translateIR() {
 #ifndef SHORT_ENCODING
   switch (results.value) {
     //IR signal    key on IR remote           //key mapping
-    case 0xFFA25D: /*PTLF(" CH-");   */ return (F(K00));
-    case 0xFF629D: /*PTLF(" CH");  */ return (F(K01));
-    case 0xFFE21D: /*PTLF(" CH+"); */ return (F(K02));
+    case 0xFFA25D: /*PTLF(" CH-");   */ return (PSTR(K00));
+    case 0xFF629D: /*PTLF(" CH");  */ return (PSTR(K01));
+    case 0xFFE21D: /*PTLF(" CH+"); */ return (PSTR(K02));
 
-    case 0xFF22DD: /*PTLF(" |<<"); */ return (F(K10));
-    case 0xFF02FD: /*PTLF(" >>|"); */ return (F(K11));
-    case 0xFFC23D: /*PTLF(" >||"); */ return (F(K12));
+    case 0xFF22DD: /*PTLF(" |<<"); */ return (PSTR(K10));
+    case 0xFF02FD: /*PTLF(" >>|"); */ return (PSTR(K11));
+    case 0xFFC23D: /*PTLF(" >||"); */ return (PSTR(K12));
 
-    case 0xFFE01F: /*PTLF(" -");   */ return (F(K20));
-    case 0xFFA857: /*PTLF(" +");  */ return (F(K21));
-    case 0xFF906F: /*PTLF(" EQ"); */ return (F(K22));
+    case 0xFFE01F: /*PTLF(" -");   */ return (PSTR(K20));
+    case 0xFFA857: /*PTLF(" +");  */ return (PSTR(K21));
+    case 0xFF906F: /*PTLF(" EQ"); */ return (PSTR(K22));
 
-    case 0xFF6897: /*PTLF(" 0");  */ return (F(K30));
-    case 0xFF9867: /*PTLF(" 100+"); */ return (F(K31));
-    case 0xFFB04F: /*PTLF(" 200+"); */ return (F(K32));
+    case 0xFF6897: /*PTLF(" 0");  */ return (PSTR(K30));
+    case 0xFF9867: /*PTLF(" 100+"); */ return (PSTR(K31));
+    case 0xFFB04F: /*PTLF(" 200+"); */ return (PSTR(K32));
 
-    case 0xFF30CF: /*PTLF(" 1");  */ return (F(K40));
-    case 0xFF18E7: /*PTLF(" 2");  */ return (F(K41));
-    case 0xFF7A85: /*PTLF(" 3");  */ return (F(K42));
+    case 0xFF30CF: /*PTLF(" 1");  */ return (PSTR(K40));
+    case 0xFF18E7: /*PTLF(" 2");  */ return (PSTR(K41));
+    case 0xFF7A85: /*PTLF(" 3");  */ return (PSTR(K42));
 
-    case 0xFF10EF: /*PTLF(" 4");  */ return (F(K50));
-    case 0xFF38C7: /*PTLF(" 5");  */ return (F(K51));
-    case 0xFF5AA5: /*PTLF(" 6");  */ return (F(K52));
+    case 0xFF10EF: /*PTLF(" 4");  */ return (PSTR(K50));
+    case 0xFF38C7: /*PTLF(" 5");  */ return (PSTR(K51));
+    case 0xFF5AA5: /*PTLF(" 6");  */ return (PSTR(K52));
 
-    case 0xFF42BD: /*PTLF(" 7");  */ return (F(K60));
-    case 0xFF4AB5: /*PTLF(" 8");  */ return (F(K61));
-    case 0xFF52AD: /*PTLF(" 9");  */ return (F(K62));
+    case 0xFF42BD: /*PTLF(" 7");  */ return (PSTR(K60));
+    case 0xFF4AB5: /*PTLF(" 8");  */ return (PSTR(K61));
+    case 0xFF52AD: /*PTLF(" 9");  */ return (PSTR(K62));
 
-    case 0xFFFFFFFF: return "";  //PTL(" REPEAT");
+    case 0xFFFFFFFF: return PSTR("");  //PTL(" REPEAT");
 #else
   uint8_t trimmed = (results.value >> 8);
   switch (trimmed) {
     //IR signal    key on IR remote           //key mapping
-    case 0xA2: /*PTLF(" CH-");   */ return (F(K00));
-    case 0x62: /*PTLF(" CH");  */ return (F(K01));
-    case 0xE2: /*PTLF(" CH+"); */ return (F(K02));
+    case 0xA2: /*PTLF(" CH-");   */ return (PSTR(K00));
+    case 0x62: /*PTLF(" CH");  */ return (PSTR(K01));
+    case 0xE2: /*PTLF(" CH+"); */ return (PSTR(K02));
 
-    case 0x22: /*PTLF(" |<<"); */ return (F(K10));
-    case 0x02: /*PTLF(" >>|"); */ return (F(K11));
-    case 0xC2: /*PTLF(" >||"); */ return (F(K12));
+    case 0x22: /*PTLF(" |<<"); */ return (PSTR(K10));
+    case 0x02: /*PTLF(" >>|"); */ return (PSTR(K11));
+    case 0xC2: /*PTLF(" >||"); */ return (PSTR(K12));
 
-    case 0xE0: /*PTLF(" -");   */ return (F(K20));
-    case 0xA8: /*PTLF(" +");  */ return (F(K21));
-    case 0x90: /*PTLF(" EQ"); */ return (F(K22));
+    case 0xE0: /*PTLF(" -");   */ return (PSTR(K20));
+    case 0xA8: /*PTLF(" +");  */ return (PSTR(K21));
+    case 0x90: /*PTLF(" EQ"); */ return (PSTR(K22));
 
-    case 0x68: /*PTLF(" 0");  */ return (F(K30));
-    case 0x98: /*PTLF(" 100+"); */ return (F(K31));
-    case 0xB0: /*PTLF(" 200+"); */ return (F(K32));
+    case 0x68: /*PTLF(" 0");  */ return (PSTR(K30));
+    case 0x98: /*PTLF(" 100+"); */ return (PSTR(K31));
+    case 0xB0: /*PTLF(" 200+"); */ return (PSTR(K32));
 
-    case 0x30: /*PTLF(" 1");  */ return (F(K40));
-    case 0x18: /*PTLF(" 2");  */ return (F(K41));
-    case 0x7A: /*PTLF(" 3");  */ return (F(K42));
+    case 0x30: /*PTLF(" 1");  */ return (PSTR(K40));
+    case 0x18: /*PTLF(" 2");  */ return (PSTR(K41));
+    case 0x7A: /*PTLF(" 3");  */ return (PSTR(K42));
 
-    case 0x10: /*PTLF(" 4");  */ return (F(K50));
-    case 0x38: /*PTLF(" 5");  */ return (F(K51));
-    case 0x5A: /*PTLF(" 6");  */ return (F(K52));
+    case 0x10: /*PTLF(" 4");  */ return (PSTR(K50));
+    case 0x38: /*PTLF(" 5");  */ return (PSTR(K51));
+    case 0x5A: /*PTLF(" 6");  */ return (PSTR(K52));
 
-    case 0x42: /*PTLF(" 7");  */ return (F(K60));
-    case 0x4A: /*PTLF(" 8");  */ return (F(K61));
-    case 0x52: /*PTLF(" 9");  */ return (F(K62));
+    case 0x42: /*PTLF(" 7");  */ return (PSTR(K60));
+    case 0x4A: /*PTLF(" 8");  */ return (PSTR(K61));
+    case 0x52: /*PTLF(" 9");  */ return (PSTR(K62));
 
-    case 0x12: return ("ts");  //for factory use
+    case 0x12: return (PSTR("ts"));  //for factory use
 
-    case 0xFF: return "";  //PTL(" REPEAT");
+    case 0xFF: return PSTR("");  //PTL(" REPEAT");
 #endif
     default:
       {
       }
-      return "";  //PTL("null");
+      return PSTR("");  //PTL("null");
   }               // End Case
 
   // The control could be organized in another way, such as:
@@ -126,39 +128,46 @@ String translateIR()    // takes action based on IR code received
   // number keys for different postures or behaviors
 }
 
-String gait = "tr";
+#define IR_GAIT_LEN 3  //the gait name is at most 2 characters + '\0'
+#define IR_CMD_LEN 8   //the longest key string is "buttUp" (6 characters + '\0')
+char gait[IR_GAIT_LEN] = "tr";
 char direct = 'F';
+char irCmd[IR_CMD_LEN];  //holds the gait + direction composition, e.g. "trF"
 
-String irParser(String raw) {
-  if (raw == "B") {
-    gait = "bk";
+// returns either raw itself (pass-through keys) or the composed gait + direction command
+const char *irParser(const char *raw) {
+  if (!strcmp(raw, "B")) {
+    strcpy(gait, "bk");
     return gait;
   }
-  if (raw == "F" || raw == "L" || raw == "R") {
+  if (!strcmp(raw, "F") || !strcmp(raw, "L") || !strcmp(raw, "R")) {
     direct = raw[0];
-    if (direct == 'F' && gait == "bk") {
-      gait = "tr";
+    if (direct == 'F' && !strcmp(gait, "bk")) {
+      strcpy(gait, "tr");
     }
-    return gait + direct;
-  }
-
-  else if (raw == "vt" || raw == "cr" || raw == "wk" || raw == "tr" || raw == "ph") {
-    gait = raw;
-    return gait + direct;
+  } else if (!strcmp(raw, "vt") || !strcmp(raw, "cr") || !strcmp(raw, "wk") || !strcmp(raw, "tr") || !strcmp(raw, "ph")) {
+    strcpy(gait, raw);
   } else {
     return raw;
   }
+  byte len = strlen(gait);  //gait + direct
+  strcpy(irCmd, gait);
+  irCmd[len] = direct;
+  irCmd[len + 1] = '\0';
+  return irCmd;
 }
 
 void read_infrared() {
   if (irrecv.decode(&results)) {
-    String IRsig = irParser(translateIR());
-    if (IRsig != "") {
-      if (IRsig.length() == 1)
+    char raw[IR_CMD_LEN];
+    strcpy_P(raw, translateIR());
+    const char *IRsig = irParser(raw);
+    if (IRsig[0] != '\0') {
+      if (IRsig[1] == '\0')  //a single character is used as a token
         token = IRsig[0];
       else {
         token = T_SKILL;
-        strcpy(newCmd, IRsig.c_str());
+        strcpy(newCmd, IRsig);
         if (!strcmp(newCmd, "up"))
           direct = 'F';
       }

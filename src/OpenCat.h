@@ -224,12 +224,21 @@ float protectiveShift;  //reduce the wearing of the potentiometer
 #include "motion.h"
 
 #ifndef MAIN_SKETCH
-#define GYRO_PIN 0
+#define GYRO_PIN 0  //the setup sketch always needs the IMU
 
 #else
 
+#ifdef GYRO  //the gyro is an explicit option in OpenCat.ino and is independent from the modules below
+#define GYRO_PIN 0
+#endif
+
 #define TASK_QUEUE  //allow executing a sequence of tasks, if you enabled the other modules, the task queue will be automatically enabled. \
-  // because it takes up memory, it should be disabled if the GYRO is enabled. See "#undef TASK_QUEUE" under ifdef GYRO
+  // because it takes up memory, it is disabled when both the GYRO and the IR remote are enabled and no module needs the queue. \
+  // ULTRASONIC always needs it, because readRGBultrasonic() calls tQueue->addTask() unconditionally.
+#if defined GYRO_PIN && defined IR_PIN && !defined ULTRASONIC
+#undef TASK_QUEUE
+#endif
+
 #ifdef TASK_QUEUE
 #include "taskQueue.h"
 #define T_TASK_QUEUE 'q'
@@ -237,8 +246,6 @@ float protectiveShift;  //reduce the wearing of the potentiometer
 
 #ifdef ULTRASONIC
 #include "ultrasonic.h"
-#else
-#define GYRO_PIN 0
 #endif
 
 #endif
@@ -247,9 +254,6 @@ float protectiveShift;  //reduce the wearing of the potentiometer
 
 #ifdef GYRO_PIN
 #include "imu.h"
-#ifdef IR_PIN
-#undef TASK_QUEUE
-#endif
 #endif
 
 #include "skill.h"
@@ -279,7 +283,6 @@ void initRobot() {
 
 #ifdef IR_PIN
   irrecv.enableIRIn();  // Start the receiver
-  gait.reserve(4);
 #endif
 
 #ifdef LED_PIN
@@ -287,7 +290,7 @@ void initRobot() {
 #endif
 
 #ifdef TASK_QUEUE
-  tQueue = new TaskQueue();
+  PTLF("TaskQ");  //tQueue is a statically allocated object, so there's no constructor-time print
 #endif
 
 #ifdef ULTRASONIC

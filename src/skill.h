@@ -305,8 +305,10 @@ public:
     PTL(angleDataRatio);
     if (period < 0) {
       PT("loop: ");
-      for (byte i = 0; i < 3; i++)
-        PT(String((byte)loopCycle[i]) + ", ");
+      for (byte i = 0; i < 3; i++) {
+        PT((byte)loopCycle[i]);
+        PTF(", ");
+      }
       PTL();
     }
 #ifdef PRINT_SKILL_DATA
