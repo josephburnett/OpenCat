@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kilo-mind"
+version = "0.0.1"
+description = "Kilo mind: Python control software for the Kilo Nybble body firmware"
+requires-python = ">=3.11"
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+kilo = "kilo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["kilo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
