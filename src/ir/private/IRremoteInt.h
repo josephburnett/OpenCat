@@ -30,7 +30,16 @@
 // Information for the Interrupt Service Routine
 //
 #if ! defined(RAW_BUFFER_LENGTH)
-#define RAW_BUFFER_LENGTH  101  ///< Maximum length of raw duration buffer. Must be odd.
+#define RAW_BUFFER_LENGTH  69  ///< Maximum length of raw duration buffer. Must be odd.
+///< This sketch only compiles the NEC decoder (DECODE_NEC in IRremote.h, everything else is 0).
+///< A complete NEC frame records 68 entries: the leading gap, the 9 ms header mark, the 4.5 ms header
+///< space, 2 x 32 bit mark/space pairs and the trailing 560 us stop mark, so decodeNEC() requires
+///< rawlen >= 2 * 32 + 4 = 68 and reads at most rawbuf[66]. The NEC repeat code only needs 4 entries.
+///< 69 is used rather than 68 so that the ISR does not flag an overflow (and stop the state machine
+///< one tick after the trailing mark) on every complete frame; with 69 the state machine still ends
+///< the frame on the long gap exactly like it did with 101. The ISR tests rawlen >= RAW_BUFFER_LENGTH
+///< before it stores anything and switches to IR_REC_STATE_OVERFLOW, so a shorter buffer can only
+///< make a longer protocol fail to decode (which it already does), never write out of bounds.
 #endif
 
 /**

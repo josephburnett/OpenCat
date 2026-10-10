@@ -1,10 +1,10 @@
 #include "RgbUltrasonic.h"
 
 RgbUltrasonic::RgbUltrasonic(byte signal_pin, byte rgb_pin)
+  : mRgb(rgb_pin, RGBLED_MAX_LED)  //the module has RGBLED_MAX_LED (6) LEDs
 {
     SignalPin = signal_pin;
     RgbPin = rgb_pin;
-    mRgb = new RGBLed(RgbPin, 6);
 }
 
 float RgbUltrasonic::GetUltrasonicDistance(void)
@@ -32,23 +32,23 @@ float RgbUltrasonic::GetUltrasonicDistance(void)
 void RgbUltrasonic::SetRgbColor(E_RGB_INDEX index, long Color)
 {
     if (index == E_RGB_ALL) {
-        mRgb->setColor(0, Color);
+        mRgb.setColor(0, Color);
     } 
     else if (index == E_RGB_RIGHT) {
         for (byte i = 0; i < 3; i++) {
-            mRgb->setColor(i+1, 0);
-            mRgb->show();
-            mRgb->setColor(i+1, Color);
+            mRgb.setColor(i+1, 0);
+            mRgb.show();
+            mRgb.setColor(i+1, Color);
         }
     } 
     else if (index == E_RGB_LEFT) {
         for (byte i = 3; i < 6; i++) {
-            mRgb->setColor(i+1, 0);
-            mRgb->show();
-            mRgb->setColor(i+1, Color);
+            mRgb.setColor(i+1, 0);
+            mRgb.show();
+            mRgb.setColor(i+1, Color);
         }
     }
-    mRgb->show();
+    mRgb.show();
 }
 
 void RgbUltrasonic::SetRgbEffect(E_RGB_INDEX index, long Color, uint8_t effect)
@@ -74,28 +74,28 @@ void RgbUltrasonic::SetRgbEffect(E_RGB_INDEX index, long Color, uint8_t effect)
             break;
         case E_EFFECT_ROTATE:
             SetRgbColor(E_RGB_ALL, 0);
-            mRgb->setColor(1, Color);
-            mRgb->setColor(4, Color);
-            mRgb->show();
+            mRgb.setColor(1, Color);
+            mRgb.setColor(4, Color);
+            mRgb.show();
             delay(100);
-            mRgb->setColor(1, 0);
-            mRgb->setColor(4, 0);
-            mRgb->setColor(2, Color);
-            mRgb->setColor(5, Color);
-            mRgb->show();
+            mRgb.setColor(1, 0);
+            mRgb.setColor(4, 0);
+            mRgb.setColor(2, Color);
+            mRgb.setColor(5, Color);
+            mRgb.show();
             delay(100);
-            mRgb->setColor(2, 0);
-            mRgb->setColor(5, 0);
-            mRgb->setColor(3, Color);
-            mRgb->setColor(6, Color);
-            mRgb->show();
+            mRgb.setColor(2, 0);
+            mRgb.setColor(5, 0);
+            mRgb.setColor(3, Color);
+            mRgb.setColor(6, Color);
+            mRgb.show();
             delay(100);
-            mRgb->setColor(3, 0);
-            mRgb->setColor(6, 0);
-            mRgb->show();
+            mRgb.setColor(3, 0);
+            mRgb.setColor(6, 0);
+            mRgb.show();
             delay(100);
             SetRgbColor(E_RGB_ALL, Color);
-            mRgb->show();
+            mRgb.show();
             break;
         case E_EFFECT_FLASH:
             for (byte i = 0; i < 3; i++) {

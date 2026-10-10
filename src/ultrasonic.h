@@ -6,7 +6,7 @@
 RgbUltrasonic ultrasonic(6, 7);  //(signal, RGB)
 //The RGB LED ultrasonic module should be plugged in the fourth grove socket with D6, D7
 
-long colors[] = { RGB_RED, RGB_PURPLE, RGB_GREEN, RGB_BLUE, RGB_YELLOW, RGB_WHITE };
+const long colors[] PROGMEM = { RGB_RED, RGB_PURPLE, RGB_GREEN, RGB_BLUE, RGB_YELLOW, RGB_WHITE };  //24 bytes on PROGMEM rather than on RAM
 long ultraTimer;
 int ultraInterval = 1000;
 float distance;
@@ -57,7 +57,7 @@ void readRGBultrasonic() {
     else {  //10~50
       distance -= 9;
       if (!manualEyeColorQ)
-        ultrasonic.SetRgbColor(E_RGB_ALL, colors[int(max(min(distance / 10, 5), 0))]);
+        ultrasonic.SetRgbColor(E_RGB_ALL, (long)pgm_read_dword(&colors[int(max(min(distance / 10, 5), 0))]));
       int mid[] = {
         15,
         0,

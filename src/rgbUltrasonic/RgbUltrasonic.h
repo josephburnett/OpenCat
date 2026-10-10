@@ -44,7 +44,7 @@ class RgbUltrasonic
   private:
     byte SignalPin, RgbPin;
   public:
-    RGBLed *mRgb;
+    RGBLed mRgb;  //a member object instead of a "new RGBLed(...)", to keep the heap out of the sketch
     float FrontDistance;
     RgbUltrasonic(byte signal_pin, byte rgb_pin);
     float GetUltrasonicDistance(void);

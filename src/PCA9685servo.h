@@ -239,7 +239,8 @@ void servoSetup() {
   initValue = EEPROMReadInt(PCA9685_FREQ);
   if (initValue < F_MIN || initValue > F_MAX)
     initValue = 25000;
-  PTL(float(initValue) / 1000);
+  PTL(initValue);  //the internal oscillator frequency in kHz. it used to be printed as MHz with \
+                   //two decimals ("24.92"), which pulled Print::printFloat into the sketch
   pwm.setup(DOF, long(initValue) * 1000);
   pwm.shutServos();
 }

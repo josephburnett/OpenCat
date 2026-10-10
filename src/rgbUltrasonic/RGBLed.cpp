@@ -75,22 +75,16 @@ void RGBLed::setpin(uint8_t port)
  */
 void RGBLed::setNumber(uint8_t num_leds)
 {
-  count_led = num_leds;
-  pixels    = (uint8_t*)malloc(count_led * 3);
-  if(!pixels)
+  if(num_leds > RGBLED_MAX_LED)   // the buffers are fixed-size member arrays now, not malloc'ed
   {
-    printf("There is not enough space!\r\n");
+    num_leds = RGBLED_MAX_LED;
   }
+  count_led = num_leds;
   for(int16_t i = 0; i < count_led * 3; i++)
   {
     pixels[i] = 0;
   }
 
-  pixels_bak    = (uint8_t*)malloc(count_led * 3);
-  if(!pixels_bak)
-  {
-    printf("There is not enough space!\r\n");
-  }
   for(int16_t i = 0; i < count_led * 3; i++)
   {
     pixels_bak[i] = 0;
@@ -489,8 +483,5 @@ void RGBLed::show(void)
  */
 RGBLed::~RGBLed(void)
 {
-  free(pixels);
-  pixels = NULL;
-  free(pixels_bak);
-  pixels_bak = NULL;
+  // nothing to release: the LED buffers are member arrays
 }

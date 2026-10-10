@@ -86,7 +86,9 @@ MPU6050 mpu;
 // MPU control/status vars
 uint8_t devStatus;       // return status after each device operation (0 = success, !0 = error)
 uint16_t packetSize;     // expected DMP packet size (default is 42 bytes)
-uint8_t fifoBuffer[64];  // FIFO storage buffer
+uint8_t fifoBuffer[28];  // FIFO storage buffer. dmpInitialize() fixes dmpPacketSize at 28 and
+                         // dmpGetCurrentFIFOPacket() -> GetCurrentFIFOPacket(data, 28) writes exactly
+                         // those 28 bytes; the highest index any dmpGet*() reads is packet[27].
 
 // orientation/motion vars
 Quaternion q;         // [w, x, y, z]         quaternion container
@@ -115,9 +117,9 @@ int16_t imuOffset[9] = { 0, 0, 0,
 
 // #define READ_ACCELERATION
 void print6Axis() {
-  PT_FMT(ypr[1], 5);
+  PT((int)ypr[1]);  //printed as whole degrees. printing the 5 decimals of a float costs ~430 bytes of flash
   PT('\t');
-  PT_FMT(ypr[2], 5);
+  PT((int)ypr[2]);
 #ifdef READ_ACCELERATION
   PT("\t");
   PT(aaReal.x);  //x is along the longer direction of the robot

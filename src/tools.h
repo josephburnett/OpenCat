@@ -69,6 +69,13 @@ template<typename T> void printCmdByType(char t, T *data) {
   }
 }
 
+//the joint angles are passed around as int8_t. the serial protocol only allows angles <= 125,
+//because '~' (126) is the terminator of the binary commands. all the joint angle limits are within +-120,
+//so calibratedPWM() clamps any value beyond them to the same limit as before.
+int8_t clampAngle(int a) {
+  return a > 125 ? 125 : (a < -125 ? -125 : (int8_t)a);
+}
+
 template<typename T, typename T1> void arrayNCPY(T *destination, const T1 *source, int len) {  //deep copy regardless of '\0'
   for (int i = 0; i < len; i++)
     destination[i] = source[i];

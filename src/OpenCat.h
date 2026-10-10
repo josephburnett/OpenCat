@@ -311,7 +311,9 @@ void initRobot() {
 #endif
   randomSeed(rndSeed);  //use the fluctuation of voltage caused by servos as entropy pool
 
-  allCalibratedPWM(currentAng);  //soft boot for servos
+  for (int8_t i = DOF - 1; i >= 0; i--)  //soft boot for servos. same loop as allCalibratedPWM(), \
+                                         //which now only takes int8_t angles
+    calibratedPWM(i, currentAng[i]);
   delay(500);
   lastCmd[0] = '\0';
 //----------------------------------

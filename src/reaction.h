@@ -179,10 +179,10 @@ void reaction() {
           if (token == T_INDEXED_SIMULTANEOUS_ASC && cmdLen == 0)
             manualHeadQ = false;
           else {
-            int targetFrame[DOF];
+            int8_t targetFrame[DOF];  //int8_t is enough: every joint angle limit is within +-120
             nonHeadJointQ = false;
             for (int i = 0; i < DOF; i++) {
-              targetFrame[i] = currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0);
+              targetFrame[i] = clampAngle(currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0));
             }
             char *pch;
             pch = strtok(newCmd, " ,");
@@ -197,7 +197,7 @@ void reaction() {
                 inLen++;
               }
               if ((token == T_INDEXED_SEQUENTIAL_ASC || token == T_INDEXED_SIMULTANEOUS_ASC) && target[0] >= 0 && target[0] < DOF) {
-                targetFrame[target[0]] = target[1];
+                targetFrame[target[0]] = clampAngle(target[1]);
                 if (target[0] < 4) {
                   targetHead[target[0]] = target[1];
                   manualHeadQ = true;
@@ -244,10 +244,10 @@ void reaction() {
           if (cmdLen < 2)  //the terminator of upper-case tokens is not '\n'. it may cause error when entered in the Arduino serial monitor
             manualHeadQ = false;
           else {
-            int targetFrame[DOF];
+            int8_t targetFrame[DOF];  //int8_t is enough: every joint angle limit is within +-120
             nonHeadJointQ = false;
             for (int i = 0; i < DOF; i++) {
-              targetFrame[i] = currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0);
+              targetFrame[i] = clampAngle(currentAng[i] - (gyroBalanceQ ? currentAdjust[i] : 0));
             }
             byte group = 2;
             for (int i = 0; i < cmdLen; i += group) {
@@ -354,7 +354,10 @@ void reaction() {
 #endif
     if (skill.period < 0) {  //behaviors
       {                      //use the last frame as a posture
-        skill.convertTargetToPosture(currentAng);
+        int8_t lastFrame[DOF];
+        for (byte i = 0; i < DOF; i++)  //calibratedPWM() has already clamped currentAng to the joint limits (within +-120),
+          lastFrame[i] = clampAngle(currentAng[i]);  //so the clamp never changes a value here
+        skill.convertTargetToPosture(lastFrame);
       }
       for (int i = 0; i < DOF; i++)
         currentAdjust[i] = 0;

@@ -4,6 +4,10 @@
 #include <Arduino.h>
 
 #define DEFAULT_MAX_LED_NUMBER  (32)
+//the LED display buffers used to be malloc'ed by setNumber(). they are fixed-size member arrays now,
+//so the sketch doesn't need the heap. RGBLED_MAX_LED is the number of LEDs on the RGB ultrasonic
+//module (see RgbUltrasonic.cpp); setNumber() clamps any larger request to it.
+#define RGBLED_MAX_LED  (6)
 
 #define RGB_RED     0xFF0000
 #define RGB_GREEN   0x00FF00
@@ -239,8 +243,8 @@ bool setColorAt(uint8_t index, uint8_t red, uint8_t green, uint8_t blue);
 
 private:
   uint16_t count_led;
-  uint8_t *pixels;
-  uint8_t *pixels_bak;
+  uint8_t pixels[RGBLED_MAX_LED * 3];
+  uint8_t pixels_bak[RGBLED_MAX_LED * 3];
 
 /**
  * \par Function

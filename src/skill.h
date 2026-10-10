@@ -323,16 +323,10 @@ public:
     PTL();
   }
 
-  void convertTargetToPosture(int* targetFrame) {
-    int extreme[2];
-    getExtreme(targetFrame, extreme);
-    if (extreme[0] < -125 || extreme[1] > 125) {
-      angleDataRatio = 2;
-      for (int i = 0; i < DOF; i++)
-        targetFrame[i] /= 2;
-    } else
-      angleDataRatio = 1;
-    arrayNCPY(dutyAngles, targetFrame, DOF);
+  void convertTargetToPosture(int8_t* targetFrame) {
+    angleDataRatio = 1;  //the angles are int8_t and clamped to +-125 when they are parsed,
+                         //so they never need to be divided by 2 to fit in the data array
+    memcpy(dutyAngles, targetFrame, DOF);  //both are int8_t arrays, so there's no need for the arrayNCPY template
     period = 1;
     firstMotionJoint = 0;
     frameSize = DOF;

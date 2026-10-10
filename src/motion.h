@@ -87,13 +87,16 @@ void calibratedPWM(byte i, float angle, float speedRatio = 0) {
   }
 }
 
-template<typename T> void allCalibratedPWM(T *dutyAng, byte offset = 0) {
+void allCalibratedPWM(int8_t *dutyAng, byte offset = 0) {
   for (int8_t i = DOF - 1; i >= offset; i--) {
     calibratedPWM(i, dutyAng[i]);
   }
 }
 
-template<typename T> void transform(T *target, byte angleDataRatio = 1, float speedRatio = 2, byte offset = 0) {
+// a single non-template version: all the callers pass int8_t angles.
+// the serial protocol only allows angles <= 125, because '~' (126) terminates the binary commands,
+// and every joint angle limit in OpenCat.h is within +-120, so int8_t is enough for every valid input.
+void transform(int8_t *target, byte angleDataRatio = 1, float speedRatio = 2, byte offset = 0) {
   if (speedRatio <= 0
 #ifdef SERVO_SLOW_BOOT
       || servoOff

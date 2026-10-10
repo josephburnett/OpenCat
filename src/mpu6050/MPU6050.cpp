@@ -3104,12 +3104,12 @@ bool MPU6050::writeMemoryBlock(const uint8_t *data, uint16_t dataSize, uint8_t b
     setMemoryBank(bank);
     setMemoryStartAddress(address);
     uint8_t chunkSize;
-    uint8_t *verifyBuffer=0;
+    uint8_t verifyBuffer[MPU6050_DMP_MEMORY_CHUNK_SIZE];  // stack arrays instead of malloc/free,
+    uint8_t progChunk[MPU6050_DMP_MEMORY_CHUNK_SIZE];     // to keep the heap out of the sketch
     uint8_t *progBuffer=0;
     uint16_t i;
     uint8_t j;
-    if (verify) verifyBuffer = (uint8_t *)malloc(MPU6050_DMP_MEMORY_CHUNK_SIZE);
-    if (useProgMem) progBuffer = (uint8_t *)malloc(MPU6050_DMP_MEMORY_CHUNK_SIZE);
+    if (useProgMem) progBuffer = progChunk;
     for (i = 0; i < dataSize;) {
         // determine correct chunk size according to bank position and data size
         chunkSize = MPU6050_DMP_MEMORY_CHUNK_SIZE;
@@ -3131,7 +3131,7 @@ bool MPU6050::writeMemoryBlock(const uint8_t *data, uint16_t dataSize, uint8_t b
         I2Cdev::writeBytes(devAddr, MPU6050_RA_MEM_R_W, chunkSize, progBuffer);
 
         // verify data if needed
-        if (verify && verifyBuffer) {
+        if (verify) {
             setMemoryBank(bank);
             setMemoryStartAddress(address);
             I2Cdev::readBytes(devAddr, MPU6050_RA_MEM_R_W, chunkSize, verifyBuffer);
@@ -3153,8 +3153,6 @@ bool MPU6050::writeMemoryBlock(const uint8_t *data, uint16_t dataSize, uint8_t b
                     Serial.print(verifyBuffer[i + j], HEX);
                 }
                 Serial.print("\n");*/
-                free(verifyBuffer);
-                if (useProgMem) free(progBuffer);
                 return false; // uh oh.
             }
         }
@@ -3172,8 +3170,6 @@ bool MPU6050::writeMemoryBlock(const uint8_t *data, uint16_t dataSize, uint8_t b
             setMemoryStartAddress(address);
         }
     }
-    if (verify) free(verifyBuffer);
-    if (useProgMem) free(progBuffer);
     return true;
 }
 bool MPU6050::writeProgMemoryBlock(const uint8_t *data, uint16_t dataSize, uint8_t bank, uint8_t address, bool verify) {
