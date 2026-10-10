@@ -51,7 +51,7 @@
 // #define TASK_QUEUE  //allow executing a sequence of tasks, if you enabled the other modules, the task queue will be automatically enabled. \
                     // because it takes up memory, it will be disabled when both the GYRO and the IR remote are enabled \
                     // and no module needs it. See "#undef TASK_QUEUE" in src/OpenCat.h
-// #define ULTRASONIC      //for Nybble's ultrasonic sensor
+#define ULTRASONIC  //for Nybble's ultrasonic sensor with RGB eyes
 
 #define IR_PIN 4  // Signal Pin of IR receiver to Arduino Digital Pin 4
 #include "src/OpenCat.h"
