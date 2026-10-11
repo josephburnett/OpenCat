@@ -1026,6 +1026,27 @@ from before the change is replayed.
   - `loopCycle` maps to the loop fields. Joints 3-7 are dropped.
   - On mirror, `expectedRollPitch[0]` (roll) is negated.
   - `FALL_OK` is set for tricks whose expected or reached tilt exceeds 45°.
+- Found while writing the importer (`mind/kilo/tricks/`, details in
+  `mind/README.md` "Tricks"):
+  - `loopCycle[2]` counts **total** plays of `loop_start..loop_end`: 0 and 1
+    both play it once, N plays it N times, and ≥ 129 wraps the legacy `int8`
+    counter negative and loops forever. A `loop_end` of 0 never loops. The
+    importer copies the count into `TRICK_BEGIN.repeats` (255 = forever), so
+    the body must read `repeats` as total plays, not extra ones.
+  - Legacy `perform()` never balances during a behaviour; only postures and
+    gaits get `adjust()`. Imported behaviours have `BALANCE` off.
+  - Six of the thirteen tricks ask for angles beyond the joint limits (`sit`,
+    `hi`, `wsf`, `scrh`: back shoulders to −85/−90; `buttUp`, `wsf`: front
+    shoulders to 87/90; `str`: head tilt 70 > 45). Legacy clamps them in
+    `calibratedPWM()`; the importer clamps at import and notes it.
+  - The legacy file also has a `stand` array: a 6-frame behaviour, not the
+    standing posture. "stand" in the first-version list is `up`.
+  - Frame 0 moves from wherever the robot is, so its legacy speed has no
+    fixed `maxΔ`; the importer sizes it from `up`.
+  - `Skill::info()` prints the header as "pitch,roll"; the order is roll,
+    pitch (`expectedRollPitch[0]` pairs with `ypr[2]`, roll). Mirroring is
+    selected by a trailing `R` on the skill name (or at random for `X`);
+    there is no mirror token (`m` is the indexed joint move).
 - Authoring uses a curses keyframe editor that jogs joints live. G41 servos
   have no position feedback, so poses cannot be shaped by hand.
 

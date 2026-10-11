@@ -1,0 +1,39 @@
+{
+  "name": "pee",
+  "source": {
+    "file": "src/InstinctNybble.h",
+    "legacy_name": "pee",
+    "kind": "behaviour",
+    "period": -5,
+    "angle_ratio": 1,
+    "loop": [
+      2,
+      3,
+      2
+    ]
+  },
+  "notes": [
+    "dropped nonzero values on unused joints [4, 5, 6, 7]",
+    "behaviour: dur = ceil(round(maxDelta/(speed/4)) * 5.5 ms / 20 ms), frame 0 from `up`; hold = round(|delay| * 50 ms / 20 ms); loop [2, 3, 2] -> start 2 end 3 repeats 2; balance off (legacy perform() never balances behaviours)",
+    "end_posture STAND (nearest built-in posture, max leg diff 0 deg)"
+  ],
+  "expected": {
+    "roll": 0,
+    "pitch": 0
+  },
+  "loop": {
+    "start": 2,
+    "end": 3,
+    "repeats": 2
+  },
+  "balance": false,
+  "fall_ok": false,
+  "end_posture": "STAND",
+  "frames": [
+    {"dur": 22, "hold": 0, "easing": "cosine", "joints": {"head_pan": 30, "head_tilt": 20, "tail": 0, "lf_shoulder": 40, "rf_shoulder": 40, "rb_shoulder": 85, "lb_shoulder": -45, "lf_knee": 10, "rf_knee": 60, "rb_knee": 15, "lb_knee": -45}},
+    {"dur": 25, "hold": 25, "easing": "cosine", "joints": {"head_pan": 45, "head_tilt": 20, "tail": -45, "lf_shoulder": 60, "rf_shoulder": 53, "rb_shoulder": 75, "lb_shoulder": -60, "lf_knee": -30, "rf_knee": 40, "rb_knee": 0, "lb_knee": -21}},
+    {"dur": 6, "hold": 0, "easing": "cosine", "joints": {"head_pan": 30, "head_tilt": 20, "tail": -55, "lf_shoulder": 40, "rf_shoulder": 40, "rb_shoulder": 85, "lb_shoulder": -45, "lf_knee": 10, "rf_knee": 50, "rb_knee": 0, "lb_knee": -45}},
+    {"dur": 5, "hold": 0, "easing": "cosine", "joints": {"head_pan": 40, "head_tilt": 25, "tail": -30, "lf_shoulder": 40, "rf_shoulder": 40, "rb_shoulder": 70, "lb_shoulder": -45, "lf_knee": 10, "rf_knee": 50, "rb_knee": -30, "lb_knee": -45}},
+    {"dur": 14, "hold": 0, "easing": "cosine", "joints": {"head_pan": 0, "head_tilt": 0, "tail": 0, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -30, "lb_shoulder": -30, "lf_knee": 30, "rf_knee": 30, "rb_knee": -30, "lb_knee": -30}}
+  ]
+}

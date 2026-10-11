@@ -198,6 +198,97 @@ cross-check test compares it frame by frame with the body's C dispatch. It is
 a stand-in for §6's `body/test/vbody`, which will run the real firmware core
 on stub HALs.
 
+## Tricks
+
+`kilo/tricks/` holds the trick model, the importer for the legacy skill
+tables and the first-version library (architecture §3e, §5). Uploading and
+playing tricks from the CLI comes later.
+
+**Model** (`model.py`). A `Keyframe` has 16 joint slots in degrees (legacy
+numbering; `None` = not driven, sent as −128 "unchanged"; slots 3-7 are never
+driven), `dur` (ticks from the previous frame, 1..255), `hold` (ticks after
+arriving), `easing` (linear, cosine, step), a `balance` bit and an optional
+legacy IMU `trigger` (metadata only: the body has no triggers and validation
+rejects it). A `Trick` has the frames, `loop_start`/`loop_end` (inclusive) and
+`repeats`, expected roll/pitch, the `BALANCE`/`FALL_OK` flags and
+`end_posture`; `joint_mask` is derived from the joints any frame drives.
+
+- `mirror()` is the legacy `Skill::mirror()` rule: negate head pan and tail,
+  swap the L/R pairs (8,9) (10,11) (12,13) (14,15), negate the expected roll.
+  Head tilt is unchanged. It is an involution.
+- `speed(f)` plays `f` times faster: `dur` and `hold` are divided by `f`
+  (`dur` ≥ 1; a result over 255 raises).
+- `validate()` / `problems()`: 1..32 frames, `dur`/`hold` in range, loop inside
+  the frames, angles within the joint limits of `body/src/core/joints.cpp`
+  (a test cross-checks the table), no driven unused slot, no trigger.
+- Wire: `Keyframe.encode()`/`decode()` are the 14 B frame of
+  `protocol/spec.toml` via the generated `kilo_protocol.Keyframe`;
+  `Trick.upload_messages(trick_id)` gives `TRICK_BEGIN`, the `TRICK_FRAMES`
+  chunks (4 frames each) and `TRICK_COMMIT` with the CRC-16 of the frame
+  array; `Trick.from_wire()` rebuilds a trick (expected roll/pitch are not on
+  the wire). Angles are rounded half away from zero.
+- `repeats` follows the legacy `loopCycle[2]`: the loop section is played
+  `repeats` times in total, 0 and 1 both mean once, 255 until stopped.
+
+**Library layout.** One JSON file per trick in `kilo/tricks/library/`, named by
+the Kilo name. JSON because §5 specifies JSON keyframes, it is in the stdlib
+(TOML has no stdlib writer), and the files are generated anyway. Each file
+records `source` (legacy file, array name, kind, period, angle ratio, loop
+bytes), `notes` (every mapping decision and any clamping or dropped data),
+`expected` roll/pitch, `loop`, flags, `end_posture` and one line per frame
+with joints by name (`head_pan`, `head_tilt`, `tail`, `lf_shoulder`,
+`rf_shoulder`, `rb_shoulder`, `lb_shoulder`, `lf_knee`, ...). `library.load()`
+accepts the Kilo name or the legacy token.
+
+| Kilo name | legacy | kind | frames | loop (start, end, repeats) | end posture |
+|---|---|---|---|---|---|
+| sit | `sit` | posture | 1 | - | SIT |
+| rest | `rest` | posture | 1 | - | REST |
+| stand | `up` | posture | 1 | - | STAND |
+| stretch | `str` | posture | 1 | - | STAND |
+| balance | `balance` | posture | 1 | - | STAND |
+| hi | `hi` | behaviour | 6 | 2, 3, 3 | STAND |
+| wash_face | `wsf` | behaviour | 6 | 2, 3, 3 | SIT |
+| check_around | `ck` | behaviour | 3 | 0, 1, 2 | STAND |
+| sniff | `snf` | behaviour | 5 | 2, 3, 3 | STAND |
+| scratch | `scrh` | behaviour | 6 | 3, 4, 5 | STAND |
+| pee | `pee` | behaviour | 5 | 2, 3, 2 | STAND |
+| push_up | `pu` | behaviour | 6 | 1, 2, 3 | STAND |
+| butt_up | `buttUp` | posture | 1 | - | STAND |
+
+**Importer.** `python -m kilo.tricks.import_legacy` (from `mind/`) parses
+`src/InstinctNybble.h` with `legacy.py` and rewrites the library; it is
+idempotent, and `--check` only reports stale files (a test does the same).
+`legacy.parse_file()`/`parse_text()` read any file in the same format and
+return the raw arrays (`LegacySkill`), which `legacy.to_trick()` maps:
+
+- Legacy layout: header `period, roll, pitch, angle_ratio` (+ `loop_start,
+  loop_end, cycles` when `period < 0`), then `|period|` rows: postures
+  (`period == 1`) 16 angles; gaits (`period > 1`) 8 angles for joints 8-15;
+  behaviours (`period < 0`) 16 angles + `speed, delay, trigger axis, trigger
+  angle`. `angle_ratio` 2 means angles are stored halved (none in Nybble).
+- **speed → dur.** Legacy `transform()` moves at `speed/4` degrees per step
+  in `round(maxΔ / (speed/4))` steps, one PCA write per joint per step, cosine
+  eased. `dur = ceil(steps · LEGACY_STEP_MS / 20 ms)` with `LEGACY_STEP_MS =
+  5.5` (est., to be calibrated by filming `hi` on both firmwares); `maxΔ` is
+  over the 11 driven joints from the previous frame, and frame 0 is sized
+  from the `up` posture. `speed ≤ 0` (legacy "jump") → `dur 1`, step easing.
+- **delay → hold.** Legacy waits `|delay| · 50 ms`, so `hold = round(|delay| ·
+  2.5)` ticks (half up).
+- Postures: `dur 25` (the body's default posture transition; legacy moves
+  from wherever it is at 2°/step), balance on. Gaits: 1 tick per frame
+  (est.), linear, legs only, loop until stopped. Behaviours: balance off
+  (legacy never balances during a behaviour).
+- Joints 3-7 are dropped; angles beyond the joint limits are clamped (legacy
+  clamps too in `calibratedPWM()`). Six of the thirteen are affected: `sit`,
+  `hi`, `wsf` and `scrh` ask up to −90° of the back shoulders, `buttUp` 90°
+  of the front shoulders (`wsf` 87° of LF), `str` 70° of the head tilt
+  (limit 45°). Each file's
+  `notes` names the clamped joints.
+- `end_posture`: behaviours take the nearest built-in posture (`up`, `sit`,
+  `rest`) by leg angles; posture tricks their own if they are one, else STAND.
+  `FALL_OK` is set when the expected tilt exceeds 45° (none of the list).
+
 ## Tests
 
 ```sh
@@ -228,6 +319,7 @@ kilo/link/serial_link.py    SerialLink: reader/writer threads, goals, commands
 kilo/body/state.py          BodyState
 kilo/body/client.py         BodyClient: postures, calibration, params, stats
 kilo/log.py                 JSON-lines logger thread
+kilo/tricks/                trick model, legacy importer, library/*.json (generated)
 kilo/cli.py                 the `kilo` command
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
 kilo/vbody/                 virtual body

@@ -1,0 +1,41 @@
+{
+  "name": "scratch",
+  "source": {
+    "file": "src/InstinctNybble.h",
+    "legacy_name": "scrh",
+    "kind": "behaviour",
+    "period": -6,
+    "angle_ratio": 1,
+    "loop": [
+      3,
+      4,
+      5
+    ]
+  },
+  "notes": [
+    "dropped nonzero values on unused joints [4, 5, 6, 7]",
+    "clamped to joint limits (legacy clamps too): ['lb_shoulder', 'rb_shoulder']",
+    "behaviour: dur = ceil(round(maxDelta/(speed/4)) * 5.5 ms / 20 ms), frame 0 from `up`; hold = round(|delay| * 50 ms / 20 ms); loop [3, 4, 5] -> start 3 end 4 repeats 5; balance off (legacy perform() never balances behaviours)",
+    "end_posture STAND (nearest built-in posture, max leg diff 0 deg)"
+  ],
+  "expected": {
+    "roll": 0,
+    "pitch": 0
+  },
+  "loop": {
+    "start": 3,
+    "end": 4,
+    "repeats": 5
+  },
+  "balance": false,
+  "fall_ok": false,
+  "end_posture": "STAND",
+  "frames": [
+    {"dur": 1, "hold": 0, "easing": "cosine", "joints": {"head_pan": 0, "head_tilt": 0, "tail": 0, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -30, "lb_shoulder": -30, "lf_knee": 30, "rf_knee": 30, "rb_knee": -30, "lb_knee": -30}},
+    {"dur": 11, "hold": 0, "easing": "cosine", "joints": {"head_pan": 10, "head_tilt": -20, "tail": -60, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -80, "lb_shoulder": -80, "lf_knee": 60, "rf_knee": 60, "rb_knee": 45, "lb_knee": 45}},
+    {"dur": 12, "hold": 0, "easing": "cosine", "joints": {"head_pan": 92, "head_tilt": -63, "tail": -60, "lf_shoulder": 32, "rf_shoulder": 49, "rb_shoulder": -69, "lb_shoulder": -80, "lf_knee": 85, "rf_knee": 24, "rb_knee": 57, "lb_knee": 12}},
+    {"dur": 5, "hold": 0, "easing": "cosine", "joints": {"head_pan": 70, "head_tilt": -63, "tail": -71, "lf_shoulder": 32, "rf_shoulder": 49, "rb_shoulder": -69, "lb_shoulder": -78, "lf_knee": 85, "rf_knee": 24, "rb_knee": 57, "lb_knee": -48}},
+    {"dur": 2, "hold": 0, "easing": "cosine", "joints": {"head_pan": 66, "head_tilt": -67, "tail": -52, "lf_shoulder": 32, "rf_shoulder": 49, "rb_shoulder": -69, "lb_shoulder": -62, "lf_knee": 85, "rf_knee": 24, "rb_knee": 57, "lb_knee": -68}},
+    {"dur": 13, "hold": 0, "easing": "cosine", "joints": {"head_pan": 0, "head_tilt": 0, "tail": 0, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -30, "lb_shoulder": -30, "lf_knee": 30, "rf_knee": 30, "rb_knee": -30, "lb_knee": -30}}
+  ]
+}
