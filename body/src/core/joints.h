@@ -12,6 +12,11 @@
 #define JOINT_COUNT 16   // legacy joint ids / PCA9685 channels
 #define DRIVEN_COUNT 11  // canonical order [0,1,2,8,9,10,11,12,13,14,15]
 
+// Left/right mirror in canonical order: 3..10 are the LF RF RB LB shoulders
+// then knees, so the L/R partner of k is ((k - 3) ^ 1) + 3; 0-2 (pan, tilt,
+// tail) map to themselves (mirroring negates pan and tail: the caller's job).
+inline uint8_t joint_mirror_k(uint8_t k) { return k < 3 ? k : (uint8_t)(((k - 3) ^ 1) + 3); }
+
 // An angle of "no output": the channel is written full-off (LIMP).
 #define JOINT_OFF ((int16_t)-32768)
 

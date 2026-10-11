@@ -42,12 +42,13 @@ void body_trick_end(Body& b, uint8_t reason, uint8_t ticks) {
 void body_epoch_bump(Body& b, uint8_t trick_reason) {
   // A new epoch makes every goal the Pi sent before this moment stale, so
   // a goal re-sent from before a fall or a link loss cannot restart motion.
-  // Latched motion goals stop here: the trick (gait, head and body pose
-  // join in P2). The IDLE posture is not a motion goal, but its balance
+  // Latched motion goals stop here: the head hold and the trick (gait and
+  // body pose join in P2). The IDLE posture is not a motion goal, but its balance
   // flag is: the Pi re-asserts it with the new epoch. The trick's
   // TRICK_DONE carries the new epoch.
   b.epoch++;
   b.balance_req = 0;
+  arbiter_head_release(b.arb);
   body_trick_end(b, trick_reason, 0);
 }
 
@@ -87,6 +88,102 @@ static void limp_now(Body& b, uint8_t who) {
 // Count a reflex's LIMP timer down; when it fires, go limp.
 static void limp_timer_step(Body& b, uint8_t who, uint16_t* timer) {
   if (*timer && --*timer == 0 && b.holder == who) limp_now(b, who);
+}
+
+// ---- The fall reflex (doc §3g; the state machine is described in reflex.h) ----
+// rc frame i of this try: the REFLEX mover moves there from the current
+// output over the frame's dur, then holds it.
+KILO_NOINLINE static void rc_frame(Body& b, uint8_t i) {
+  Fall& f = b.fall;
+  f.frame = i;
+  f.timer = (uint16_t)(rc_dur(i) + rc_hold(i));
+  arbiter_reflex(b.arb, (uint8_t)(POSTURE_RC + i + f.mirror), rc_dur(i));
+}
+
+static void fall_failed(Body& b) {
+  b.fall.state = FS_FAILED;
+  rest_then_limp(b, RH_FALL, &b.fall.timer, FALL_LIMP_TICKS);
+  event(b, EV_RECOVERY_FAILED, 0);
+}
+
+static void fall_recovered(Body& b) {
+  // IDLE takes STAND (REST without a calibration: STAND would be refused
+  // UNCALIBRATED) from the current output; the REFLEX hands back to it
+  // with the usual XFADE_TICKS crossfade.
+  arbiter_set_idle(b.arb, b.cfg->state == CFG_DEFAULTED ? POSTURE_REST : POSTURE_STAND, 0);
+  release_reflex(b, RH_FALL);
+  b.fall.state = FS_UPRIGHT;
+  event(b, EV_RECOVERED, 0);
+}
+
+static void fall_step(Body& b, bool fresh) {
+  Fall& f = b.fall;
+  // A more important reflex (watchdog REST, low battery) took the joints:
+  // it owns them now; detection re-arms once they are released.
+  if (f.state != FS_UPRIGHT && b.holder != RH_FALL) f.state = FS_UPRIGHT;
+  if (f.state == FS_UPRIGHT) {
+    uint8_t p = arbiter_idle_posture(b.arb);
+    if (b.imu_fault || b.holder != RH_NONE || body_fall_suppressed(b) || p == POSTURE_LIMP ||
+        p == POSTURE_CALIB) {
+      f.over = 0;
+      return;
+    }
+    if (!fresh) return;
+    int8_t arg = fall_detect(f.over, b.att);
+    if (!arg) return;
+    // Fallen: every goal sent before now is stale (a trick ends with
+    // TRICK_DONE FELL), the REFLEX holds the pose until the body is still.
+    body_epoch_bump(b, KF_END_FELL);
+    b.holder = RH_FALL;
+    arbiter_reflex(b.arb, POSTURE_HOLD, 0);
+    f.state = FS_FALLEN;
+    f.axis = arg;
+    f.tries = f.still = 0;
+    event(b, EV_FELL, arg);
+    notes_push(b.notes, 20, 15);  // a chirp (legacy beeps note 20 on a fall)
+    return;
+  }
+  if (f.state == FS_FAILED) {
+    limp_timer_step(b, RH_FALL, &f.timer);
+    if (!f.timer) {  // limp: let go (detection stays off in LIMP)
+      release_reflex(b, RH_FALL);
+      f.state = FS_UPRIGHT;
+    }
+    return;
+  }
+  // Without the IMU (which also stops fresh samples) nothing can be judged.
+  if (b.imu_fault) return fall_failed(b);
+  if (f.state == FS_FALLEN) {
+    if (!fresh) return;
+    f.still = fall_still(b.att) ? (uint8_t)(f.still + 1) : 0;
+    if (f.still < FALL_STILL_TICKS) return;
+    if (f.axis == 2 || f.axis == -2) return fall_failed(b);  // no recovery from nose or tail down
+    // rc as legacy wrote it pushes with the right legs (unmirrored for the
+    // right side down, roll < 0); every other try flips it, in case the
+    // body lies the other way round by then.
+    f.mirror = (uint8_t)(((b.att.roll > 0) ^ (f.tries & 1)) ? POSTURE_RC_MIRROR : 0);
+    f.tries++;
+    f.state = FS_RC;
+    return rc_frame(b, 0);
+  }
+  if (f.state == FS_CHECK && fresh) {
+    // (No saturation needed: CHECK ends at FALL_LEVEL_TICKS.)
+    f.level = fall_level(b.att) ? (uint8_t)(f.level + 1) : 0;
+    if (f.level >= FALL_LEVEL_TICKS) return fall_recovered(b);
+  }
+  if (--f.timer) return;
+  if (f.state == FS_RC) {
+    if (f.frame + 1 < RC_FRAMES) return rc_frame(b, (uint8_t)(f.frame + 1));
+    f.state = FS_CHECK;  // hold rc's last frame, waiting for upright
+    f.timer = FALL_CHECK_TICKS;
+    f.level = 0;
+    return;
+  }
+  // CHECK timed out: not upright. The next try (after the body is still
+  // again), or give up.
+  if (f.tries >= FALL_TRIES) return fall_failed(b);
+  f.state = FS_FALLEN;
+  f.still = 0;
 }
 
 void body_link_frame(Body& b) {
@@ -201,6 +298,7 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   // Step 4: reflexes and epoch bookkeeping, most important last so that it
   // wins the REFLEX owner within this same tick.
   warm_hold_step(b, in.imu == IMU_FRESH);
+  fall_step(b, in.imu == IMU_FRESH);
   watchdog_step(b);
   if (in.batt_valid) battery_step(b, in.batt_counts);
   limp_timer_step(b, RH_BATTERY, &b.batt_limp_timer);
@@ -236,6 +334,13 @@ GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ti
   // LIMP and REST are always allowed: they are how the Pi makes Kilo safe.
   bool safe = posture == POSTURE_LIMP || posture == POSTURE_REST;
   if (!safe && epoch != b.epoch) return GOAL_STALE;
+  if (body_fallen(b)) {
+    // The fall reflex holds the joints until RECOVERED; only LIMP (the Pi's
+    // emergency stop) ends it.
+    if (posture != POSTURE_LIMP) return GOAL_FALLEN;
+    b.fall.state = FS_UPRIGHT;
+    release_reflex(b, RH_FALL);
+  }
   if (!safe && b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
   if (posture == POSTURE_STAND && b.cfg->state == CFG_DEFAULTED) return GOAL_UNCALIBRATED;
   b.balance_req = flags & 1;
@@ -264,6 +369,7 @@ uint8_t body_trick_play(Body& b, const uint8_t p[4]) {
   if (p[0] != b.epoch) return GOAL_STALE;
   uint8_t s = kf_check_play(b.kf, p[1], p[2], p[3]);
   if (s) return s;
+  if (body_fallen(b)) return GOAL_FALLEN;
   if (b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
   uint8_t idle = arbiter_idle_posture(b.arb);
   if (b.holder != RH_NONE || b.arb.reflex_active || idle == POSTURE_LIMP || idle == POSTURE_CALIB) return GOAL_BUSY;
@@ -275,11 +381,38 @@ uint8_t body_trick_play(Body& b, const uint8_t p[4]) {
   return GOAL_OK;
 }
 
+GoalResult body_goal_head(Body& b, const uint8_t* p) {
+  // Payload (kilo_set_head_t, little-endian like both targets): epoch, mode,
+  // pan, tilt, tail (i16 a16), max_speed_dps (u16).
+  uint8_t mode = p[1];
+  if (mode > KILO_HEAD_MODE_HOLD) return GOAL_BAD_ARG;
+  Arbiter& a = b.arb;
+  if (mode == KILO_HEAD_MODE_RELEASE) {  // calming down is never stale
+    arbiter_head_release(a);
+    return GOAL_OK;
+  }
+  if (p[0] != b.epoch) return GOAL_STALE;
+  if (body_fallen(b)) return GOAL_FALLEN;
+  if (b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
+  // Targets as sent (the safety stage clamps them to the joint limits);
+  // JOINT_OFF (-32768) leaves that joint to its owner.
+  memcpy(a.head_tgt, p + 2, sizeof a.head_tgt);
+  // deg/s -> a16 per 20 ms tick (x 16 / 50), rounded up so a slow head
+  // still moves. 0, or anything over 2500 deg/s (SLEW_MAX_A16's maximum),
+  // leaves only the safety slew.
+  uint16_t dps = (uint16_t)(p[8] | (p[9] << 8));
+  a.head_step = (dps && dps <= 2500u) ? (int16_t)((dps * 8u + 24u) / 25u) : 0x3FFF;
+  a.head_ttl = HEAD_HOLD_TICKS;
+  return GOAL_OK;
+}
+
 void body_trick_stop(Body& b, uint8_t ticks) { body_trick_end(b, KF_END_STOPPED, ticks); }
 
 uint8_t body_mode(const Body& b) {
   if (b.batt.level >= BATT_LOW) return KILO_MODE_LOW_BATT;
   if (b.wd.stage) return KILO_MODE_LINK_LOST;
+  if (b.fall.state == FS_RC || b.fall.state == FS_CHECK) return KILO_MODE_RECOVERING;
+  if (b.fall.state) return KILO_MODE_FALLEN;
   if (b.kf.run) return KILO_MODE_TRICK;
   if (arbiter_idle_posture(b.arb) == POSTURE_LIMP && !b.arb.reflex_active) return KILO_MODE_LIMP;
   return KILO_MODE_IDLE;

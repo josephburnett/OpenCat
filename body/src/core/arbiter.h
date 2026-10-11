@@ -5,12 +5,13 @@
 //               REFLEX(3) > TRICK(2) > GAIT(1) > IDLE(0)
 //   2. base   = that owner's angle; if the owner just changed, crossfade from
 //               the previous base so the hand-over never jumps
-//   3. layers = head (hook; P1) and balance (core/balance.h): joint-space
-//               owners (IDLE, TRICK) add the balance correction
+//   3. layers = head (SET_HEAD hold, joints 0-2 under IDLE or GAIT) and
+//               balance (core/balance.h): joint-space owners (IDLE, TRICK)
+//               add the balance correction, except on held head joints
 //   4. safety = clamp to joint limits, slew-limit, convert to PCA counts
 //
 // IDLE (the built-in postures), TRICK (the keyframe player, core/keyframe.h)
-// and REFLEX (battery, link watchdog, warm-boot hold) exist; GAIT is a hook
+// and REFLEX (battery, link watchdog, warm-boot hold, fall) exist; GAIT is a hook
 // that never claims a joint yet (P2); see arbiter.cpp.
 //
 // Crossfades start from the joint's last OUTPUT (after balance, limits and
@@ -26,7 +27,10 @@
 #include "joints.h"
 #include "keyframe.h"
 
-enum Owner : uint8_t { OWN_IDLE = 0, OWN_GAIT = 1, OWN_TRICK = 2, OWN_REFLEX = 3 };
+// OWN_PI_HOLD is not an owner that supplies a base angle: it tags a head
+// joint held by SET_HEAD (owner[] and TELEMETRY), whose real owner is IDLE
+// or GAIT.
+enum Owner : uint8_t { OWN_IDLE = 0, OWN_GAIT = 1, OWN_TRICK = 2, OWN_REFLEX = 3, OWN_PI_HOLD = 4 };
 
 // Tunables are live params (core/params.h): XFADE_TICKS (out of TRICK or
 // REFLEX, 10), POSTURE_TICKS (default IDLE transition, 25 = 0.5 s) and
@@ -43,12 +47,19 @@ struct Mover {
 struct Arbiter {
   Mover idle, reflex;
   uint8_t reflex_active;
-  uint8_t owner[DRIVEN_COUNT];  // owner on the previous tick
+  uint8_t owner[DRIVEN_COUNT];  // owner on the previous tick (OWN_PI_HOLD: held head joint)
   int16_t xsrc[DRIVEN_COUNT];   // crossfade source: the output when the owner changed
                                 // (also the TRICK start pose)
   uint8_t xn[DRIVEN_COUNT], xi[DRIVEN_COUNT];
   int16_t out[DRIVEN_COUNT];    // output after the safety stage (a16 or OFF)
   int16_t last_on[DRIVEN_COUNT];  // last powered output: slew reference
+  // Head layer (SET_HEAD mode=1): targets for pan, tilt, tail (a16 as sent;
+  // the safety stage clamps them; JOINT_OFF = that joint not held), the
+  // slew in a16 per tick (1..0x3FFF), and the ticks left before the hold
+  // lapses (0 = released).
+  int16_t head_tgt[3];
+  int16_t head_step;
+  uint8_t head_ttl;
 };
 
 // warm = null: cold start, everything LIMP.
@@ -68,6 +79,20 @@ void arbiter_reflex(Arbiter& a, uint8_t posture, uint8_t ticks);
 void arbiter_reflex_release(Arbiter& a);
 // True once the active mover has reached its target.
 bool arbiter_reflex_settled(const Arbiter& a);
+
+// Head layer (doc §3c layer 1). A hold (body_goal_head sets head_tgt,
+// head_step, head_ttl): joints 0-2 follow head_tgt (JOINT_OFF = not held) at
+// most head_step a16 per tick from their last output, for head_ttl ticks
+// unless refreshed, whenever their owner is IDLE or GAIT (a trick that owns
+// a head joint, or a reflex, wins). Held joints get no balance correction:
+// the Pi is pointing them; owner[] says OWN_PI_HOLD (TELEMETRY's head owner
+// nibble PI_HOLD). release(), or head_ttl running out: the joints
+// crossfade back to their owner's angle over XFADE_TICKS.
+// arbiter_head_held() is TELEMETRY flags bit 5 (HEAD_HELD).
+// (A held joint is recorded as owned by OWN_PI_HOLD, so a release is a
+// change of owner: the crossfade is the usual hand-over.)
+inline void arbiter_head_release(Arbiter& a) { a.head_ttl = 0; }
+inline bool arbiter_head_held(const Arbiter& a) { return a.head_ttl != 0; }
 
 // True while the IDLE mover is still moving to its posture.
 inline bool arbiter_idle_moving(const Arbiter& a) { return a.idle.i < a.idle.n; }

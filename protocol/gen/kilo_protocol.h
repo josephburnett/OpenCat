@@ -67,7 +67,7 @@ extern "C" {
 #define KILO_REBOOT_MAGIC 0x4B49u
 #define KILO_RESET_PULSE_MS 100u
 #define KILO_PARAM_SLOTS 16u
-#define KILO_TRICK_CAPACITY 32u
+#define KILO_TRICK_CAPACITY 24u
 #define KILO_TRICK_FRAMES_PER_MSG 4u
 #define KILO_BEEP_MAX_NOTES 8u
 #define KILO_JOINT_COUNT 11u
@@ -384,15 +384,15 @@ KILO_STATIC_ASSERT(offsetof(kilo_set_gait_t, step_h_mm) == 8, kilo_sa_set_gait_s
 KILO_STATIC_ASSERT(offsetof(kilo_set_gait_t, body_h_mm) == 9, kilo_sa_set_gait_body_h_mm);
 KILO_STATIC_ASSERT(offsetof(kilo_set_gait_t, flags) == 10, kilo_sa_set_gait_flags);
 
-/* 0x12 SET_HEAD: goal, epoch. Hold/release pan, tilt, tail plus speed. */
+/* 0x12 SET_HEAD: goal, epoch. Hold (mode 1) or release (mode 0) pan, tilt, tail. Held joints follow the targets slew-limited at max_speed_dps (0 = only the safety slew) while the head joints' owner is IDLE or GAIT, without balance corrections; released by mode 0, head_hold_ms without a refresh, or an epoch bump. BAD_ARG for mode > 1; mode 0 is never stale; mode 1: STALE, FALLEN, LOW_BATT. TELEMETRY flags HEAD_HELD, head owner nibble PI_HOLD. */
 #define KILO_SET_HEAD_LEN 10u
 typedef struct KILO_PACKED kilo_set_head_s {
     uint8_t epoch;
     uint8_t mode; /* enum head_mode */
-    int16_t pan; /* deg x 0.0625 */
-    int16_t tilt; /* deg x 0.0625 */
-    int16_t tail; /* deg x 0.0625 */
-    uint16_t max_speed_dps; /* deg/s */
+    int16_t pan; /* deg x 0.0625; -32768 = not held (follows the posture) */
+    int16_t tilt; /* deg x 0.0625; -32768 = not held */
+    int16_t tail; /* deg x 0.0625; -32768 = not held */
+    uint16_t max_speed_dps; /* deg/s; 0 = no limit below the safety slew */
 } kilo_set_head_t;
 KILO_STATIC_ASSERT(sizeof(kilo_set_head_t) == 10, kilo_sa_set_head_size);
 KILO_STATIC_ASSERT(offsetof(kilo_set_head_t, epoch) == 0, kilo_sa_set_head_epoch);
@@ -434,11 +434,11 @@ KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, kd_ms) == 2, kilo_sa_set_balance
 KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, deadband_deg) == 3, kilo_sa_set_balance_deadband_deg);
 KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, max_corr_deg) == 4, kilo_sa_set_balance_max_corr_deg);
 
-/* 0x20 TRICK_BEGIN: command. Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..32, loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE). */
+/* 0x20 TRICK_BEGIN: command. Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..trick_capacity (24), loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE). */
 #define KILO_TRICK_BEGIN_LEN 11u
 typedef struct KILO_PACKED kilo_trick_begin_s {
     uint8_t trick_id;
-    uint8_t n_frames; /* range 1..32 */
+    uint8_t n_frames; /* range 1..24 */
     uint8_t loop_start;
     uint8_t loop_end;
     uint8_t repeats; /* total plays of loop_start..loop_end: 0 and 1 = once, 255 = until stopped */

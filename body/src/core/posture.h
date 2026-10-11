@@ -17,8 +17,19 @@ enum PostureId : uint8_t {
   POSTURE_CALIB = 5,
   POSTURE_ZERO = 6,
   POSTURE_COUNT = 7,
-  POSTURE_HOLD = 0xFE,  // internal: hold the snapshot (warm boot)
+  POSTURE_HOLD = 0xFE,  // internal: hold the snapshot (warm boot, fall)
 };
+
+// The fall reflex's recovery sequence `rc` (doc §3g), built in (PROGMEM):
+// internal pseudo-postures POSTURE_RC + i for its frame i (0..RC_FRAMES-1),
+// | POSTURE_RC_MIRROR for the left/right mirror (L/R legs swapped, pan and
+// tail negated, like TRICK_PLAY's mirror). Only the REFLEX mover uses them.
+#define POSTURE_RC 0xE0u
+#define POSTURE_RC_MIRROR 0x08u
+#define RC_FRAMES 3
+// Frame i's move (ticks, cosine) and hold after arriving (ticks).
+uint8_t rc_dur(uint8_t i);
+uint8_t rc_hold(uint8_t i);
 
 // True for the ids that have a PROGMEM angle table.
 bool posture_has_angles(uint8_t id);

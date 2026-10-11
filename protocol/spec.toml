@@ -76,7 +76,7 @@ eeprom_read_max = 56
 reboot_magic = 0x4B49          # "KI"
 reset_pulse_ms = 100           # GPIO4 low time for the flash reset (Appendix F)
 param_slots = 16               # persisted param slots in the config block; param ids < this
-trick_capacity = 32            # keyframes in the body's store
+trick_capacity = 24            # keyframes in the body's store (32 until the P1 fall/head RAM shrink, doc §3h)
 trick_frames_per_msg = 4
 beep_max_notes = 8
 joint_count = 11               # driven joints, canonical order (JOINTS, keyframe ang[])
@@ -357,14 +357,14 @@ id = 0x12
 dir = "pi_to_body"
 kind = "goal"
 epoch = true
-doc = "Hold/release pan, tilt, tail plus speed."
+doc = "Hold (mode 1) or release (mode 0) pan, tilt, tail. Held joints follow the targets slew-limited at max_speed_dps (0 = only the safety slew) while the head joints' owner is IDLE or GAIT, without balance corrections; released by mode 0, head_hold_ms without a refresh, or an epoch bump. BAD_ARG for mode > 1; mode 0 is never stale; mode 1: STALE, FALLEN, LOW_BATT. TELEMETRY flags HEAD_HELD, head owner nibble PI_HOLD."
 fields = [
   { name = "epoch", type = "u8" },
   { name = "mode", type = "u8", enum = "head_mode" },
-  { name = "pan", type = "i16", unit = "deg", scale = 0.0625 },
-  { name = "tilt", type = "i16", unit = "deg", scale = 0.0625 },
-  { name = "tail", type = "i16", unit = "deg", scale = 0.0625 },
-  { name = "max_speed_dps", type = "u16", unit = "deg/s" },
+  { name = "pan", type = "i16", unit = "deg", scale = 0.0625, note = "-32768 = not held (follows the posture)" },
+  { name = "tilt", type = "i16", unit = "deg", scale = 0.0625, note = "-32768 = not held" },
+  { name = "tail", type = "i16", unit = "deg", scale = 0.0625, note = "-32768 = not held" },
+  { name = "max_speed_dps", type = "u16", unit = "deg/s", note = "0 = no limit below the safety slew" },
 ]
 
 [[messages]]
@@ -401,10 +401,10 @@ name = "TRICK_BEGIN"
 id = 0x20
 dir = "pi_to_body"
 kind = "command"
-doc = "Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..32, loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE)."
+doc = "Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..trick_capacity (24), loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE)."
 fields = [
   { name = "trick_id", type = "u8" },
-  { name = "n_frames", type = "u8", range = [1, 32] },
+  { name = "n_frames", type = "u8", range = [1, 24] },
   { name = "loop_start", type = "u8" },
   { name = "loop_end", type = "u8" },
   { name = "repeats", type = "u8", note = "total plays of loop_start..loop_end: 0 and 1 = once, 255 = until stopped" },

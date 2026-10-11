@@ -240,10 +240,10 @@ def test_speed(lib):
 
 
 def test_validation():
-    good = Trick("ok", [kf()] * 32)
+    good = Trick("ok", [kf()] * P.TRICK_CAPACITY)  # 24 (the body's store, docs §3h)
     good.validate()
-    with pytest.raises(TrickError, match="33 frames"):
-        Trick("big", [kf()] * 33).validate()
+    with pytest.raises(TrickError, match=f"{P.TRICK_CAPACITY + 1} frames"):
+        Trick("big", [kf()] * (P.TRICK_CAPACITY + 1)).validate()
     with pytest.raises(TrickError, match="lf_knee 121"):
         Trick("lim", [Keyframe.from_joints({"lf_knee": 121})]).validate()
     with pytest.raises(TrickError, match="head_tilt -81"):

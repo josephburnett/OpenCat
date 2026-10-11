@@ -330,7 +330,7 @@ def test_trick_upload_errors(harness):
     sent = play(harness, [
         frames[0],                                                          # NO_TRICK: no header
         wire("TRICK_COMMIT", 1, trick_id=6, crc16=0),                       # NO_TRICK
-        wire("TRICK_BEGIN", 2, trick_id=6, n_frames=33, loop_start=0, loop_end=0, repeats=0,
+        wire("TRICK_BEGIN", 2, trick_id=6, n_frames=P.TRICK_CAPACITY + 1, loop_start=0, loop_end=0, repeats=0,
              joint_mask=0xFF07, flags=0, end_posture=S.STAND, exp_roll=0, exp_pitch=0),   # BAD_ARG
         wire("TRICK_BEGIN", 3, trick_id=6, n_frames=2, loop_start=0, loop_end=0, repeats=0,
              joint_mask=0x0008, flags=0, end_posture=S.STAND, exp_roll=0, exp_pitch=0),   # BAD_ARG: joint 3
@@ -390,3 +390,32 @@ def test_trick_preempted_by_watchdog(harness):
         wire("TRICK_PLAY", seq + 1, epoch=0, trick_id=8, speed_q6=64, flags=0),  # LINK_RESTORED, STALE
     ])
     assert trick_dones(sent) == [(P.TrickDoneReason.PREEMPTED, 8)]
+
+
+# ---- head (P1, docs §3c layer 1) ----------------------------------------------------------
+def test_head_goal(harness):
+    S = P.Posture
+    hold = dict(mode=1, pan=30 * 16, tilt=-10 * 16, tail=-32768, max_speed_dps=120)
+    release = dict(mode=0, pan=0, tilt=0, tail=0, max_speed_dps=0)
+    ticks, seq = _ticks_with_heartbeats(130, 20)
+    # (The harness never runs link_tick, so the 1/s GOAL_REFUSED window never
+    # reopens: one refusal per SET_HEAD per play.)
+    play(harness, [
+        wire("SET_POSTURE", 1, epoch=0, posture=S.STAND, transition_ticks=0, flags=0),
+        wire("SET_HEAD", 2, epoch=0, **hold),                              # held
+        *ticks,                                                            # lapses after 2 s: no event
+        wire("SET_HEAD", seq, epoch=9, **release),                         # release: never stale
+        wire("SET_HEAD", seq + 1, epoch=0, **hold),
+        *[("tick", 1) for _ in range(30)],                                 # silent: WATCHDOG releases it
+        wire("SET_HEAD", seq + 2, epoch=0, **hold),                        # LINK_RESTORED, STALE
+    ])
+    play(harness, [wire("SET_HEAD", 1, epoch=0, **{**hold, "mode": 2})])  # BAD_ARG
+    play(harness, [
+        wire("SET_POSTURE", 1, epoch=0, posture=S.SIT, transition_ticks=0, flags=0),
+        wire("SET_HEAD", 2, epoch=4, **hold),                              # STALE
+        wire("SET_HEAD", 3, epoch=4, **release),
+    ])
+    play(harness, [
+        wire("SET_HEAD", 1, epoch=0, **hold),                              # LOW_BATT
+        wire("SET_HEAD", 2, epoch=0, **release),
+    ], batt_level=P.BatteryLevel.LOW)

@@ -196,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=("status", "stop"), nargs="?", default="status")
     s.add_argument("--json", action="store_true")
     __import__("kilo.cli_trick").cli_trick.add_parser(sub, LINK_COMMANDS)  # kilo trick (cli_trick.py)
+    __import__("kilo.cli_head").cli_head.add_parser(sub, LINK_COMMANDS)  # kilo look (cli_head.py)
     add_log_parser(sub)
     return p
 

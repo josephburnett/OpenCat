@@ -25,6 +25,8 @@ static_assert(SAME(EV_BOOT, KILO_EVENT_BOOT) && SAME(EV_FELL, KILO_EVENT_FELL) &
 static_assert(SAME(EVENT_QUEUE_LEN, KILO_EVENT_QUEUE_DEPTH), "event queue depth != spec");
 static_assert(SAME(GOAL_BAD_ARG, KILO_GOAL_REFUSED_REASON_BAD_ARG) && SAME(GOAL_LOW_BATT, KILO_GOAL_REFUSED_REASON_LOW_BATT) &&
                   SAME(GOAL_STALE, KILO_GOAL_REFUSED_REASON_STALE) &&
+                  SAME(GOAL_FALLEN, KILO_GOAL_REFUSED_REASON_FALLEN) &&
+                  SAME(GOAL_FALLEN, KILO_ACK_STATUS_REFUSED_FALLEN) &&
                   SAME(GOAL_UNCALIBRATED, KILO_GOAL_REFUSED_REASON_UNCALIBRATED) &&
                   SAME(KILO_GOAL_REFUSED_REASON_UNCALIBRATED, KILO_ACK_STATUS_UNCALIBRATED),
               "GoalResult != GOAL_REFUSED reasons");
@@ -41,7 +43,7 @@ static_assert(SAME(CFG_OK, KILO_CONFIG_STATE_OK) && SAME(CFG_MIGRATED, KILO_CONF
                   SAME(CFG_DEFAULTED, KILO_CONFIG_STATE_DEFAULTED),
               "config states != spec");
 static_assert(SAME(OWN_IDLE, KILO_OWNER_IDLE) && SAME(OWN_GAIT, KILO_OWNER_GAIT) && SAME(OWN_TRICK, KILO_OWNER_TRICK) &&
-                  SAME(OWN_REFLEX, KILO_OWNER_REFLEX),
+                  SAME(OWN_REFLEX, KILO_OWNER_REFLEX) && SAME(OWN_PI_HOLD, KILO_OWNER_PI_HOLD),
               "owners != spec");
 static_assert(SAME(DRIVEN_COUNT, KILO_JOINT_COUNT) && SAME(JOINT_COUNT, KILO_CHANNEL_COUNT), "joint counts != spec");
 static_assert(SAME(PCA_FULL_OFF, KILO_PCA_FULL_OFF_BIT), "full-off bit != spec");
@@ -156,6 +158,11 @@ static void goal(uint8_t t, const uint8_t* p) {
       if (r != GOAL_OK) refuse(t, r);
       return;
     }
+    case KILO_MSG_SET_HEAD: {
+      uint8_t r = body_goal_head(*B, p);
+      if (r != GOAL_OK) refuse(t, r);
+      return;
+    }
     case KILO_MSG_SET_BALANCE: {
       uint8_t r = body_goal_balance(*B, p);
       if (r != GOAL_OK) refuse(t, r);
@@ -166,7 +173,7 @@ static void goal(uint8_t t, const uint8_t* p) {
       for (uint8_t i = 0; i < p[0]; i++) notes_push(B->notes, (int8_t)p[1 + 2 * i], p[2 + 2 * i]);
       return;
     default:
-      // SET_GAIT, SET_HEAD, SET_BODY_POSE (P2/P1), SET_EYES.
+      // SET_GAIT, SET_BODY_POSE (P2), SET_EYES.
       refuse(t, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE);
   }
 }
@@ -397,7 +404,7 @@ static void telemetry(const Body& b) {
   m.dist_mm = s.dist_mm;
   m.batt_mv = battery_mv(b.batt);
   m.mode = body_mode(b);
-  m.owners = (uint8_t)(b.arb.owner[3] | (b.arb.owner[0] << 4));  // a leg, the head
+  m.owners = (uint8_t)(b.arb.owner[3] | (b.arb.owner[0] << 4));  // a leg, the head (PI_HOLD when held)
   uint16_t fl = 0;
   for (uint8_t k = 0; k < DRIVEN_COUNT; k++)
     if (b.arb.out[k] != JOINT_OFF) fl = KILO_TELEMETRY_FLAGS_SERVOS_POWERED;
@@ -410,6 +417,7 @@ static void telemetry(const Body& b) {
   if (config_busy(*b.cfg)) fl |= KILO_TELEMETRY_FLAGS_EEPROM_PENDING;
   if (s.dist_fresh) fl |= KILO_TELEMETRY_FLAGS_DIST_FRESH;
   if (b.kf.run) fl |= KILO_TELEMETRY_FLAGS_TRICK;
+  if (arbiter_head_held(b.arb)) fl |= KILO_TELEMETRY_FLAGS_HEAD_HELD;
   m.flags = fl;
   m.last_rx_seq = L.last_rx_seq;
   m.trick_frame = kf_frame(b.kf);

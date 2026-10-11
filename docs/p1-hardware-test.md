@@ -235,7 +235,7 @@ side with the legacy firmware, then the H9 looping trick. Do it after the
 balance steps above (same setup, same branch). Allow about two hours.
 
 What the host already checked (`body/tools/host_tests.sh`, test `keyframe`):
-the upload rules (order, CRC, 32-frame limit), tick-exact timing and easing
+the upload rules (order, CRC, 24-frame limit), tick-exact timing and easing
 (the last tick of every move lands on its target, every move is monotone),
 holds, loops (0/1 = once, N, 255 = until stopped), speed, mirror, the
 crossfades in and out, the end posture, TRICK_DONE reasons, gating and owner
@@ -253,7 +253,7 @@ the side at the same spot for both firmwares.
 
 ```sh
 body/tools/host_tests.sh                   # ends "host tests: ALL PASSED" (incl. "keyframe ... 0 failed")
-body/tools/size_check.sh                   # flash ~21.2 KB of 22528, globals 1525 of 1540, PASS
+body/tools/size_check.sh                   # flash ~22.5 KB of 22528, globals 1432 of 1540, PASS
 (cd mind && python -m pytest -q)
 kilo -v flash
 kilo status                                # `proto 1.2`
@@ -377,3 +377,131 @@ the middle of a trick always ends in a smooth crossfade.
 - T5: per trick, same/different, the measured speed ratio if any.
 - T6: `kilo status` after the 60 s loop.
 - The checklist above, ticked per trick.
+
+---
+
+# P1 fall and head hardware test
+
+The first run of the fall reflex (docs/architecture.md §3g "Fall", "As
+implemented in P1") and the head layer (§3c layer 1) on Kilo, and the H7
+acceptance. Do it after the tricks test (same setup and branch). Allow about
+an hour.
+
+What the host already checked (`body/tools/host_tests.sh`, test `reflex`):
+the trip needs 6 consecutive samples over 75° (5 and a dip do not trip, a
+single bad sample never does, missing samples neither count nor reset),
+roll falls on both sides and on the back, pitch falls (nose or tail down),
+the still wait, the `rc` frames tick by tick (dur 11/5/18, hold 30/25/0,
+mirrored for roll > 0 and flipped on every other try), RECOVERED after
+0.5 s upright, three tries then REST, RECOVERY_FAILED and LIMP, FALL_OK,
+LIMP/CALIB/IMU_FAULT gating, a trick ending with TRICK_DONE(FELL), STALE and
+FALLEN refusals, LIMP ending the reflex, the watchdog taking over; the head
+hold's slew, timeout, release, epoch release, balance exclusion, owner
+precedence and TELEMETRY. What only Kilo can tell: whether `rc` gets it back
+on its feet, and **which way it must be mirrored** (the legacy firmware
+mirrored it at random; Kilo's choice, unmirrored for the right side down, is
+a reading of the legacy frames, not a measurement).
+
+**Before you start:** as for the balance test (charged battery, CH343 on the
+Pi, `KILO_PORT` set), plus a soft surface big enough for Kilo to roll on (a
+bed, a sofa cushion or foam), and a phone filming each fall from the front.
+Kilo must not fall off the surface.
+
+## F0. Host checks and flash
+
+```sh
+body/tools/host_tests.sh                   # ALL PASSED, incl. "reflex ... 0 failed"
+body/tools/size_check.sh                   # flash ~22.5 KB of 22528, globals 1432 of 1540, PASS
+(cd mind && python -m pytest -q)
+kilo -v flash
+kilo status                                # stack free: note it (was ≈730 B before the trick store)
+```
+
+## F1. Three terminals through the daemon
+
+The fall test needs the link fed the whole time (a silent link means the
+watchdog's REST takes the joints from the fall reflex after 1.5 s) and more
+than one client, so run the daemon in the foreground, with no idle posture
+of its own:
+
+```sh
+# terminal A
+kilo run --idle-posture none
+# terminal B: mode, owners, epoch, roll/pitch and the last events, live
+kilo monitor
+# terminal C: the goals
+kilo posture stand                         # holds STAND until the body clears it
+```
+
+## F2. Fall on each side (H7)
+
+Kilo standing on the soft surface. Push it over onto its **left** side (right
+side up: roll ≈ +90°) and let go.
+
+Expected, in terminal B: within ≈0.1 s of passing 75° `FELL(1)`, the epoch
++1, mode FALLEN, owners REFLEX/REFLEX, a short chirp; terminal C prints
+"posture goal cleared by the body" and exits (the mind dropped its old-epoch
+goal: that is "old goals refused as STALE until the mind re-plans"; a
+`GOAL_REFUSED` with reason STALE may also appear if a refresh was in flight).
+Once Kilo lies still (0.2 s), mode RECOVERING and `rc` plays (≈1.8 s: head
+turns, the legs on the ground side sweep and push). If it ends upright,
+0.5 s later `RECOVERED(0)`, mode IDLE and it stands (STAND). If not, after
+1 s the next try, mirrored the other way; after three failed tries REST,
+`RECOVERY_FAILED` and LIMP 3 s later.
+
+Then the **right** side (roll ≈ −90°, `FELL(-1)`), then once on its **back**
+(roll ≈ ±180°, `FELL(±1)`). Re-run `kilo posture stand` in terminal C before
+each fall. Five falls per side:
+
+| Fall | FELL arg | try that recovered (1, 2, 3 or none) | RECOVERED? | notes |
+|---|---|---|---|---|
+| left 1..5 | | | | |
+| right 1..5 | | | | |
+| back | | | | |
+
+**H7 passes** with RECOVERED in ≥ 4 of 5 on each side, mostly on try 1. If a
+side keeps failing try 1 and succeeding on try 2, the mirror convention is
+backwards: report it (the fix is the `b.att.roll > 0` in `fall_step()`,
+`body/src/core/body.cpp`).
+
+## F3. Nose down, handling, and goals while fallen
+
+- **Nose down.** Lift Kilo and hold it nose down, vertical, still: `FELL(2)`,
+  then REST, `RECOVERY_FAILED` at once and LIMP 3 s later (no `rc` for a
+  pitch fall). Tail down: `FELL(-2)`, the same.
+- **Handling.** Pick Kilo up while it stands and tilt it by hand to ≈60°
+  and back, a few times, quickly: no FELL (P0 finding 8). Past 75° for more
+  than 0.12 s is a fall by design.
+- **Goals while fallen.** During a FALLEN or RECOVERING phase run
+  `kilo posture sit` in terminal C: refused (`GOAL_REFUSED`, reason FALLEN,
+  in terminal B). `kilo posture limp` ends the reflex at once (LIMP).
+- **A trick.** `kilo trick play push_up --posture stand --repeats 255`, then
+  push Kilo over: the CLI prints `TRICK_DONE FELL`, and the fall goes on as
+  in F2.
+- **LIMP and CALIB.** `kilo posture limp`, lay Kilo on its side: nothing.
+
+## F4. Head
+
+Stop the daemon (Ctrl-C in terminal A) or keep it; either way:
+
+```sh
+kilo look 30 0 --posture stand --for 3     # pans to 30° at 120°/s (≈0.25 s), holds 3 s, back
+kilo look -40 -20 --tail 30 --speed 0 --for 3    # at the safety slew (500°/s): a quick snap
+kilo look 0 30 --for 3                     # tilt up (the limit is 45°)
+kilo look 100 0 --for 5                    # Ctrl-C after 1 s: released at once, crossfade back
+```
+
+Expected: the head moves at the asked speed, stays put while the command
+runs (the goal is refreshed at 5 Hz), and returns to the posture's head
+smoothly (a 0.2 s crossfade) when the command ends. In `kilo monitor`
+(through the daemon): head owner `PI_HOLD`, flag `head_held`. With
+`kilo balance on` running in another terminal through the daemon, tilt the
+board: the legs correct, the held head does not move.
+
+## What to report (fall and head)
+
+- F2: the table, and the video of one fall per side.
+- F3: the four outcomes.
+- F4: whether the speeds and the return look right, and any buzzing at the
+  hold.
+- `kilo status` at the end: overruns, max tick, **stack free**.
