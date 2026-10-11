@@ -10,9 +10,10 @@
 //               add the balance correction, except on held head joints
 //   4. safety = clamp to joint limits, slew-limit, convert to PCA counts
 //
-// IDLE (the built-in postures), TRICK (the keyframe player, core/keyframe.h)
-// and REFLEX (battery, link watchdog, warm-boot hold, fall) exist; GAIT is a hook
-// that never claims a joint yet (P2); see arbiter.cpp.
+// IDLE (the built-in postures and STANCE), GAIT (the gait generator, core/
+// gait.h: legs 8-15 while it runs or stops, plus head bob and tail wag on
+// IDLE's head), TRICK (the keyframe player, core/keyframe.h) and REFLEX
+// (battery, link watchdog, warm-boot hold, fall).
 //
 // Crossfades start from the joint's last OUTPUT (after balance, limits and
 // slew), so a hand-over never jumps even when the previous owner's angle was
@@ -24,6 +25,7 @@
 #define KILO_CORE_ARBITER_H
 #include <stdint.h>
 #include "balance.h"
+#include "gait.h"
 #include "joints.h"
 #include "keyframe.h"
 
@@ -101,8 +103,9 @@ inline bool arbiter_idle_moving(const Arbiter& a) { return a.idle.i < a.idle.n; 
 // LIMP joints full-off). bal: the balance corrections to add to joints owned
 // by a joint-space owner (null = none). The caller decides when balance runs
 // (body.cpp); this only applies the current corrections. kf: the keyframe
-// player (null = no TRICK owner); call kf_step() first.
+// player (null = no TRICK owner); call kf_step() first. g: the gait (null =
+// no GAIT owner, and STANCE has no leg angles); call gait_legs() first.
 void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal,
-                 const Keyframe* kf);
+                 const Keyframe* kf, const Gait* g = 0);
 
 #endif

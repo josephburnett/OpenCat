@@ -40,7 +40,12 @@ static int16_t sin_q1(uint16_t x) {
   return (int16_t)(a + (((int16_t)(b - a) * (int16_t)f + 8) >> 4));
 }
 
+#ifndef __AVR__
+FxOps g_fx_ops;
+#endif
+
 KILO_NOINLINE int16_t fx_sin(int16_t a16) {
+  FX_OP(sin);
   // Reduce to [0, 5760). A loop beats '%' on AVR (no 16-bit divide), and
   // int16 a16 spans at most +-2048 deg, so it runs at most 6 times.
   int16_t r = a16;
@@ -65,6 +70,7 @@ int16_t fx_cos(int16_t a16) {
 }
 
 int16_t fx_atan2(int32_t y, int32_t x) {
+  FX_OP(atan2);
   if (x == 0 && y == 0) return 0;
   // Absolute values as unsigned so that -2^31 is representable.
   uint32_t ax = x < 0 ? (uint32_t)0 - (uint32_t)x : (uint32_t)x;
@@ -93,6 +99,7 @@ int16_t fx_atan2(int32_t y, int32_t x) {
 }
 
 uint16_t fx_isqrt32(uint32_t n) {
+  FX_OP(isqrt);
   // Digit-by-digit square root in base 4: each step decides one result bit.
   uint32_t res = 0;
   uint32_t one = 1UL << 30;
