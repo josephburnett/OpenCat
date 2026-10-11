@@ -62,6 +62,32 @@ def test_ready_telemetry_and_posture(rig):
     client.balance()
     assert client.link.wait_until(lambda: vb.posture == "STAND", 1)
     assert client.link.goals()["SET_POSTURE"].fields["flags"] == 1
+    assert client.link.wait_until(lambda: client.state.snapshot()["balance"], 1)
+
+
+def test_balance_goal_and_flag(rig):
+    client, vb = rig()
+    client.wait_ready(2)
+    client.stand()
+    assert client.link.wait_until(lambda: vb.posture == "STAND", 1)
+    keep_alive(client.link, 0.2)
+    assert not client.state.snapshot()["balance"]
+    # SET_BALANCE enable turns it on without the posture flag; gains go live.
+    f = client.set_balance(True, kp=0.75, kd_s=0.05, deadband_deg=3, clamp_deg=10)
+    assert f == {"enable": 1, "kp_q8": 192, "kd_ms": 50, "deadband_deg": 3, "max_corr_deg": 10}
+    assert client.link.wait_until(lambda: vb.balance == f, 1)
+    assert client.link.wait_until(lambda: "balance_active" in client.state.flags, 1)
+    # Not in REST (lying down), back on in SIT.
+    client.rest()
+    assert client.link.wait_until(lambda: "balance_active" not in client.state.flags, 1)
+    client.sit()
+    assert client.link.wait_until(lambda: "balance_active" in client.state.flags, 1)
+    client.set_balance(False)
+    assert client.link.wait_until(lambda: "balance_active" not in client.state.flags, 1)
+    with pytest.raises(ValueError):
+        client.set_balance(True, kp=1.0)
+    with pytest.raises(ValueError):
+        client.set_balance(True, clamp_deg=31)
 
 
 def test_every_client_command(rig):
@@ -267,11 +293,16 @@ def test_contract_d_goals():
     assert s.send("SET_POSTURE", epoch=9, posture=P.Posture.SIT) == []
     assert s.send("SET_POSTURE", epoch=9, posture=P.Posture.REST) == []  # REST is never stale
     assert s.vb.posture == "REST"
-    for name, kw in (("SET_GAIT", {}), ("SET_HEAD", {}), ("SET_BODY_POSE", {}), ("SET_BALANCE", {}),
-                     ("SET_EYES", {})):
+    for name, kw in (("SET_GAIT", {}), ("SET_HEAD", {}), ("SET_BODY_POSE", {}), ("SET_EYES", {})):
         cls = P.MESSAGES[M[name]]
         assert events(s.raw(cls.ID, cls(**kw).pack())) == [refused(cls.ID, R.UNKNOWN_TYPE)], name
     assert s.send("BEEP", notes=[P.Note(note=12, dur_10ms=10)]) == []
+    # SET_BALANCE (P1): accepted silently, BAD_ARG out of range, never stale.
+    assert s.send("SET_BALANCE", enable=1, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=15) == []
+    assert s.vb.balance["enable"] == 1
+    assert events(s.send("SET_BALANCE", enable=1, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=31)) == [
+        refused(M.SET_BALANCE, R.BAD_ARG)]
+    assert s.vb.balance["max_corr_deg"] == 15
     s.now += 1.1
     s.vb.batt_level = P.BatteryLevel.LOW
     assert events(s.send("SET_POSTURE", epoch=0, posture=P.Posture.SIT)) == [refused(M.SET_POSTURE, R.LOW_BATT)]

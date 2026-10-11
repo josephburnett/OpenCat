@@ -26,6 +26,13 @@ POSTURE_CHOICES = ("limp", "rest", "stand", "sit", "balance", "stance", "calib",
 
 CAL_LIMIT_A16 = 400  # CAL_SET offset_a16 range: ±25°
 
+# SET_BALANCE defaults and limits (body/src/core/balance.h, docs §3f).
+BALANCE_KP = 0.5        # Kp, sent as kp_q8 (Q8, 0..255/256)
+BALANCE_KD_S = 0.03     # Kd in seconds, sent as kd_ms (0..255 ms)
+BALANCE_DEADBAND = 2    # degrees
+BALANCE_CLAMP = 15      # degrees
+BALANCE_MAX_DEG = 30    # dead band and clamp limit
+
 
 class BodyClient:
     def __init__(self, link: SerialLink):
@@ -119,6 +126,29 @@ class BodyClient:
 
     def balance(self) -> None:
         self.posture("balance")
+
+    def set_balance(self, enable: bool, kp: float = BALANCE_KP, kd_s: float = BALANCE_KD_S,
+                    deadband_deg: float = BALANCE_DEADBAND, clamp_deg: float = BALANCE_CLAMP) -> dict[str, int]:
+        """Latch SET_BALANCE (goal, no epoch): enable and the gains, live, not persisted.
+
+        enable=True balances SIT and STAND even without the posture flag;
+        enable=False leaves only the flag (``posture("balance")``). Returns
+        the wire fields. Raises ValueError outside the wire ranges.
+        """
+        kp_q8 = int(round(kp * 256))
+        kd_ms = int(round(kd_s * 1000))
+        db, cl = int(round(deadband_deg)), int(round(clamp_deg))
+        if not 0 <= kp_q8 <= 255:
+            raise ValueError("Kp must be 0..0.996 (Q8)")
+        if not 0 <= kd_ms <= 255:
+            raise ValueError("Kd must be 0..0.255 s")
+        if not 0 <= db <= BALANCE_MAX_DEG or not 0 <= cl <= BALANCE_MAX_DEG:
+            raise ValueError(f"dead band and clamp must be 0..{BALANCE_MAX_DEG}°")
+        fields = {"enable": 1 if enable else 0, "kp_q8": kp_q8, "kd_ms": kd_ms, "deadband_deg": db,
+                  "max_corr_deg": cl}
+        self._check_drivable()
+        self.link.set_goal("SET_BALANCE", **fields)
+        return fields
 
     def release(self) -> None:
         """Stop asserting a posture (the body keeps what it is doing)."""

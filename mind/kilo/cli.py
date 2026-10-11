@@ -3,6 +3,7 @@
     kilo [--port P] [--log | --log-file FILE] [-v] status [--json]
     kilo monitor [--rate HZ] [--duration S] [--passive]
     kilo posture {limp,rest,stand,sit,balance,...} [--transition TICKS] [--for S [--then-watch T]]
+    kilo balance on|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand|sit] [--for S]
     kilo cal show | set JOINT DEGREES | save | revert
     kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none]
@@ -37,7 +38,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from kilo import __version__
-from kilo.body.client import POSTURE_CHOICES, BodyClient, ProtocolMismatch
+from kilo.body.client import (BALANCE_CLAMP, BALANCE_DEADBAND, BALANCE_KD_S, BALANCE_KP, POSTURE_CHOICES,
+                              BodyClient, ProtocolMismatch)
 from kilo.link import consts
 from kilo.link.messages import fields_of
 from kilo.link.ports import detect_port
@@ -85,6 +87,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="after the --for hold, stop sending at once (no heartbeat, no goal "
                         "refresh) and print the passive timeline for T seconds, relative to the "
                         "last frame sent (the watchdog timeline, H5)")
+
+    s = sub.add_parser("balance", help="balance on/off with live gains (SET_BALANCE), holding a posture "
+                                        "until Ctrl-C or --for; prints pitch/roll once a second")
+    s.add_argument("state", choices=("on", "off"))
+    s.add_argument("--kp", type=float, default=BALANCE_KP, help=f"proportional gain (default {BALANCE_KP})")
+    s.add_argument("--kd", type=float, default=BALANCE_KD_S, metavar="S",
+                   help=f"rate gain in seconds (default {BALANCE_KD_S})")
+    s.add_argument("--deadband", type=float, default=BALANCE_DEADBAND, metavar="DEG",
+                   help=f"dead band in degrees (default {BALANCE_DEADBAND})")
+    s.add_argument("--clamp", type=float, default=BALANCE_CLAMP, metavar="DEG",
+                   help=f"correction limit in degrees (default {BALANCE_CLAMP})")
+    s.add_argument("--posture", choices=("stand", "sit"), default="stand", help="posture to hold (default stand)")
+    s.add_argument("--transition", type=int, default=0, metavar="TICKS",
+                   help="transition length in 20 ms ticks (0 = body default, 25)")
+    s.add_argument("--for", dest="hold", type=float, default=None, metavar="S",
+                   help="hold for S seconds, then exit")
 
     s = sub.add_parser("cal", help="joint calibration")
     cs = s.add_subparsers(dest="cal_cmd", metavar="ACTION")
@@ -209,6 +227,7 @@ def cmd_status(args: argparse.Namespace, client: BodyClient) -> int:
           f"flags {','.join(snap['flags']) or '-'}")
     print(f"attitude    pitch {_fmt(snap['pitch_deg'])}°  roll {_fmt(snap['roll_deg'])}°  "
           f"upright={snap['upright']}")
+    print(f"balance     {'ACTIVE' if snap['balance'] else 'off'}")
     print(f"battery     {snap['batt_mv']} mV  ({_fmt(snap['battery_pct'], '{:.0f}')}%)")
     print(f"distance    {_fmt(snap['dist_mm'], '{:.0f}')} mm")
     bs = snap["body_stats"]
@@ -233,6 +252,7 @@ def render_monitor(snap: dict[str, Any]) -> str:
                  f"rx_err {snap['rx_err']}  last_rx_seq {snap['last_rx_seq']}"),
         ("mode", f"{snap['mode']}  owners {snap['owners']}  epoch {snap['epoch']}"),
         ("flags", ",".join(snap["flags"]) or "-"),
+        ("balance", "ACTIVE" if snap["balance"] else "off"),
         ("pitch/roll", f"{_fmt(snap['pitch_deg'])}° {_fmt(snap['roll_deg'])}°  "
                        f"upright={snap['upright']} fallen={snap['fallen']} moving={snap['moving']}"),
         ("rates", " ".join(_fmt(r) for r in rates) + " °/s"),
@@ -296,7 +316,7 @@ def cmd_monitor(args: argparse.Namespace, client: BodyClient) -> int:
             elif time.monotonic() - last_line >= 1.0:
                 last_line = time.monotonic()
                 print(json.dumps({k: snap[k] for k in ("tick", "mode", "epoch", "pitch_deg",
-                                                      "roll_deg", "batt_mv", "alive")}), flush=True)
+                                                      "roll_deg", "balance", "batt_mv", "alive")}), flush=True)
             time.sleep(period)
     except KeyboardInterrupt:
         pass
@@ -336,6 +356,33 @@ def cmd_posture(args: argparse.Namespace, client: BodyClient) -> int:
               + (f", last HEARTBEAT at {_wall(hb[1])} (t={hb[0] - t0:+.2f})" if hb else "")
               + f"; watching {args.then_watch:g} s", flush=True)
     return watch_timeline(client, t0, args.then_watch)
+
+
+def cmd_balance(args: argparse.Namespace, client: BodyClient) -> int:
+    on = args.state == "on"
+    client.wait_ready(args.timeout)
+    f = client.set_balance(on, kp=args.kp, kd_s=args.kd, deadband_deg=args.deadband, clamp_deg=args.clamp)
+    client.posture(args.posture, transition_ticks=args.transition, balance=on)
+    print(f"balance {args.state}: {args.posture}, Kp {f['kp_q8'] / 256:.3f}  Kd {f['kd_ms'] / 1000:.3f} s  "
+          f"dead band {f['deadband_deg']}°  clamp {f['max_corr_deg']}°"
+          + (f"; holding {args.hold:g} s" if args.hold else "; Ctrl-C to release"), flush=True)
+    t0 = time.monotonic()
+    end = None if args.hold is None else t0 + args.hold
+    try:
+        while end is None or time.monotonic() < end:
+            client.spin(1.0)
+            if "SET_POSTURE" not in client.link.goals():
+                st = client.state
+                print(f"posture goal cleared by the body (mode {st.mode}, epoch {st.epoch}); exiting")
+                return EXIT_ERR
+            s = client.state.snapshot()
+            rates = s["rates_dps"] or (None, None, None)
+            print(f"t={time.monotonic() - t0:5.1f}s  pitch {_fmt(s['pitch_deg'])}°  roll {_fmt(s['roll_deg'])}°  "
+                  f"rate p/r {_fmt(rates[0])} {_fmt(rates[1])} °/s  balance "
+                  f"{'ACTIVE' if s['balance'] else 'off'}  mode {s['mode']}", flush=True)
+    except KeyboardInterrupt:
+        pass
+    return EXIT_OK
 
 
 def cmd_cal(args: argparse.Namespace, client: BodyClient) -> int:
@@ -482,7 +529,7 @@ def cmd_vbody(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-LINK_COMMANDS = {"status": cmd_status, "monitor": cmd_monitor, "posture": cmd_posture,
+LINK_COMMANDS = {"status": cmd_status, "monitor": cmd_monitor, "posture": cmd_posture, "balance": cmd_balance,
                  "cal": cmd_cal, "param": cmd_param, "pca": cmd_pca, "eeprom": cmd_eeprom}
 
 

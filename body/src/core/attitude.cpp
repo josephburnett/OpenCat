@@ -50,10 +50,12 @@ bool attitude_from_packet(const uint8_t* pkt, Attitude& out) {
   int16_t q[4];
   attitude_quat_q14(pkt, q);
   if (!attitude_from_quat(q, out)) return false;
-  // Body rates. Signs follow from the gravity formulas above (estimated, to
-  // be confirmed on Kilo in P1): a positive rotation about the sensor's x
-  // axis raises gy, so roll rate = +gx_gyro; a positive rotation about y
-  // lowers gx, so pitch rate = -gy_gyro.
+  // Body rates = d(roll)/dt and d(pitch)/dt of the angles above, so the
+  // balance Kd term has the same sign as its Kp term. A positive rotation
+  // about the sensor's x axis raises gy, so roll rate = +gx_gyro; a positive
+  // rotation about y lowers gx, so pitch rate = -gy_gyro. Verified on the
+  // host against the quaternion kinematics (test_attitude.cpp "rate signs");
+  // valid near level (cross-coupling grows with tilt, ~6% at 20 deg).
   out.rate_roll = gyro_to_a16s(be16(pkt + 22));
   out.rate_pitch = (int16_t)-gyro_to_a16s(be16(pkt + 24));
   out.rate_yaw = gyro_to_a16s(be16(pkt + 26));

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "arbiter.h"
 #include "attitude.h"
+#include "balance.h"
 #include "battery.h"
 #include "config.h"
 #include "events.h"
@@ -67,7 +68,8 @@ struct Body {
   uint8_t holder;  // ReflexHolder
   uint16_t batt_limp_timer;
   uint8_t hold_ticks;
-  uint8_t balance_req;  // SET_POSTURE flags bit 0 (used from P1)
+  uint8_t balance_req;  // SET_POSTURE flags bit 0; cleared by an epoch bump
+  Balance bal;          // the balance layer: SET_BALANCE settings + controller
   // IMU health
   uint8_t imu_fault;
   uint8_t imu_stale_run, imu_err_run;
@@ -86,6 +88,13 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]);
 void body_link_frame(Body& b);
 // SET_POSTURE goal.
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags);
+// SET_BALANCE goal: enable, Kp (Q8), Kd (ms), dead band and clamp (deg).
+// Live, not persisted. BAD_ARG if enable > 1 or a band/clamp > 30 deg.
+GoalResult body_goal_balance(Body& b, const uint8_t p[5]);
+// Balance runs this tick: requested (posture flag or SET_BALANCE enable),
+// eligible (doc §3c: IDLE SIT or STAND, settled, no REFLEX) and no IMU_FAULT.
+// TELEMETRY flags bit 0.
+inline bool body_balance_active(const Body& b) { return b.bal.active; }
 // IMU re-initialised (hal finished a runtime DMP upload while LIMP).
 void body_imu_recovered(Body& b);
 // TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 7 LOW_BATT, 9 LINK_LOST.

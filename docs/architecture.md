@@ -40,7 +40,7 @@ operations notes and test tables. The main body links to them.
 | Stale goals | A goal epoch byte. Reflex takeovers and watchdog trips bump it, and goals carrying an old epoch are refused. | 3c, 4 |
 | Gait | Parametric phase oscillator, per-leg planar 2-link IK, fixed point. | 3d |
 | Tricks | 32 × 14 B keyframes in RAM, int8 degrees, cosine or linear easing, uploaded by the Pi. | 3e |
-| Balance | `corr = −(Kp·e + Kd·rate)` at 50 Hz. Geometric (through IK) for gait and stance, legacy joint gains for joint-space owners. | 3f |
+| Balance | `corr = −(Kp·e + Kd·rate)` at 50 Hz. Geometric (through IK) for gait and stance, legacy joint gains for joint-space owners (P1: implemented for IDLE SIT and STAND). | 3f |
 | Attitude | Integer pitch/roll from the DMP quaternion, keeping the legacy pitch reflection. The DMP is dropped in P5. | 3f |
 | Watchdog | Armed by the first valid frame from the Pi. Two stages: stop motion at 0.5 s, REST at 1.5 s, LIMP 10 s later. | 3g |
 | Protocol | COBS + CRC-16/CCITT-FALSE at 250000 baud. Goals unacked and refreshed at 5 Hz; queries answered by their data reply; other commands acked and de-duplicated. | 4 |
@@ -389,11 +389,22 @@ Layers on top of the base pose:
      tail wag.
    - The hold is released by `mode=0`, by `HEAD_HOLD_MS` (2 s) without a
      refresh, or by any epoch bump.
-2. **Balance layer** (3f):
-   - For GAIT and STANCE, corrections enter the IK as body pitch/roll.
+2. **Balance layer** (3f, `core/balance.*`):
+   - For GAIT and STANCE, corrections enter the IK as body pitch/roll (P2).
    - For joint-space owners (built-in postures, tricks with `BALANCE`), they
-     pass through the per-joint gain table.
-   - Off for REFLEX, CALIB, LIMP and when `IMU_FAULT` is set.
+     pass through the per-joint gain table and are added to the joint's base
+     angle after the crossfade, before the safety stage.
+   - Requested by `SET_POSTURE` flags bit 0 (cleared by an epoch bump, so
+     the mind re-asserts it) or by `SET_BALANCE enable=1`.
+   - As implemented in P1 (`body_tick`): runs only for the IDLE owner in SIT
+     or STAND, once the posture move has settled. Off for REFLEX (fall,
+     battery, watchdog, warm-boot hold), LIMP, CALIB, ZERO and REST (lying
+     on the belly there is nothing to balance) and during an IDLE posture
+     move: there the corrections are zeroed at once, which never jumps
+     because the reflex or the new mover starts from the corrected output.
+     A request turned off or `IMU_FAULT` lets them decay through the
+     low-pass and the 1°/tick slew instead.
+   - TELEMETRY flags bit 0 (`BALANCE_ACTIVE`) reports that it ran this tick.
 3. **Safety stage** (always applied):
    - Clamp to joint limits.
    - Slew-limit to `SLEW_MAX` (10°/tick ≈ 500°/s, about G41 no-load speed
@@ -573,32 +584,129 @@ proportional-only correction with a 5° per-update slew and dead bands. It is
 the starting point for the joint-space gain table.
 
 **Controller** (per axis, 50 Hz; the DMP produces ≈100 Hz and the newest
-packet is used):
+packet is used). Implemented in P1 as `body/src/core/balance.{h,cpp}`, fixed
+point throughout:
 
 ```
 e     = deadband(measured − ref, DB)            DB default 2°
-u     = Kp·e + Kd·rate                          rate = DMP raw gyro on that axis (a16/s)
+u     = Kp·e + Kd·rate                          rate = DMP gyro on that axis (a16/s)
 corr  = −u                                      negative feedback: nose too high → lower it
 corr  = clamp(slew(lowpass(corr, α=1/4), 1°/tick), ±15°)
 ```
 
 - `ref` is 0 for GAIT and STANCE, and the posture's or trick's expected
-  pitch/roll otherwise (for example `sit` has −30° pitch).
-- Starting gains **(est.)**: Kp = 0.5, Kd = 0.03 s.
+  pitch/roll otherwise (table below; `sit` expects +30°, nose up).
+- Defaults **(est.)**: Kp = 0.5 (`kp_q8` 128), Kd = 0.03 s (`kd_ms` 30),
+  DB 2°, clamp 15°. Kp is Q8, so 255/256 is the largest; Kd·rate is computed
+  as `rate·kd_ms·131 >> 17`.
+- `−u` is saturated at ±clamp before the low-pass, so the filter state never
+  holds more than the clamp lets out. The low-pass keeps 4 extra fraction
+  bits and settles exactly; a decaying correction reaches exactly 0.
 - There is no integral term: a sustained slope should change the pose, and an
   integrator would wind up.
 - `corr_pitch` and `corr_roll` enter the pose terms in 3d, where a positive
   value raises the nose or left side. If Kilo is nose-high (`e > 0`), `corr` is
   negative and the front legs shorten.
-- Joint-space owners map `corr` through per-joint gains, initialised from the
-  legacy `adaptiveParameterArray` with the same sign convention.
-- Everything is tunable live (`SET_BALANCE`, `PARAM_SET`), and telemetry streams
-  pitch, roll and rates at 50 Hz for step-response experiments.
+- Where it runs, and when it is off, is in 3c (layer 2).
+- Tuning is live through `SET_BALANCE` (enable, Kp, Kd, dead band, clamp;
+  not persisted; dead band and clamp ≤ 30°, else `GOAL_REFUSED BAD_ARG`).
+  `kilo balance on|off [--kp X] [--kd S] [--deadband D] [--clamp C]` sends it
+  and holds the posture. There are no balance `PARAM_SET` ids yet (3 param
+  slots are free if persisted defaults are wanted). Telemetry streams pitch,
+  roll and rates at 25 Hz by default (`TELEM_DIV`) for step responses.
 
-**Sign test.** A host closed-loop test runs a toy plant: body pitch responds to
-`corr_pitch` with a first-order lag, plus a step disturbance. It asserts that
-the error shrinks and that flipping any sign makes it grow. The same test runs
-for roll.
+**Proportional-only limits H13.** With a 1:1 leg-to-body response the
+steady error after a tilt d is (d + Kp·DB)/(1 + Kp): 7.3° for d = 10° at
+Kp 0.5, and 5.5° at the largest `kp_q8` (255/256). H13 asks for 3°. If the
+hardware confirms that, either the leg response per degree of `corr` is
+larger than 1 (the legacy gains were never calibrated to it), or `kp_q8`
+needs a coarser scale (Q6 would allow Kp up to 4) or the gain table a
+global multiplier. Measured in `docs/p1-hardware-test.md` step 5.
+
+**Joint-space mapping** (`balance_map`). The per-joint gains are the legacy
+`adaptiveParameterArray` {roll, pitch} factors in PROGMEM, which are also
+byte-for-byte Kilo's legacy EEPROM `ADAPT_PARAM` @128; units are joint degrees
+per 57.3° of tilt:
+
+| Joint | pan | tilt | tail | shoulders LF, RF | shoulders RB, LB | knees LF, RF | knees RB, LB |
+|---|---|---|---|---|---|---|---|
+| roll factor | −60 | −60 | −120 | 60 | −60 | −90 | 90 |
+| pitch factor | 0 | −60 | 0 | 30 | 30 | −45 | −45 |
+
+They are applied exactly as legacy `adjust()` applied them to a posture
+(Appendix C3), with legacy's deviations expressed through the corrections
+(`dR = −corr_roll`, `dP = −corr_pitch`, each converted to the legacy sign
+convention below):
+
+```
+roll term  = |dR|·rF·(1.2 on one side)    tilt and the legs: a symmetric crouch, 1.2× on one side
+           =  dR ·rF                      pan and tail
+joint     += (roll term − pF·dP) / 57.3   added to the base angle (legacy: frame + adjust)
+```
+
+So 1° of `corr_pitch` moves the knees 0.79°, shoulders 0.52° and head tilt
+1.05°; 1° of `corr_roll` crouches every leg (shoulders 1.05°, knees 1.57°)
+and the lowering side's legs 1.2× as far, so only a fifth of the roll gain is
+differential. With Kp at its maximum and Kd 0 the controller reproduces
+legacy `adjust()` (no damper) within 0.16° for every joint (host test). In
+physical terms, checked against the posture tables: +`corr_pitch` moves the
+knees and back shoulders from STAND toward SIT (the back folds, the front
+extends: nose up), and +`corr_roll` crouches the right legs further than the
+left (left side up).
+
+**Expected attitude per posture** (the balance reference), from the legacy
+skill headers in `src/InstinctNybble.h` (frame count, expected roll, expected
+pitch, angle ratio), in Kilo's convention:
+
+| Posture | Header roll, pitch (legacy) | Kilo `ref` roll, pitch | Balance |
+|---|---|---|---|
+| `rest` | 0, 0 | 0°, 0° | off (lying down) |
+| `sit` | 0, −30 | 0°, **+30°** (nose up) | on |
+| `up` (STAND, and `balance`) | 0, 0 | 0°, 0° | on |
+| `str` (stretch, a P1 trick) | 0, 15 | 0°, **−15°** (nose down) | with the trick's `BALANCE` flag |
+| `calib`, `zero` | 0, 0 | 0°, 0° | off |
+
+**Sign test.** Host closed-loop tests (`body/test/test_balance.cpp`) run a
+toy plant: body tilt = disturbance + x, where x follows the correction with a
+first-order lag (τ 0.15 s). A 10° step settles at 7.3° = (10 + Kp·DB)/(1 + Kp)
+with the defaults; flipping the actuation or the measurement sign drives it
+to 18°, and with a large rate gain (Kd 200 ms > τ) the flipped gyro sign
+oscillates (12° peak to peak) where the right sign settles. The same loop
+closed through `body_tick`, the arbiter and the joint outputs (the plant reads
+the knees) settles at 7.3° pitch / 7.4° roll and runs away to ≈18° with the
+sensor flipped. Both axes.
+
+**Sign conventions (verified in P1).**
+- **Kilo's attitude is the legacy `ypr`, unchanged.** Legacy `imu.h` reads
+  `dmpGetQuaternion(Quaternion*)` (int16/16384), `dmpGetGravity`,
+  `dmpGetYawPitchRoll` (the V6_12 active branch, with the reflection) and
+  multiplies by `degPerRad`; nothing swaps or negates `ypr` afterwards, and
+  `skill.h` uses `ypr[1]` as pitch and `ypr[2]` as roll. The A/B host test
+  (`test_attitude.cpp`) runs that path in float32 against the integer
+  firmware over 5000 random orientations within ±60° (any yaw): max error
+  0.038° pitch, 0.038° roll (the §7 criterion is 1°). TELEMETRY `pitch`/`roll`
+  are therefore exactly what the legacy firmware's `ypr` would read.
+- **On Kilo nose-up is +pitch and left-side-up is +roll** (P0, by tilting;
+  re-checked as step 1 of `docs/p1-hardware-test.md`).
+- **Rates.** `rate_roll = +gyro_x`, `rate_pitch = −gyro_y` are the time
+  derivatives of that roll and pitch: checked on the host against the
+  quaternion kinematics (`q' = q·(1, ω dt/2)`, body-frame gyro) over 2000
+  random orientations within 20° of level (6% worst error, from axis
+  cross-coupling at tilt). So Kd always damps in the direction Kp pushes.
+- **The legacy skills were written for nose-down = +pitch.** Every Nybble
+  skill header agrees: `sit` (nose up) expects −30, the hind-leg `stand` −60,
+  `lifted` −75; `buttUp` and `str` (nose down) +15, `dropped` +75. Legacy
+  `adjust()` agrees too: on +pitch deviation it moves the legs toward SIT,
+  which raises the nose, i.e. it corrects a nose-down error. On a body that
+  reads nose-up as +pitch both would be wrong-signed, so the firmware
+  negates legacy pitch numbers (`LEGACY_PITCH_SIGN = −1` in `core/posture.h`,
+  used for the reference and the gains) and keeps roll (`LEGACY_ROLL_SIGN =
+  +1`: legacy's extra crouch on the side of a positive roll deviation lowers
+  the raised left side). If the hardware test shows the legs answering the
+  wrong way, flip those two constants: they are the only place the
+  convention lives. (A right-handed sensor cannot have nose-down +pitch and
+  left-up +roll at once, so on stock legacy one of the two axes was
+  wrong-signed: the weak 20% roll differential is the likelier one.)
 
 **Attitude without float.** The DMP quaternion is int32 Q30. The firmware takes
 the high 16 bits as Q14:
@@ -709,7 +817,7 @@ Appendix D.
 | Phase | Flash ceiling (`body/tools/size_check.sh FLASH_MAX`) | Globals ceiling |
 |---|---|---|
 | P0 (incl. fx + integer attitude) | 20 KB (20480 B) | 1540 B |
-| P1 | 22 KB | 1540 B |
+| P1 | 22 KB (22528 B, the `size_check.sh` default since the balance layer) | 1540 B |
 | P2 | 24 KB | 1540 B |
 | P5 | P2 − 3.5 KB (DMP removed) | 1540 B |
 
@@ -719,6 +827,10 @@ all P0 messages):** 18164 B flash, 1061 B globals, over the P0 ceiling by
 ≈4.5 KB, against the 2.3 KB estimated in Appendix D. Turning ultrasonic and
 buzzer off saves ≈610 B, `-mrelax -mcall-prologues` ≈430 B; neither closes
 the gap. The ceilings are the owner's decision (§8).
+
+**Measured with the P1 balance layer:** 19544 B flash (+1380 B), 1075 B
+globals (+14 B for the `Balance` state). `balance_axis_step` is the largest
+new function (468 B, plus 116 B for its rounding helper; the mapping is inlined into the tick).
 
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
 use is reported through a painted canary (`stack_free_min` in STATS). RAM is
@@ -808,7 +920,7 @@ data reply (queries) or an `ACK(seq, type, status)`. Status values:
   LOW_BATT 7, FALLEN 8, UNCALIBRATED 11 (STAND while the config is
   DEFAULTED), or UNKNOWN_TYPE 4 for a goal this firmware does not implement
   yet (in P0: `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE`, `SET_BALANCE`,
-  `SET_EYES`).
+  `SET_EYES`; `SET_BALANCE` is implemented from P1).
   Telemetry confirms what took effect: `mode`, owners, `epoch`, `last_rx_seq`.
 - **Queries** (`HELLO_REQ`, `PING`, `STATS_REQ`, `PCA_READ`, `CAL_GET`,
   `PARAM_GET`, `EEPROM_READ`; `query = true` in the spec) are answered by their
@@ -1187,6 +1299,15 @@ and `src/` are deleted after P2 is accepted.
 - **Acceptance:** H7, H9 (looping trick), H11-H13. Each first-version trick
   matches the old firmware side by side, in the owner's judgement. Attitude
   agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 22 KB.
+- **Status:**
+  - Joint-space balance: done on the host (3c layer 2, 3f): controller,
+    legacy gain table, gating, `SET_BALANCE`, TELEMETRY `BALANCE_ACTIVE`,
+    `kilo balance`, the vbody mirror. Hardware validation:
+    `docs/p1-hardware-test.md` (H13 and the sign check).
+  - Attitude A/B: the host half passes (0.038° max over 5000 orientations
+    within ±60°, against the legacy float path); a static side-by-side on
+    Kilo is in the P1 hardware test.
+  - Flash 19544 B of 22528 B.
 
 **P2: gait + IK.**
 - **Deliverables:** measured geometry; IK, gait, STANCE, geometric balance, bob
@@ -1421,6 +1542,15 @@ it. Three independent clues:
 - **Walking:** leg corrections are halved (`POSTURE_WALKING_FACTOR 0.5`).
 - **Damping:** the change per update is limited to ±5° (`ADJUSTMENT_DAMPER`).
   This is a slew limit, not a derivative term.
+- **Application:** `skill.h` writes `frame + adjust` (`calibratedPWM(j, duty +
+  adjust(j))`); `reaction.h`'s `currentAng − currentAdjust` only undoes that
+  to recover the unadjusted frame. The new firmware adds its mapping the same
+  way (3f).
+- **Dead band quirk:** the band is subtracted with the sign of the raw `ypr`,
+  not of the deviation; the two differ only when the expected angle is non-zero
+  (`sit`). The new firmware uses the sign of the deviation.
+- **Sign convention:** the skill headers and these gains assume nose-down =
+  +pitch; see 3f "Sign conventions".
 - **Rate:** the IMU is read on every 3rd joint write, so the rate depends on
   loop speed.
 - It is proportional-only, in joint space.
@@ -1703,7 +1833,7 @@ mind/                     the Python mind (pip install -e mind)
     *daemon.py  tricks/  behaviour/  perception/*
   tests/                  pytest: codec, link rules, state, CLI, flash, vbody,
                           cross-check vs the C dispatch, CLI end to end on a pty
-docs/                     architecture.md  raspberry-pi.md  p0-hardware-test.md
+docs/                     architecture.md  raspberry-pi.md  p0-hardware-test.md  p1-hardware-test.md
 OpenCat.ino, src/         the legacy firmware, until the P2 cutover
 ```
 
@@ -1716,7 +1846,8 @@ opens the port directly if the daemon is not running.
 | Command | Purpose |
 |---|---|
 | `kilo status`, `kilo monitor` | HELLO, stats; live curses telemetry |
-| `kilo posture rest\|sit\|stand\|limp` | Postures |
+| `kilo posture rest\|sit\|stand\|limp\|balance` | Postures (`balance` = STAND + flag) |
+| `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
 | `kilo walk --pattern trot --stride 30 --turn 0 --period 500 [--keys]`, `kilo stop` | Gait |
 | `kilo look PAN TILT [--tail T]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head, eyes, sound |
 | `kilo trick list\|play NAME [--mirror] [--speed 1.5]\|import-legacy FILE\|edit NAME` | Tricks; `edit` jogs joints live and captures frames |
@@ -1742,9 +1873,9 @@ opens the port directly if the daemon is not running.
 | gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change |
 | keyframe | Tick-exact dur/hold; easing endpoints; −128; loops; mirror (incl. roll ref); speed |
 | arbiter | Per-joint priority; crossfade length/monotonicity; head and balance gating; epoch refusal and LIMP/REST exemption |
-| balance | Toy-plant closed loop converges; every sign flip diverges; dead band; saturation; slew |
+| balance | Toy-plant closed loop converges; every sign flip diverges; dead band; saturation; slew. Gain table = legacy `adaptiveParameterArray` = Kilo's EEPROM; mapping vs legacy `adjust()` ≤ 0.07° (grid), controller vs legacy ≤ 1° (0.16°); physical direction vs the posture tables; gating by owner, posture, request, epoch bump, IMU_FAULT |
 | reflex | Fall 6-tick timing, hysteresis, retries, mirror by roll sign, per-reflex LIMP timers; battery sag spikes don't trip, hysteresis clears; watchdog 0.5 / 1.5 s stages; epoch bump on each |
-| attitude | vs float reference incl. the gz<0 reflection (≤ 0.1°) |
+| attitude | vs float reference incl. the gz<0 reflection (≤ 0.1°); A/B vs the legacy float32 `ypr` path within ±60° (≤ 1°; 0.038°); gyro rates = d/dt of pitch/roll (sign, ≤ 10%) |
 | codec | protocol/vectors both ways; 10⁶-iteration fuzz under ASan; resync on next 0x00; ACK de-dup |
 
 **H-HIL. On Kilo**

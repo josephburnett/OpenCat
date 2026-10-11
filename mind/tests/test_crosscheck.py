@@ -195,6 +195,23 @@ def test_goals(harness):
     ])
 
 
+def test_balance_goal(harness):
+    S = P.Posture
+    play(harness, [
+        wire("SET_BALANCE", 1, enable=1, kp_q8=200, kd_ms=40, deadband_deg=3, max_corr_deg=12),
+        wire("SET_BALANCE", 2, enable=2, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=15),   # BAD_ARG
+        wire("SET_BALANCE", 3, enable=1, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=31),   # rate-limited
+        wire("SET_POSTURE", 5, epoch=0, posture=S.STAND, transition_ticks=0, flags=1),
+        wire("SET_BALANCE", 6, enable=0, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=15),
+    ])
+    play(harness, [
+        wire("SET_BALANCE", 1, enable=0, kp_q8=128, kd_ms=30, deadband_deg=31, max_corr_deg=15),  # BAD_ARG
+    ])
+    play(harness, [
+        raw(P.MsgId.SET_BALANCE, 1, b"\x01\x80\x1e\x02"),                                       # BAD_LEN
+    ])
+
+
 def test_uncalibrated_and_low_battery(harness):
     S = P.Posture
     play(harness, [

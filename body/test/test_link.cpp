@@ -121,7 +121,7 @@ static const std::map<std::string, Expect> EXPECT = {
     {"set_gait_stop", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
     {"set_head_hold", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
     {"set_body_pose", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
-    {"set_balance", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
+    {"set_balance", {NOTHING, 0}},
     {"trick_begin", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
     {"trick_frames_1", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
     {"trick_frames_4_max", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
@@ -296,6 +296,13 @@ static void test_goals(void) {
   // once per second per type.
   CHECK(rx(KILO_MSG_SET_POSTURE, 1, {0, POSTURE_STAND, 0, 1}).empty());
   CHECK(arbiter_idle_posture(b.arb) == POSTURE_STAND && b.balance_req == 1);
+  // SET_BALANCE: no epoch, never acked; sets enable and the gains live.
+  CHECK(rx(KILO_MSG_SET_BALANCE, 1, {1, 200, 40, 3, 12}).empty());
+  CHECK(b.bal.enable == 1 && b.bal.kp_q8 == 200 && b.bal.kd_ms == 40 && b.bal.db_deg == 3 && b.bal.max_deg == 12);
+  CHECK(is_refused(rx(KILO_MSG_SET_BALANCE, 1, {2, 128, 30, 2, 15}), KILO_MSG_SET_BALANCE,
+                   KILO_GOAL_REFUSED_REASON_BAD_ARG));
+  CHECK(rx(KILO_MSG_SET_BALANCE, 1, {0, 128, 30, 2, 31}).empty());  // BAD_ARG again, rate-limited
+  CHECK(b.bal.enable == 1 && b.bal.max_deg == 12);                  // unchanged
   b.epoch = 3;
   CHECK(is_refused(rx(KILO_MSG_SET_POSTURE, 2, {2, POSTURE_SIT, 0, 0}), KILO_MSG_SET_POSTURE,
                    KILO_GOAL_REFUSED_REASON_STALE));
@@ -424,6 +431,15 @@ static void test_streams_and_priority(void) {
   out = g_lh.take();
   std::memcpy(&t, out[0].payload.data(), sizeof t);
   CHECK(b.wd.armed && (t.flags & KILO_TELEMETRY_FLAGS_LINK_OK) && t.last_rx_seq == 0);
+  CHECK(!(t.flags & KILO_TELEMETRY_FLAGS_BALANCE_ACTIVE));
+  // Flags bit 0 reports the balance layer running this tick.
+  b.bal.active = 1;
+  b.tick = 46;
+  link_tick();
+  out = g_lh.take();
+  std::memcpy(&t, out[0].payload.data(), sizeof t);
+  CHECK(t.flags & KILO_TELEMETRY_FLAGS_BALANCE_ACTIVE);
+  b.bal.active = 0;
   // TX priority: with no room for TELEMETRY, the events still go (they are
   // never dropped, only delayed), the stream frame is dropped and counted,
   // and a TX_DROPPED event follows within a second.

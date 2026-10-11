@@ -61,6 +61,21 @@ def test_kilo_posture_stand(vbody_pty):
     assert vb.wd_stage >= 1 and vb.posture == "REST"
 
 
+def test_kilo_balance_on(vbody_pty):
+    vb, path = vbody_pty
+    p = _kilo(path, "balance", "on", "--kp", "0.6", "--clamp", "10", "--for", "2.2")
+    seen = False
+    deadline = time.monotonic() + 15
+    while p.poll() is None and time.monotonic() < deadline:
+        seen |= vb.balance_active
+        time.sleep(0.02)
+    out, err = p.communicate(timeout=5)
+    assert p.returncode == 0, err
+    assert "balance on: stand, Kp 0.602" in out and "clamp 10°" in out
+    assert "balance ACTIVE" in out, out  # the once-a-second line
+    assert seen and vb.balance["kp_q8"] == 154 and vb.balance["max_corr_deg"] == 10
+
+
 def test_kilo_param_list_and_cal_show(vbody_pty):
     vb, path = vbody_pty
     p = _kilo(path, "param", "list")

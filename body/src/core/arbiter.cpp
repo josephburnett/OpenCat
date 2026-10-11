@@ -15,8 +15,14 @@ static inline bool gait_claims(uint8_t) { return false; }  // legs only: k >= 3
 static inline int16_t gait_angle(uint8_t) { return 0; }
 // Head layer (P1): Pi head target or gait bob/wag on k = 0..2.
 static inline int16_t head_layer(uint8_t, uint8_t, int16_t base) { return base; }
-// Balance layer (P1, doc §3f): corr through per-joint gains.
-static inline int16_t balance_layer(uint8_t, uint8_t, int16_t base) { return base; }
+// Balance layer (doc §3c layer 2, §3f): joint-space owners only. IDLE holds
+// the built-in postures; TRICK (keyframes with BALANCE) joins with the
+// keyframe player; GAIT and STANCE get geometric balance through the IK in
+// P2; REFLEX never balances.
+static inline int16_t balance_layer(uint8_t k, uint8_t own, int16_t base, const Balance* bal) {
+  if (!bal || own != OWN_IDLE) return base;
+  return (int16_t)(base + balance_joint(*bal, k));
+}
 // ---------------------------------------------------------------------------
 
 // a + (b - a) * e, e in Q14. The difference of two a16 angles fits 17 bits,
@@ -77,7 +83,7 @@ void arbiter_reflex_release(Arbiter& a) { a.reflex_active = 0; }
 
 bool arbiter_reflex_settled(const Arbiter& a) { return a.reflex.i >= a.reflex.n; }
 
-void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT]) {
+void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal) {
   // Unused channels (joints 3-7) stay full-off; driven ones are set below.
   for (uint8_t c = 0; c < JOINT_COUNT; c++) counts[c] = PCA_FULL_OFF;
   if (a.idle.i < a.idle.n) a.idle.i++;
@@ -116,8 +122,8 @@ void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT]) 
       if (raw != JOINT_OFF && a.xsrc[k] != JOINT_OFF) b = lerp(a.xsrc[k], raw, fx_ease_cos(a.xi[k], a.xn[k]));
     }
     a.base[k] = b;
-    // 3. Layers (P1). Never applied to a limp joint.
-    if (b != JOINT_OFF) b = balance_layer(k, own, head_layer(k, own, b));
+    // 3. Layers. Never applied to a limp joint.
+    if (b != JOINT_OFF) b = balance_layer(k, own, head_layer(k, own, b), bal);
     // 4. Safety: limits, then slew against the last powered output, then
     //    counts. Limits come first so the slew never chases an angle the
     //    joint may not reach.

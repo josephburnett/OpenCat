@@ -21,6 +21,17 @@ def test_parse_posture():
         parse_args(["posture", "fly"])
 
 
+def test_parse_balance():
+    a = parse_args(["balance", "on", "--kp", "0.6", "--kd", "0.05", "--deadband", "3", "--clamp", "10",
+                    "--for", "30"])
+    assert (a.cmd, a.state, a.kp, a.kd, a.deadband, a.clamp, a.hold, a.posture) == (
+        "balance", "on", 0.6, 0.05, 3.0, 10.0, 30.0, "stand")
+    a = parse_args(["balance", "off", "--posture", "sit"])
+    assert (a.state, a.kp, a.kd, a.deadband, a.clamp, a.posture) == ("off", 0.5, 0.03, 2, 15, "sit")
+    with pytest.raises(SystemExit):
+        parse_args(["balance", "maybe"])
+
+
 def test_parse_cal():
     assert parse_args(["cal"]).cal_cmd == "show"
     a = parse_args(["cal", "set", "8", "-2.5"])
@@ -80,4 +91,4 @@ def test_port_rules():
 
 def test_render_monitor_empty_state():
     text = render_monitor(BodyState().snapshot())
-    assert "LOST" in text and "battery" in text
+    assert "LOST" in text and "battery" in text and "balance  off" in text

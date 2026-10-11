@@ -146,12 +146,17 @@ static void goal(uint8_t t, const uint8_t* p) {
       if (r != GOAL_OK) refuse(t, r);
       return;
     }
+    case KILO_MSG_SET_BALANCE: {
+      uint8_t r = body_goal_balance(*B, p);
+      if (r != GOAL_OK) refuse(t, r);
+      return;
+    }
     case KILO_MSG_BEEP:
       // A full queue drops the rest: BEEP is sent once, not refreshed.
       for (uint8_t i = 0; i < p[0]; i++) notes_push(B->notes, (int8_t)p[1 + 2 * i], p[2 + 2 * i]);
       return;
     default:
-      // SET_GAIT, SET_HEAD, SET_BODY_POSE (P2/P1), SET_BALANCE (P1), SET_EYES.
+      // SET_GAIT, SET_HEAD, SET_BODY_POSE (P2/P1), SET_EYES.
       refuse(t, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE);
   }
 }
@@ -377,6 +382,7 @@ static void telemetry(const Body& b) {
   uint16_t fl = 0;
   for (uint8_t k = 0; k < DRIVEN_COUNT; k++)
     if (b.arb.out[k] != JOINT_OFF) fl = KILO_TELEMETRY_FLAGS_SERVOS_POWERED;
+  if (body_balance_active(b)) fl |= KILO_TELEMETRY_FLAGS_BALANCE_ACTIVE;
   if (b.imu_fault) fl |= KILO_TELEMETRY_FLAGS_IMU_FAULT;
   if (b.batt.level >= BATT_WARN) fl |= KILO_TELEMETRY_FLAGS_BATT_WARN;
   if (b.wd.armed && !b.wd.stage) fl |= KILO_TELEMETRY_FLAGS_LINK_OK;
