@@ -486,12 +486,10 @@ subprocess (`status`, `posture stand`, `param list`, `cal show`) against the
 virtual body on a pty. `test_perception.py` and `test_logs.py` drive the
 detectors with synthetic traces (approach, walk-by, dropouts, tilt, tap,
 pet, pickup, quiet noise) and replay fixture logs (`tests/fixtures/`).
-The suite takes about 20-40 s.
-
-virtual body on a pty. `test_behaviour.py` covers the behaviour engine,
-drives, selector hysteresis, personality loading, a simulated seven-minute
-day with a fake body and a fast clock, and the runner against the virtual
-body. The suite takes about 20 s.
+`test_behaviour.py` covers the behaviour engine, drives, selector
+hysteresis, personality loading, a simulated seven-minute day with a fake
+body and a fast clock, and the runner against the virtual body. The suite
+takes about 40 s.
 
 ## Layout
 
