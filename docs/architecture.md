@@ -1060,7 +1060,9 @@ are in Appendix F.
 
 **Host unit tests (body core).** `body/test/` builds `core/` with
 `g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined`, plus the
-bare-type lint. It covers:
+bare-type lint. On 32-bit ARM (the Pi 2 B) libasan needs `-latomic` for its
+64-bit atomics; `body/tools/host_tests.sh` and `protocol/test.sh` probe for that
+once and add it only where a plain sanitizer link fails. It covers:
 - fx accuracy;
 - the per-robot legacy transfer function vs a transcription of the legacy float
   code, fed the dumped EEPROM;
@@ -1645,6 +1647,13 @@ the token protocol at 115200 and finds its EEPROM intact.
 - The Petoi uploader enumerates as `/dev/ttyACM0` or `/dev/ttyUSB0` on Linux
   (COM9 on the owner's Windows host, passed into WSL2 with usbipd).
 - avrdude resets the board through DTR natively.
+- DTR is AC-coupled to RESET, so every port open that raises DTR resets the
+  328P. The mind clears HUPCL on each open (and again after avrdude, which
+  re-enables it), so DTR stays asserted between opens and only the first open
+  after a replug or a flash resets the body.
+- On a Pi with the adapter plugged in, the mind's port auto-detection picks the
+  adapter over the header UART (whose device node always exists) and warns;
+  `KILO_PORT` or `--port` selects the header UART.
 - The same `kilo` tools work with `--port`.
 - The adapter and the Pi header share the 328P's single UART. **Unplug the
   adapter whenever the Pi drives the UART**, and vice versa.

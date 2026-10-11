@@ -59,10 +59,21 @@ def test_port_rules():
     assert detect_port("/dev/x", env={}, on_pi=True, **fs).port == "/dev/x"
     assert detect_port(None, env={"KILO_PORT": "/dev/y"}, on_pi=True, **fs).port == "/dev/y"
     c = detect_port(None, env={}, on_pi=True, **fs)
-    assert c.port == "/dev/ttyAMA0" and c.warnings  # unplug-the-adapter warning
+    # A plugged-in USB adapter wins over the header UART (whose node always
+    # exists on a Pi), with a warning naming the ignored UART.
+    assert c.port == "/dev/ttyUSB0" and c.reason == "USB serial adapter"
+    assert len(c.warnings) == 1 and "/dev/ttyAMA0" in c.warnings[0] and "KILO_PORT" in c.warnings[0]
+    c = detect_port(None, env={}, on_pi=True,
+                    **_fs({"/dev/ttyS0", "/dev/ttyACM0"}, {"/dev/serial0": "/dev/ttyS0"}))
+    assert c.port == "/dev/ttyACM0" and "/dev/ttyS0" in c.warnings[0]
+    c = detect_port(None, env={"KILO_PORT": "/dev/ttyAMA0"}, on_pi=True, **fs)
+    assert c.port == "/dev/ttyAMA0" and not c.warnings
     c = detect_port(None, env={}, on_pi=True, **_fs({"/dev/ttyAMA0"}))
     assert c.port == "/dev/ttyAMA0" and not c.warnings
-    assert detect_port(None, env={}, on_pi=False, **fs).port == "/dev/ttyUSB0"
+    c = detect_port(None, env={}, on_pi=True, **_fs({"/dev/ttyS0"}, {"/dev/serial0": "/dev/ttyS0"}))
+    assert c.port == "/dev/ttyS0" and c.reason == "Raspberry Pi header UART"
+    c = detect_port(None, env={}, on_pi=False, **fs)
+    assert c.port == "/dev/ttyUSB0" and not c.warnings
     assert detect_port(None, env={}, on_pi=False, **_fs({"/dev/ttyACM0"})).port == "/dev/ttyACM0"
     assert detect_port(None, env={}, on_pi=False, **_fs(set())).port is None
 

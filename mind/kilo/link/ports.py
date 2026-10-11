@@ -3,18 +3,21 @@
 Rules (README "Port rules"):
 
 1. ``--port`` (or ``$KILO_PORT``) wins.
-2. On a Raspberry Pi, the header UART: ``/dev/serial0`` resolved, else
+2. A plugged-in USB serial adapter: the first ``/dev/ttyUSB*`` then
+   ``/dev/ttyACM*`` (the Petoi CH340/CH343 adapter). Plugging one in is an
+   explicit act; the header UART's device node, by contrast, exists on every
+   Pi whether or not anything is wired to it. On a Pi this choice carries a
+   warning that the header UART was ignored (select it with ``KILO_PORT`` or
+   ``--port``).
+3. Else, on a Raspberry Pi, the header UART: ``/dev/serial0`` resolved, else
    ``/dev/ttyAMA0``. On the Pi 2 B (no Bluetooth) the PL011 is ttyAMA0 on
    GPIO14/15. On Pi 3/4/Zero 2 W ``serial0`` resolves to the mini-UART
    ``ttyS0``, which is why it is consulted first.
-3. Else the first ``/dev/ttyUSB*`` then ``/dev/ttyACM*`` (the Petoi CH340/CH343
-   adapter).
 
 We glob the device nodes instead of using ``serial.tools.list_ports``:
 pyserial classifies ``ttyS*``/``ttyAMA*`` as "platform" ports and leaves them
 out on recent kernels (pyserial issue #489; serialMaster/ardSerial.py works
-around the same thing). On a Pi with a USB adapter also present, a warning is
-returned: both drive the 328P's single RX line.
+around the same thing).
 """
 
 from __future__ import annotations
@@ -60,19 +63,20 @@ def detect_port(
     if on_pi is None:
         on_pi = is_raspberry_pi()
     usb = sorted(globber("/dev/ttyUSB*")) + sorted(globber("/dev/ttyACM*"))
+    hdr = None
     if on_pi:
-        hdr = None
         if exists("/dev/serial0"):
             hdr = realpath("/dev/serial0")
         elif exists("/dev/ttyAMA0"):
             hdr = "/dev/ttyAMA0"
-        if hdr:
-            warn = []
-            if usb:
-                warn.append(
-                    f"USB serial adapter(s) present ({', '.join(usb)}): unplug the CH343 "
-                    "adapter while the Pi drives the UART; both drive the same RX line")
-            return PortChoice(hdr, "Raspberry Pi header UART", warn)
     if usb:
-        return PortChoice(usb[0], "USB serial adapter")
+        warn = []
+        if hdr:
+            warn.append(
+                f"using USB serial adapter {usb[0]}; the Pi header UART {hdr} was ignored "
+                f"(select it with KILO_PORT={hdr} or --port {hdr}, and unplug the adapter: "
+                "both drive the 328P's single RX line)")
+        return PortChoice(usb[0], "USB serial adapter", warn)
+    if hdr:
+        return PortChoice(hdr, "Raspberry Pi header UART")
     return PortChoice(None, "no serial port found")

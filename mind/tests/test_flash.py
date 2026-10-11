@@ -57,9 +57,11 @@ def test_flash_sequence_gpio_stops_and_restarts_link(tmp_path):
 
     res = fl.flash(fl.FlashOptions(port="/dev/ttyAMA0", hex_path=hexf, avrdude="avrdude"),
                    link=link, run=run, reset_backend=FakeReset(calls),
-                   verify=lambda since, build: True, say=lambda s: None)
+                   verify=lambda since, build: True, say=lambda s: None,
+                   hupcl=lambda port: calls.append(("hupcl", port)))
     assert link.calls == ["stop", "start"]
-    assert calls == [("pulse", 100.0), ("run", False, "avrdude")]  # link stopped while flashing
+    # link stopped while flashing; HUPCL cleared after avrdude, before the link restarts
+    assert calls == [("pulse", 100.0), ("run", False, "avrdude"), ("hupcl", "/dev/ttyAMA0")]
     assert res.reset == "gpio" and res.verified is True and res.attempts == 1
 
 
@@ -77,8 +79,8 @@ def test_flash_retries_once_and_restarts_link_on_failure(tmp_path):
 
     with pytest.raises(fl.FlashError):
         fl.flash(fl.FlashOptions(port="/dev/ttyUSB0", hex_path=hexf, avrdude="avrdude"),
-                 link=link, run=run, say=lambda s: None)
-    assert len(n) == 2 and link.calls == ["stop", "start"]
+                 link=link, run=run, say=lambda s: None, hupcl=lambda port: n.append("hupcl"))
+    assert len(n) == 3 and n[-1] == "hupcl" and link.calls == ["stop", "start"]
 
 
 def test_flash_legacy_and_build_dry_run():
@@ -89,6 +91,31 @@ def test_flash_legacy_and_build_dry_run():
     res = fl.flash(fl.FlashOptions(port="/dev/ttyUSB0", dry_run=True, size_check=False), say=lambda s: None)
     assert res.commands[0][:2] == ["arduino-cli", "compile"]
     assert res.commands[1][0] == "avrdude"
+
+
+def test_flash_clears_hupcl_before_verify_reopen(tmp_path):
+    """Over USB: avrdude, then HUPCL cleared, then the link restart and verify
+    (the verify reopen must find DTR already asserted)."""
+    hexf = tmp_path / "b.hex"
+    hexf.write_text(":00000001FF\n")
+    calls = []
+    link = FakeLink()
+    link.calls = calls
+
+    def verify(since, build):
+        calls.append("verify")
+        return True
+
+    res = fl.flash(fl.FlashOptions(port="/dev/ttyACM0", hex_path=hexf, avrdude="avrdude"),
+                   link=link, run=lambda cmd, check: calls.append(cmd[0]), verify=verify,
+                   say=lambda s: None, hupcl=lambda port: calls.append(("hupcl", port)))
+    assert res.reset == "dtr"
+    assert calls == ["stop", "avrdude", ("hupcl", "/dev/ttyACM0"), "start", "verify"]
+    # dry runs touch no port
+    seen = []
+    fl.flash(fl.FlashOptions(port="/dev/ttyACM0", legacy=True, dry_run=True),
+             say=lambda s: None, hupcl=seen.append)
+    assert seen == []
 
 
 def test_firmware_dir_exists():

@@ -17,6 +17,17 @@ SAN="-fsanitize=address,undefined -fno-sanitize-recover=all"
 WARN="-Wall -Wextra -Werror"
 mkdir -p "$BUILD"
 
+# libasan on 32-bit ARM (Raspberry Pi, armhf) needs libatomic for its 64-bit
+# atomics (__atomic_load_8/__atomic_store_8); probe once whether a plain
+# sanitizer link works and, if not, add -latomic.
+LDLIBS=""
+printf 'int main(){return 0;}\n' > "$BUILD/probe.cpp"
+if ! "$CXX" $SAN "$BUILD/probe.cpp" -o "$BUILD/probe" 2>/dev/null &&
+   "$CXX" $SAN "$BUILD/probe.cpp" -o "$BUILD/probe" -latomic 2>/dev/null; then
+    echo "(sanitizer link needs -latomic here)"
+    LDLIBS="-latomic"
+fi
+
 echo "== generator up to date"
 "$PYTHON" "$HERE/gen.py" --check
 
@@ -32,7 +43,7 @@ printf '#include "kilo_protocol.h"\nint kilo_dummy;\n' > "$BUILD/hdr_c99.c"
 "$CC" -std=c99 -pedantic $WARN -I"$HERE/gen" -c "$BUILD/hdr_c99.c" -o "$BUILD/hdr_c99.o"
 "$CXX" -std=c++17 $WARN $SAN -g -O1 -I"$HERE/gen" -I"$HERE/c" \
     "$HERE/c/test_protocol.cpp" "$BUILD/cobs.o" "$BUILD/crc16.o" "$BUILD/kilo_frame.o" \
-    -o "$BUILD/test_protocol"
+    -o "$BUILD/test_protocol" $LDLIBS
 
 echo "== C tests"
 "$BUILD/test_protocol" "$HERE/vectors" "$FUZZ"

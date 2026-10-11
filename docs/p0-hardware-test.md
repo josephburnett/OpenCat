@@ -6,6 +6,19 @@ moving anything it should not, follows the watchdog timeline, talks the
 protocol, and that the legacy firmware can be put back. Allow about an hour.
 The checks map to H1, H2, H5 and H15 in docs/architecture.md Appendix H.
 
+The same steps work on Kilo's Raspberry Pi with the CH343 adapter plugged
+into one of its USB ports (skip the usbipd part). There the adapter shows up
+as `/dev/ttyACM0`; `kilo` picks a plugged-in USB adapter over the header UART
+anyway, but `export KILO_PORT=/dev/ttyACM0` is a safe explicit choice. Install
+the mind in a per-repo venv that sees apt's pyserial:
+
+```sh
+sudo apt install python3-serial python3-venv
+python3 -m venv --system-site-packages ~/OpenCat/.venv
+~/OpenCat/.venv/bin/pip install -e mind pytest      # from ~/OpenCat
+export PATH="$HOME/OpenCat/.venv/bin:$PATH" KILO_PORT=/dev/ttyACM0
+```
+
 **Before you start:**
 - The Pi is **not** connected to the NyBoard's UART. The adapter and the Pi
   header share the 328P's only UART.
@@ -25,24 +38,29 @@ ls -l /dev/ttyACM0
 ```
 
 Opening a USB serial port asserts DTR, and on the NyBoard DTR resets the
-328P. Stop every later `kilo` command from resetting Kilo by leaving DTR
-asserted between opens. This opens the port once, which resets Kilo once:
+328P (DTR is AC-coupled to RESET, so each rising edge is a reset). With the
+tty's HUPCL flag set, the kernel drops DTR again on close, so every later
+open would reset Kilo. `kilo` now clears HUPCL itself (the equivalent of
+`stty -F /dev/ttyACM0 -hupcl`) every time it opens the port, and `kilo flash`
+does it again right after avrdude, because avrdude drops DTR and turns HUPCL
+back on (termios settings persist per device across opens). So:
 
-```sh
-stty -F /dev/ttyACM0 -hupcl
-```
+- the first `kilo` command after a replug or re-attach resets Kilo once;
+- `kilo flash` resets it for avrdude and once more right after, and that is
+  the last reset: later `kilo` commands find DTR already asserted;
+- other tools (`arduino-cli upload`, avrdude, plain pyserial scripts as in
+  steps 1, 3 and 9) may set HUPCL again; the next `kilo` command clears it.
 
-avrdude still resets the board for flashing, because it toggles DTR itself.
-Repeat `stty` after every replug or re-attach.
+No manual `stty` step is needed any more.
 
-Install the mind in a venv (pyserial comes from apt) and point it at the
-adapter:
+Install the mind in a per-repo venv (pyserial comes from apt) and point it at
+the adapter:
 
 ```sh
 sudo apt install python3-serial python3-venv
-python3 -m venv --system-site-packages ~/kilo-venv
-~/kilo-venv/bin/pip install -e ~/OpenCat/mind
-export PATH="$HOME/kilo-venv/bin:$PATH" KILO_PORT=/dev/ttyACM0
+python3 -m venv --system-site-packages ~/OpenCat/.venv
+cd ~/OpenCat && ~/OpenCat/.venv/bin/pip install -e mind pytest
+export PATH="$HOME/OpenCat/.venv/bin:$PATH" KILO_PORT=/dev/ttyACM0
 ```
 
 Build the legacy image for the rollback in step 9. `mind/firmware/` does not
@@ -92,7 +110,9 @@ while b"END" not in out:
     if not chunk:
         break
     out += chunk
-print(out.decode(errors="replace").split("END")[0].strip())
+text = out.decode(errors="replace").split("END")[0]
+# the reset can deliver a stray byte first: keep the text from the first "0000:"
+print(text[text.find("0000:"):].strip() if "0000:" in text else text.strip())
 EOF
 ```
 
@@ -117,7 +137,7 @@ Run these before the first flash:
 ```sh
 cd ~/OpenCat
 body/tools/host_tests.sh                       # host unit tests: ALL PASSED
-protocol/test.sh                               # needs pytest: PYTHON=~/kilo-venv/bin/python
+protocol/test.sh                               # needs pytest: PYTHON=~/OpenCat/.venv/bin/python
 (cd mind && python3 -m pytest -q)              # incl. the C-vs-vbody cross-check
 body/tools/size_check.sh                       # see the note on FLASH_MAX below
 ```
@@ -139,7 +159,7 @@ follow. Now build and flash the new firmware:
 
 ```sh
 cd ~/OpenCat
-kilo flash -v
+kilo -v flash
 ```
 
 The output shows `arduino-cli compile`, the size harness, `reset: DTR
@@ -231,8 +251,9 @@ the reference for H2.
 ## 7. Power cycle
 
 Switch the battery off, wait 5 s, then switch it on with the adapter still
-attached. Run `stty -F /dev/ttyACM0 -hupcl` again if the adapter
-re-enumerated.
+attached. If the adapter re-enumerated (or another tool opened the port
+since the last `kilo` command), the next `kilo` open resets Kilo once more and
+`reset` reads WARM_UNEXPECTED instead of COLD; that is the open, not a fault.
 
 - Kilo **stays LIMP**: a cold boot has no pose to hold.
 - `kilo status` shows `reset COLD` and `config_state 0` (the imported slot is
@@ -261,7 +282,7 @@ with the old calibration. Its EEPROM was never written.
 
 ## What to report
 
-- The `kilo flash -v` output and the first `kilo status`, including the HELLO
+- The `kilo -v flash` output and the first `kilo status`, including the HELLO
   line and `config_state`.
 - Anything that moved when it should not, with the step number.
 - The `--pca` counts while standing (H2) and the diff result from step 4.

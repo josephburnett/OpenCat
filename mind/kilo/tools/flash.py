@@ -18,7 +18,12 @@ Sequence:
    - ``auto``: ``gpio`` for the Pi's UART (ttyAMA*, ttyS*, serial0), else ``dtr``.
 4. ``avrdude -c arduino -p atmega328p -P PORT -b 115200 -D -U flash:w:HEX:i``,
    retried once (with a fresh reset).
-5. Restart the link and, for new firmware, expect HELLO with reset cause
+5. Clear HUPCL on the port (open, ``termios``, close; see
+   ``kilo.link.transport.clear_hupcl``). avrdude drops DTR on exit and its
+   termios setup re-enables HUPCL; without this every later ``kilo`` command
+   would reset the body on open. This open raises DTR, which is the one
+   post-flash reset; later opens find DTR already asserted.
+6. Restart the link and, for new firmware, expect HELLO with reset cause
    FLASHED within 3 s, and (when this run built the firmware) HELLO.fw_build
    equal to the build hash: the first 8 hex digits of the git commit, passed
    as ``-DKILO_BUILD=0x<hash>`` and reported by the body as a u32.
@@ -38,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from kilo.link.transport import clear_hupcl_path
 from kilo.protocol.kilo_protocol import RESET_PULSE_MS
 from kilo.tools.gpio import ResetBackend, pick_backend
 
@@ -133,6 +139,7 @@ def flash(
     reset_backend: ResetBackend | None = None,
     verify: Callable[[float, int | None], bool] | None = None,
     say: Callable[[str], None] = print,
+    hupcl: Callable[[str], Any] = clear_hupcl_path,
 ) -> FlashResult:
     """Run the flash sequence. ``link`` (a SerialLink) is stopped and restarted.
 
@@ -217,7 +224,10 @@ def flash(
         if last is not None:
             raise last
     finally:
-        # 5. restart the link whatever happened
+        # 5. keep DTR asserted from here on, so only this open resets the body
+        if not opts.dry_run:
+            hupcl(opts.port)
+        # 6. restart the link whatever happened
         if was_running:
             say("restarting serial link")
             link.start()
