@@ -111,7 +111,8 @@ def idle(cfg: dict[str, Any]) -> Behaviour:
 
 def explore(cfg: dict[str, Any]) -> Behaviour:
     b = cfg["behaviours"]["explore"]
-    # Stub until P2 gaits: stand and look around; a walk goes here later.
+    # Stand and look around. BodyAdapter.walk() exists since P2, but no
+    # behaviour walks until the owner allows autonomous walking.
     scan = Repeat(Sequence("scan", [look_random(b["look_pan_deg"], b["look_tilt_deg"]),
                                     Wait(b["look_every_s"])]), times=int(b["looks"]))
     return Behaviour("explore", Sequence("explore_seq", [posture(b["posture"]), scan,

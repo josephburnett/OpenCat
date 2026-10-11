@@ -26,7 +26,7 @@ Threads and the loop:
   runs as a task of its session so the session still reads (pings, a
   ``trick_stop``, its own disconnect) while the trick plays.
 
-Holds. Goals a client sets (``posture``, ``set_balance``) belong to that
+Holds. Goals a client sets (``posture``, ``set_balance``, ``walk``, ``pose``) belong to that
 client's session and are kept alive by the daemon while the session lives and
 keeps its lease (any message within ``hold_lease_s``; RemoteBody pings while
 it holds). When the session closes or its lease lapses, the hold ends like
@@ -50,11 +50,11 @@ playing trick is stopped and the idle REST/LIMP timeline runs. A second
 client cannot start a trick over a playing one (``trick_stop`` first).
 
 Behaviour runner and CLI holds. While the runner is active, ``posture``,
-``set_balance``, ``trick_upload`` and ``trick_play`` from clients are refused
+``set_balance``, ``walk``, ``pose``, ``trick_upload`` and ``trick_play`` from clients are refused
 ("behaviour runner active ...") unless the request carries ``override``
 (``kilo --override ...``): the runner is then paused (its behaviours halted,
 nothing ticked) until that client's hold ends, and resumes re-asserting its
-own goals. ``trick_stop`` and ``release`` are always allowed. The generic
+own goals. ``trick_stop``, ``stop_walk`` and ``release`` are always allowed. The generic
 ``call`` op refuses the goal and trick methods.
 
 Port hot-plug. The daemon starts whether or not the port exists (robot
@@ -108,14 +108,25 @@ is logged and the daemon carries on without it.
 IR remote (``--remote``, off by default; the owner's request 2026-10-11).
 The body relays the Petoi remote as EVENT IR_KEY; the daemon maps keys to
 actions on its own BodyClient (``kilo.ir.ACTIONS``: postures, tricks, the
-CH+ balance toggle; gait keys log "walking comes in P2"; held-key repeats,
-EQ, 9 and unknown keys are ignored). The actions run in the thread pool, one
-at a time (``kilo.ir.RemoteControl``). A posture or trick set by the remote
-is held like the idle latch: nobody owns it and the idle REST/LIMP timeline
-is stopped, so it stays until the next key or a client goal. Keys are logged
-and ignored while the behaviour runner is active, while the port is
-released, and while a client holds the posture or a trick (the balance key:
-while a client holds SET_BALANCE).
+CH+ balance toggle, walking in a direction and the gait pattern keys;
+held-key repeats, EQ, 9 and unknown keys are ignored). The actions run in
+the thread pool, one at a time (``kilo.ir.RemoteControl``). A posture, trick
+or walk set by the remote is held like the idle latch: nobody owns it and
+the idle REST/LIMP timeline is stopped, so it stays until the next key or a
+client goal. Keys are logged and ignored while the behaviour runner is
+active, while the port is released, and while a client holds the posture, a
+trick or the gait (the balance key: while a client holds SET_BALANCE).
+
+Gait (P2). ``walk {stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm,
+body_h_mm, bob, wag, balance, override}`` (BodyClient.walk; the session owns
+SET_GAIT like a posture, and the posture goal is dropped: the gait replaces
+it), ``stop_walk {wait_s}`` (any client, also under the behaviour runner;
+with ``wait_s`` it replies once GAIT_STOPPED came: ``{stopped,
+elapsed_s}``), ``gait`` (BodyClient.gait_state()), ``pose {pitch_deg,
+roll_deg, dheight_mm, xshift_mm, override}`` and ``release_pose``. When a
+session holding a walk ends, the daemon latches the stop (never just drops
+a walk) and runs the idle timeline; a pose hold ending latches the neutral
+pose. ``daemon`` reports ``gait`` (pattern, stride, turn, phase, mode).
 """
 
 from __future__ import annotations
@@ -162,7 +173,10 @@ TRICK_POSTURES = ("rest", "sit", "stand")
 # BodyClient methods the generic `call` op refuses: goals and tricks have
 # their own ops (session ownership, the runner check, the daemon loop).
 CALL_REFUSED = frozenset({"posture", "limp", "rest", "stand", "sit", "balance", "set_balance", "release",
-                          "upload_trick", "start_trick", "play", "stop_trick", "spin", "wait_ready"})
+                          "upload_trick", "start_trick", "play", "stop_trick", "spin", "wait_ready",
+                          "walk", "stop_walk", "wait_gait_stopped", "pose", "release_pose"})
+# Holds that decide what the legs do: when the last one ends the idle timeline runs.
+BODY_HOLDS = ("SET_POSTURE", "TRICK", "SET_GAIT")
 BEHAVIOUR_ACTIVE = ("behaviour runner active; stop it with `kilo daemon stop` (or `systemctl --user stop kilo`) "
                     "and run `kilo run` without --behaviour, or pass --override (`kilo --override ...`) to "
                     "pause it while this command holds the body")
@@ -508,8 +522,8 @@ class Daemon:
         return any(o is not None for o in self.goal_owner.values())
 
     def _posture_held(self) -> bool:
-        """Somebody owns what the body's posture is: SET_POSTURE or a trick."""
-        return self.goal_owner.get("SET_POSTURE") is not None or self.goal_owner.get("TRICK") is not None
+        """Somebody owns what the body's legs do: SET_POSTURE, a trick or a gait."""
+        return any(self.goal_owner.get(n) is not None for n in BODY_HOLDS)
 
     def _latch_idle(self, name: str) -> None:
         try:
@@ -535,9 +549,22 @@ class Daemon:
                 self.pool.submit(self._stop_trick_quietly)  # its TRICK_DONE ends the trick_play op
             posture_hold_ended = True
         else:
-            posture_hold_ended = "SET_POSTURE" in names
+            posture_hold_ended = "SET_POSTURE" in names or "SET_GAIT" in names
         if self._shutting_down:
             return  # go_silent() drops everything next
+        if "SET_GAIT" in names and not self.port_released:
+            # A walk is never just dropped: latch the stop (the body ramps
+            # down, hands over to STANCE, GAIT_STOPPED clears the goal).
+            names.remove("SET_GAIT")
+            g = link.goals().get("SET_GAIT")
+            if g is not None and g.fields.get("run"):
+                try:
+                    self.client.stop_walk()
+                except (LinkError, ValueError) as e:
+                    log.warning("client %d: gait stop: %s", s.id, e)
+        if "SET_BODY_POSE" in names and not self.port_released:
+            names.remove("SET_BODY_POSE")
+            self.client.release_pose()
         if self.behaviour_active or self.port_released:
             for n in names:
                 link.clear_goal(n)
@@ -598,7 +625,7 @@ class Daemon:
             prev.goals.discard(name)
         self.goal_owner[name] = s
         s.goals.add(name)
-        if name in ("SET_POSTURE", "TRICK"):  # a balance-only hold leaves the idle timeline running
+        if name in BODY_HOLDS:  # a balance-, head- or pose-only hold leaves the idle timeline running
             self.idle_since = None
             self.idle_stage = None
 
@@ -619,17 +646,14 @@ class Daemon:
             return
         if self.port_released or self._shutting_down:
             return
-        if action.kind == "gait":
-            log.info("remote %s: walking comes in P2", text)
-            return
         owner = (self.goal_owner.get("SET_BALANCE") if action.kind == "balance_toggle"
-                 else self.goal_owner.get("SET_POSTURE") or self.goal_owner.get("TRICK"))
+                 else next((o for o in map(self.goal_owner.get, BODY_HOLDS) if o is not None), None))
         if owner is not None:
             log.info("remote %s: ignored (client %d holds the body)", text, owner.id)
             return
-        if action.kind in ("posture", "trick"):
+        if action.kind in ("posture", "trick", "walk"):
             # held like the idle latch: no owner, and no idle timeline over it
-            self.goal_owner["SET_POSTURE"] = None
+            self.goal_owner["SET_GAIT" if action.kind == "walk" else "SET_POSTURE"] = None
             self.idle_since = self.idle_stage = None
         self.remote_last = text
         self.pool.submit(self._remote_perform, action, text)
@@ -839,7 +863,7 @@ class Daemon:
                 "kilolog": str(self.wire_logger.path) if self.wire_logger is not None else None,
                 "percepts": self.percepts.flags(),
                 "held_goals": sorted(n for n, o in self.goal_owner.items() if o is not None),
-                "idle": self.idle_stage}
+                "idle": self.idle_stage, "gait": self.client.gait_state()}
 
     async def op_percepts(self, s: Session) -> dict[str, Any]:
         """The daemon's percepts: flags, distance/approach, recent events."""
@@ -882,6 +906,71 @@ class Daemon:
 
     async def op_release(self, s: Session) -> None:
         self._end_hold(s)
+
+    # ---- gait and body pose (P2) ---------------------------------------------------------
+    async def op_walk(self, s: Session, override: bool = False, **gait: Any) -> dict[str, int]:
+        """BodyClient.walk(**gait), held by this session like a posture: when
+        the session ends the daemon latches the stop and runs the idle
+        timeline. Replaces a posture goal (the gait hands over to STANCE)."""
+        self._need_port()
+        self.client.gait_fields(**gait)  # range check before anything is sent or owned
+        self._check_runner(s, override)
+        if self.client._geometry_reboots != self.client.state.reboots:
+            await self._blocking(self.client.load_geometry)
+        f = self.client.walk(**gait)
+        prev = self.goal_owner.pop("SET_POSTURE", None)  # walk() dropped the posture goal
+        if prev is not None:
+            prev.goals.discard("SET_POSTURE")
+        self._own(s, "SET_GAIT")
+        return f
+
+    async def op_stop_walk(self, s: Session, wait_s: float | None = None) -> dict[str, Any]:
+        """Latch the gait stop (any client, also while the behaviour runner is
+        active); with ``wait_s``, reply once GAIT_STOPPED came (or the body
+        shows no gait), at most ``wait_s`` later: ``{stopped, elapsed_s}``."""
+        self._need_port()
+        n = self.client.stop_walk()
+        self._own(s, "SET_GAIT")
+        if wait_s is None:
+            return {"stopped": None, "elapsed_s": 0.0}
+        return await self._wait_gait_stopped(n, float(wait_s))
+
+    async def _wait_gait_stopped(self, n: int, wait_s: float) -> dict[str, Any]:
+        clock = self.link.clock
+        t0 = clock()
+        quiet_since = None
+        while True:
+            if self.client.gait_stopped_since(n) is not None:
+                return {"stopped": True, "elapsed_s": round(clock() - t0, 3)}
+            now = clock()
+            if self.client.walking():
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = now
+            elif now - quiet_since >= 0.3:
+                return {"stopped": True, "elapsed_s": round(now - t0, 3)}
+            if now - t0 >= wait_s:
+                return {"stopped": False, "elapsed_s": round(now - t0, 3)}
+            await asyncio.sleep(0.02)
+
+    async def op_gait(self, s: Session) -> dict[str, Any] | None:
+        """BodyClient.gait_state(): the latched gait and the body's phase."""
+        return self.client.gait_state()
+
+    async def op_pose(self, s: Session, pitch_deg: float = 0, roll_deg: float = 0, dheight_mm: float = 0,
+                      xshift_mm: float = 0, override: bool = False) -> dict[str, int]:
+        self._need_port()
+        self._check_runner(s, override)
+        f = self.client.pose(pitch_deg, roll_deg, dheight_mm, xshift_mm)
+        self._own(s, "SET_BODY_POSE")
+        return f
+
+    async def op_release_pose(self, s: Session) -> None:
+        self._need_port()
+        self.client.release_pose()
+        if self.goal_owner.get("SET_BODY_POSE") is s:
+            self.goal_owner.pop("SET_BODY_POSE", None)
+            s.goals.discard("SET_BODY_POSE")
 
     async def op_cal_get(self, s: Session) -> list[int]:
         self._need_port()

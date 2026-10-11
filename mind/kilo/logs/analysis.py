@@ -79,6 +79,9 @@ def summary(data: LogData) -> dict[str, Any]:
     if any(s.flags for s in ss):
         fc: Counter = Counter(f for s in ss for f in (s.flags or ()))
         out["flags_fraction"] = {k: round(v / len(ss), 3) for k, v in sorted(fc.items())}
+    gait = gait_summary(ss, data.events)
+    if gait:
+        out["gait"] = gait
     out["events"] = [(round(e.t, 3), e.name, e.arg) for e in data.events]
     out["event_counts"] = dict(Counter(e.name for e in data.events))
     if data.format != "jsonl-monitor":
@@ -87,6 +90,45 @@ def summary(data: LogData) -> dict[str, Any]:
     if data.bad_lines:
         out["bad_lines"] = data.bad_lines
     return out
+
+
+def _walking(s: TelemetrySample) -> bool:
+    return s.mode == "GAIT" or "gait" in (s.flags or ())
+
+
+def gait_summary(ss: list[TelemetrySample], events: list[Any]) -> dict[str, Any] | None:
+    """Time walking (mode GAIT or the GAIT flag), gait cycles (gait_phase
+    wraps), GAIT_STOPPED and SET_GAIT refusals; None if the log has no gait."""
+    stops = sum(1 for e in events if e.name == "GAIT_STOPPED")
+    refused = [goal_refused_text(e.arg) for e in events if e.name == "GOAL_REFUSED" and e.arg is not None
+               and (int(e.arg) & 0xFFFF) >> 8 == int(P.MsgId.SET_GAIT)]
+    walking_s, cycles = 0.0, 0
+    for a, b in zip(ss, ss[1:]):
+        if _walking(a):
+            walking_s += b.t - a.t
+            if _walking(b) and a.gait_phase is not None and b.gait_phase is not None and b.gait_phase < a.gait_phase - 128:
+                cycles += 1
+    if not walking_s and not stops and not refused:
+        return None
+    return {"walking_s": round(walking_s, 2), "cycles": cycles, "stops": stops, "refused": refused}
+
+
+def goal_refused_text(arg: Any) -> str:
+    """EVENT GOAL_REFUSED arg -> 'SET_GAIT: UNKNOWN_TYPE'."""
+    from kilo.link import consts
+
+    a = int(arg) & 0xFFFF
+    try:
+        name = P.MsgId(a >> 8).name
+    except ValueError:
+        name = f"0x{a >> 8:02X}"
+    return f"{name}: {consts.REFUSE_REASON.get(a & 0xFF, a & 0xFF)}"
+
+
+def _event_arg(name: str, arg: Any) -> str:
+    if not arg:
+        return ""
+    return f"({goal_refused_text(arg)})" if name == "GOAL_REFUSED" else f"({arg})"
 
 
 def format_summary(s: dict[str, Any]) -> str:
@@ -115,9 +157,13 @@ def format_summary(s: dict[str, Any]) -> str:
     if s.get("flags_fraction"):
         L.append("  flags (share of samples): "
                  + ", ".join(f"{k} {v:.0%}" for k, v in s["flags_fraction"].items()))
+    g = s.get("gait")
+    if g:
+        L.append(f"  gait: walking {g['walking_s']:.1f}s, {g['cycles']} cycles, {g['stops']} GAIT_STOPPED"
+                 + (f", refused {', '.join(sorted(set(g['refused'])))}" if g["refused"] else ""))
     if s["events"]:
         L.append(f"  events ({len(s['events'])}): "
-                 + ", ".join(f"{t:.1f}s {n}" + (f"({a})" if a else "") for t, n, a in s["events"][:40])
+                 + ", ".join(f"{t:.1f}s {n}" + _event_arg(n, a) for t, n, a in s["events"][:40])
                  + (" ..." if len(s["events"]) > 40 else ""))
     else:
         L.append("  events: none")

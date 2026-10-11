@@ -1,10 +1,10 @@
 """BodyAdapter: the behaviour layer's body interface over a real BodyClient.
 
-BodyClient (P0/P1) has postures and balance. Head targets, tricks and the
-buzzer are not in the body yet, so ``look``, ``play`` and ``beep`` call the
-client's method when it has one and otherwise record the call in
-``unsupported`` (``play`` then resolves at once). When BodyClient grows
-``look``/``play``/``beep``, nothing here needs to change.
+BodyClient has postures and balance. ``look``, ``play``, ``beep``, ``walk``
+and ``stop_walk`` call the client's method when it has one (BodyClient has
+all but ``beep`` since P2) and otherwise record the call in ``unsupported``
+(``play`` then resolves at once). No behaviour walks yet: the owner decides
+when autonomous walking is allowed.
 
 The adapter also gives the runner ``snapshot()`` (BodyState.snapshot()) and
 ``on_tick()``, which stamps the link's liveness from the asyncio loop: the
@@ -28,6 +28,7 @@ from typing import Any
 POSTURE_MOVE_S = 0.5  # the body's default posture transition: 25 ticks of 20 ms
 LOOK_MOVE_S = 0.3
 TRICK_MOVE_S = 2.0
+WALK_MOVE_S = 2.0  # renewed by each walk() call; the IMU detectors stay quiet meanwhile
 
 
 class BodyAdapter:
@@ -64,6 +65,18 @@ class BodyAdapter:
         if getattr(self.client, "look", None) is not None:
             self._self_motion(LOOK_MOVE_S)
         self._maybe("look", pan, tilt)
+
+    def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str = "trot", **gait: Any) -> Any:
+        """BodyClient.walk (P2). NOTE: no behaviour calls this yet, on
+        purpose: the owner decides when Kilo may walk autonomously (explore
+        stays the stand-and-look-around stub until then). Walking is on the
+        floor only, never on a desk."""
+        if getattr(self.client, "walk", None) is not None:
+            self._self_motion(WALK_MOVE_S)
+        return self._maybe("walk", stride_mm=stride_mm, turn_mm=turn_mm, pattern=pattern, **gait)
+
+    def stop_walk(self) -> Any:
+        return self._maybe("stop_walk")
 
     def beep(self, notes: list[tuple[int, int]]) -> None:
         self._maybe("beep", notes)

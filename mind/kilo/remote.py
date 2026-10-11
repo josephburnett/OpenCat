@@ -426,6 +426,43 @@ class RemoteBody:
     def release(self) -> None:
         self.conn.call("release")
 
+    # gait and body pose (P2; held by this session like a posture)
+    def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = "trot",
+             period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
+             body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
+             balance: bool = True) -> dict[str, int]:
+        return self.conn.call("walk", stride_mm=stride_mm, turn_mm=turn_mm, pattern=pattern, period_ms=period_ms,
+                              duty=duty, step_h_mm=step_h_mm, body_h_mm=body_h_mm, bob=bob, wag=wag,
+                              balance=balance, override=self.override)
+
+    def stop_walk(self, wait_s: float | None = None) -> Any:
+        """``stop_walk``: without ``wait_s`` returns None; with it, whether the
+        gait stopped (GAIT_STOPPED) within ``wait_s``."""
+        r = self.conn.call("stop_walk", timeout=(wait_s or 0) + 10.0, wait_s=wait_s)
+        return None if wait_s is None else bool(r["stopped"])
+
+    def load_geometry(self) -> None:
+        """The daemon reads the leg geometry itself (``walk`` op)."""
+        return None
+
+    def gait_state(self) -> dict[str, Any] | None:
+        return self.conn.call("gait")
+
+    def stop_timeout(self) -> float:
+        from kilo.body.client import GAIT_DEFAULTS, GAIT_STOP_MARGIN_S
+
+        g = self.gait_state() or {}
+        period = g.get("period_ms") or max(d["period_ms"] for d in GAIT_DEFAULTS.values())
+        return period / 1000.0 + GAIT_STOP_MARGIN_S
+
+    def pose(self, pitch_deg: float = 0, roll_deg: float = 0, dheight_mm: float = 0,
+             xshift_mm: float = 0) -> dict[str, int]:
+        return self.conn.call("pose", pitch_deg=pitch_deg, roll_deg=roll_deg, dheight_mm=dheight_mm,
+                              xshift_mm=xshift_mm, override=self.override)
+
+    def release_pose(self) -> None:
+        self.conn.call("release_pose")
+
     # tricks (daemon ops: uploaded, played and owned by the daemon's session)
     def trick_upload(self, name: str | None = None, trick: Any = None, force: bool = False) -> dict[str, Any]:
         """``trick_upload``: a library name or a Trick; returns {name, trick_id, uploaded, crc16, frames}."""

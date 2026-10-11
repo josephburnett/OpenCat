@@ -71,13 +71,14 @@ def describe(arg: int) -> str:
 
 @dataclass(frozen=True)
 class Action:
-    kind: str        # "posture" | "trick" | "balance_toggle" | "gait" | "ignore"
-    name: str = ""   # the posture or trick name
+    kind: str        # "posture" | "trick" | "balance_toggle" | "walk" | "gait_pattern" | "ignore"
+    name: str = ""   # the posture or trick name, the walk direction, the gait pattern
 
 
-# kilo run --remote. Gait keys wait for P2 (walking); EQ (calibrate) and 9
-# (last skill) do nothing.
-_GAIT = Action("gait")
+# kilo run --remote. The direction keys walk (P2) with the selected pattern
+# until another key, like the legacy firmware; 100+ / 200+ / 1 select the
+# pattern; EQ (calibrate) and 9 (last skill) do nothing.
+WALK_DIRECTIONS = ("forward", "backward", "left", "right", "march")
 _IGNORE = Action("ignore")
 ACTIONS: dict[str, Action] = {
     "CH-": Action("posture", "rest"),
@@ -91,7 +92,14 @@ ACTIONS: dict[str, Action] = {
     "7": Action("trick", "wash_face"),
     "8": Action("trick", "butt_up"),
     "CH+": Action("balance_toggle"),
-    **{label: _GAIT for label in ("CH", "|<<", ">||", "+", "0", "100+", "200+", "1")},
+    "CH": Action("walk", "forward"),
+    "+": Action("walk", "backward"),
+    "|<<": Action("walk", "left"),
+    ">||": Action("walk", "right"),
+    "0": Action("walk", "march"),
+    "100+": Action("gait_pattern", "crawl"),
+    "200+": Action("gait_pattern", "walk"),
+    "1": Action("gait_pattern", "trot"),
     "EQ": _IGNORE,
     "9": _IGNORE,
 }
@@ -117,20 +125,59 @@ class RemoteControl:
     cannot start from LIMP), as ``kilo trick play --posture stand`` would.
     Tricks go through ``BodyClient.start_trick`` (uploads when the body does
     not hold the trick yet, cached otherwise) and are not waited for.
+
+    Walking (P2): a direction key walks with the selected pattern (default
+    trot) and its default stride (``kilo.body.client.walk_args``) until
+    another key; 100+ / 200+ / 1 select crawl / walk / trot and, while
+    walking, re-send the walk with the new pattern. A posture or trick key
+    stops the gait first (``stop_walk``: the stop goal is latched, not waited
+    for; the body's TRICK owner pre-empts the legs anyway, and a posture
+    refreshed at 5 Hz is what the body takes after the stop's hand-over to
+    STANCE).
     """
 
     def __init__(self, client: Any, settle_s: float = 1.0, sleep: Callable[[float], None] = time.sleep):
         self.client = client
         self.settle_s = settle_s  # the default posture move is 0.5 s
         self.sleep = sleep
+        self.pattern = "trot"
+        self.direction: str | None = None  # the walk the remote started, None when not walking
 
     def balance_enabled(self) -> bool:
         g = self.client.link.goals().get("SET_BALANCE")
         return bool(g is not None and g.fields.get("enable"))
 
+    def walking(self) -> bool:
+        g = self.client.link.goals().get("SET_GAIT")
+        return bool(g is not None and g.fields.get("run")) or self.client.state.mode == "GAIT"
+
+    def _stop_walking(self) -> None:
+        if self.walking():
+            self.client.stop_walk()
+        self.direction = None
+
+    def _walk(self, direction: str) -> None:
+        from kilo.body.client import walk_args
+
+        if self.client.state.mode == "TRICK":
+            self.client.stop_trick()
+        self.client.walk(**walk_args(direction, self.pattern))
+        self.direction = direction
+
     def perform(self, action: Action) -> str:
         c = self.client
+        if action.kind == "walk":
+            self._walk(action.name)
+            return f"walk {action.name} ({self.pattern})"
+        if action.kind == "gait_pattern":
+            self.pattern = action.name
+            g = c.link.goals().get("SET_GAIT")
+            if self.direction is not None and g is not None and g.fields.get("run"):
+                self._walk(self.direction)
+                return f"walk {self.direction} ({self.pattern})"
+            return f"pattern {self.pattern}"
         if action.kind == "posture":
+            self._stop_walking()
             if c.state.mode == "TRICK":
                 c.stop_trick()
             c.posture(action.name)
@@ -139,6 +186,7 @@ class RemoteControl:
             from kilo.tricks import library
 
             t = library.load(action.name)
+            self._stop_walking()
             mode = c.state.mode
             if mode == "TRICK":
                 c.stop_trick()
