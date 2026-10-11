@@ -120,6 +120,8 @@ def frame_cases():
          {"code": 13, "arg": (0x11 << 8) | 10, "tick": 4100, "epoch": 4}, "GAIT refused STALE"),
         ("event_goal_refused_uncalibrated", "EVENT", 17,
          {"code": 13, "arg": (0x10 << 8) | 11, "tick": 4200, "epoch": 0}, "STAND refused: config DEFAULTED"),
+        ("event_ir_key_repeat", "EVENT", 50, {"code": 18, "arg": 0x100 | 0x18, "tick": 4300, "epoch": 4},
+         "IR remote key 2 held (NEC command 0x18 | repeat)"),
         ("ack_eeprom_busy", "ACK", 18, {"seq": 25, "type": 0x3A, "status": 9}, "CAL_SAVE while a save runs"),
         ("cal_values_zero", "CAL_VALUES", 8, {"offset": [0] * 16}, "32 zero bytes: COBS stress"),
         ("cal_values", "CAL_VALUES", 9,

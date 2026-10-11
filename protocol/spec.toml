@@ -36,7 +36,7 @@
 
 [meta]
 proto_major = 1
-proto_minor = 2
+proto_minor = 3
 
 # ---------------------------------------------------------------------------
 [link]
@@ -127,6 +127,7 @@ CONFIG_MIGRATED = 14
 CONFIG_DEFAULTED = 15   # arg = reason
 EEPROM_SAVED = 16
 TX_DROPPED = 17         # rate-limited
+IR_KEY = 18             # arg = NEC command byte | 0x100 for a held-key repeat
 
 [enums.mode]            # TELEMETRY.mode
 BOOT = 0
@@ -211,6 +212,7 @@ DIST_FRESH = 11
 
 [flags.hello_caps]
 BUZZER = 0
+IR = 1
 DMP = 2
 ULTRASONIC = 3
 EYES = 4

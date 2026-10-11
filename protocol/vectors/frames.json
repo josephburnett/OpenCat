@@ -888,6 +888,24 @@
    "note": "STAND refused: config DEFAULTED"
   },
   {
+   "name": "event_ir_key_repeat",
+   "msg": "EVENT",
+   "type": 133,
+   "dir": "body_to_pi",
+   "kind": "event",
+   "seq": 50,
+   "fields": {
+    "code": 18,
+    "arg": 280,
+    "tick": 4300,
+    "epoch": 4
+   },
+   "payload": "121801cc1004",
+   "decoded": "8532121801cc1004094c",
+   "wire": "0b8532121801cc1004094c00",
+   "note": "IR remote key 2 held (NEC command 0x18 | repeat)"
+  },
+  {
    "name": "ack_eeprom_busy",
    "msg": "ACK",
    "type": 132,

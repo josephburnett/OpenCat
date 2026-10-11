@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, ClassVar
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 2
+PROTO_MINOR = 3
 BAUD = 250000
 MAX_PAYLOAD = 60
 HEADER_BYTES = 2
@@ -160,6 +160,7 @@ class EventCode(enum.IntEnum):
     CONFIG_DEFAULTED = 15
     EEPROM_SAVED = 16
     TX_DROPPED = 17
+    IR_KEY = 18
 
 
 class Mode(enum.IntEnum):
@@ -254,6 +255,7 @@ class TelemetryFlags(enum.IntFlag):
 
 class HelloCaps(enum.IntFlag):
     BUZZER = 1 << 0
+    IR = 1 << 1
     DMP = 1 << 2
     ULTRASONIC = 1 << 3
     EYES = 1 << 4

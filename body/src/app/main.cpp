@@ -5,6 +5,7 @@
 // linked: no HardwareSerial, no Timer0/1/2 setup we did not ask for. The
 // hal/ modules set up exactly the peripherals they use.
 #include "main.h"
+#include "../features.h"  // KILO_ULTRASONIC / KILO_BUZZER / KILO_IR (default on)
 #include <avr/interrupt.h>
 #include "../core/joints.h"
 #include "../core/link.h"
@@ -16,8 +17,10 @@
 #include "../hal/eeprom.h"
 #include "../hal/gpio.h"
 #include "../hal/i2c.h"
+#include "../hal/ir.h"
 #include "../hal/mpu6050.h"
 #include "../hal/pca9685.h"
+#include "../hal/pcint2.h"
 #include "../hal/sys.h"
 #include "../hal/uart.h"
 #include "../hal/ultrasonic.h"
@@ -39,16 +42,6 @@ static constexpr uint32_t BUILD_TIME_HASH = fnv(__DATE__ " " __TIME__, 216613626
 #define FW_BUILD BUILD_TIME_HASH
 #endif
 #define RESET_BUILD_ID (FW_BUILD ^ BUILD_TIME_HASH ^ 0x4B494C4FUL)
-
-// Side peripherals that §7 schedules for P1 (ultrasonic, buzzer). They are
-// implemented and on by default; -DKILO_ULTRASONIC=0 / -DKILO_BUZZER=0 drop
-// them from the build (about 0.4 KB each) if flash gets tight.
-#ifndef KILO_ULTRASONIC
-#define KILO_ULTRASONIC 1
-#endif
-#ifndef KILO_BUZZER
-#define KILO_BUZZER 1
-#endif
 
 #define IMU_INIT_ATTEMPTS 3
 #define BATT_PERIOD_TICKS BATT_SAMPLE_TICKS
@@ -125,6 +118,10 @@ static void background(void) {
     g_stats.dist_fresh = 1;
   }
 #endif
+#if KILO_IR
+  uint16_t key;
+  if (ir_poll(&key)) events_push(g_body.ev, EV_IR_KEY, (int16_t)key, g_body.tick, g_body.epoch);
+#endif
   // IMU re-init only while limp: the upload takes seconds of I2C, and
   // nothing may depend on attitude meanwhile (doc §3a, §3g).
   if (g_body.imu_fault && body_mode(g_body) == 1) {
@@ -162,6 +159,10 @@ int main(void) {
 #if KILO_ULTRASONIC
   us_init();
 #endif
+#if KILO_IR
+  ir_init();
+#endif
+  pcint2_init();
   sei();
   // Config first: it is only EEPROM reads, and the warm-boot pose needs the
   // calibration to turn counts back into angles.
@@ -186,7 +187,7 @@ int main(void) {
   body_init(g_body, &g_config, is_warm ? warm : 0, imu_present, sys_reset_record.epoch);
   // 4. HELLO and EVENT BOOT, then the watchdog.
   uint16_t caps = (KILO_BUZZER ? KILO_HELLO_CAPS_BUZZER : 0) | (imu_present ? KILO_HELLO_CAPS_DMP : 0) |
-                  (KILO_ULTRASONIC ? KILO_HELLO_CAPS_ULTRASONIC : 0);
+                  (KILO_ULTRASONIC ? KILO_HELLO_CAPS_ULTRASONIC : 0) | (KILO_IR ? KILO_HELLO_CAPS_IR : 0);
   link_init(FW_BUILD, caps);
   link_boot(g_stats.reset_cause, g_stats.last_alive_tick);
   events_push(g_body.ev, EV_BOOT, g_stats.reset_cause, 0, g_body.epoch);

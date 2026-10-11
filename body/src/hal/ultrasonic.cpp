@@ -2,7 +2,6 @@
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <util/delay.h>
-#include "clock.h"
 
 // D6 = PD6 = PCINT22, in pin-change group 2 (PCINT16..23 = PORTD).
 enum : uint8_t { US_IDLE, US_WAIT_RISE, US_WAIT_FALL, US_DONE };
@@ -11,9 +10,10 @@ static volatile uint8_t state;
 static volatile uint32_t t_rise, t_fall;
 static uint32_t t_trig;
 
-ISR(PCINT2_vect) {
-  uint32_t t = clock_micros();
-  if (PIND & _BV(6)) {
+// Called from the shared PCINT2 ISR (hal/pcint2.cpp) on every pin change of
+// PORTD, with PIND as read there; acts only on the edge it is waiting for.
+void us_pcint(uint8_t pind, uint32_t t) {
+  if (pind & _BV(6)) {
     if (state == US_WAIT_RISE) {
       t_rise = t;
       state = US_WAIT_FALL;
@@ -21,18 +21,21 @@ ISR(PCINT2_vect) {
   } else if (state == US_WAIT_FALL) {
     t_fall = t;
     state = US_DONE;
-    PCMSK2 = 0;  // done: no more interrupts from this pin
+    PCMSK2 &= (uint8_t)~_BV(PCINT22);  // done; D4 (IR) keeps its PCINT20
   }
 }
 
 void us_init(void) {
-  PCMSK2 = 0;
-  PCICR |= _BV(PCIE2);  // group 2 enabled; individual pins via PCMSK2
+  PCMSK2 &= (uint8_t)~_BV(PCINT22);
   state = US_IDLE;
 }
 
+// PCMSK2 is not sbi/cbi-reachable, so these are read-modify-writes from the
+// main loop. The ISR only ever clears PCINT22 (in US_WAIT_FALL), which these
+// never race with: us_trigger runs with PCINT22 off, and the timeout path
+// clears the same bit.
 void us_trigger(uint32_t now_us) {
-  PCMSK2 = 0;
+  PCMSK2 &= (uint8_t)~_BV(PCINT22);
   // Single-instruction sbi/cbi only: PORTD is shared with the buzzer ISR.
   PORTD &= (uint8_t)~_BV(6);
   DDRD |= _BV(6);
@@ -43,8 +46,9 @@ void us_trigger(uint32_t now_us) {
   DDRD &= (uint8_t)~_BV(6);  // input, no pull-up (PORTD6 is 0)
   t_trig = now_us;
   state = US_WAIT_RISE;
-  PCIFR = _BV(PCIF2);   // drop any edge from our own pulse
-  PCMSK2 = _BV(PCINT22);
+  // No PCIFR clear: PCINT22 was masked during the pulse, so the pulse set no
+  // flag, and a pending flag now is an IR edge on D4 that must not be lost.
+  PCMSK2 |= _BV(PCINT22);
 }
 
 bool us_poll(uint32_t now_us, uint16_t* mm) {
@@ -62,7 +66,7 @@ bool us_poll(uint32_t now_us, uint16_t* mm) {
     return true;
   }
   if (now_us - t_trig < US_TIMEOUT_US) return false;
-  PCMSK2 = 0;
+  PCMSK2 &= (uint8_t)~_BV(PCINT22);
   state = US_IDLE;
   *mm = 0;
   return true;

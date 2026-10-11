@@ -30,7 +30,7 @@ extern "C" {
 
 /* ---- Versions and link constants ---- */
 #define KILO_PROTO_MAJOR 1u
-#define KILO_PROTO_MINOR 2u
+#define KILO_PROTO_MINOR 3u
 #define KILO_BAUD 250000UL
 #define KILO_MAX_PAYLOAD 60u
 #define KILO_HEADER_BYTES 2u
@@ -172,6 +172,7 @@ enum kilo_event {
     KILO_EVENT_CONFIG_DEFAULTED = 15,
     KILO_EVENT_EEPROM_SAVED = 16,
     KILO_EVENT_TX_DROPPED = 17,
+    KILO_EVENT_IR_KEY = 18,
 };
 
 enum kilo_mode {
@@ -264,6 +265,7 @@ enum kilo_easing {
 #define KILO_TELEMETRY_FLAGS_DIST_FRESH (1u << 11)
 
 #define KILO_HELLO_CAPS_BUZZER (1u << 0)
+#define KILO_HELLO_CAPS_IR (1u << 1)
 #define KILO_HELLO_CAPS_DMP (1u << 2)
 #define KILO_HELLO_CAPS_ULTRASONIC (1u << 3)
 #define KILO_HELLO_CAPS_EYES (1u << 4)

@@ -5,8 +5,9 @@
 // RgbUltrasonic(6, 7): signal on D6, the RGB LEDs on D7). Legacy used
 // pulseIn(), which blocks for the whole echo (up to 38 ms with nothing in
 // range, or 1 s if no echo starts). Here the tick pulses D6 for 20 us, turns
-// it into an input and enables PCINT22; the ISR stamps both edges with
-// clock_micros(), and background() collects the result.
+// it into an input and enables PCINT22; the PCINT2 ISR (hal/pcint2.cpp, shared
+// with the IR receiver on D4) stamps both edges with clock_micros(), and
+// background() collects the result.
 #ifndef KILO_HAL_ULTRASONIC_H
 #define KILO_HAL_ULTRASONIC_H
 #include <stdint.h>
@@ -21,5 +22,7 @@ void us_trigger(uint32_t now_us);
 bool us_poll(uint32_t now_us, uint16_t* mm);
 // An echo is being timed: the WS2812 update (interrupts off) must wait.
 bool us_busy(void);
+// The shared PCINT2 ISR's hook: PIND as read there and its time stamp.
+void us_pcint(uint8_t pind, uint32_t t_us);
 
 #endif
