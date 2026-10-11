@@ -4,7 +4,8 @@
 # with lingering enabled so it runs from boot without a login session.
 #
 #   systemctl --user start|stop|restart|status kilo
-#   journalctl --user -u kilo -f
+#   journalctl --user -u kilo -f    (if the user journal is readable; else:)
+#   tail -f ~/kilo-logs/daemon.log  (the daemon's own rotating log, always written)
 #
 # Settings: ~/.config/kilo/env (KILO_PORT, KILO_RUN_ARGS, ...; see env.example).
 [Unit]
@@ -15,7 +16,8 @@ Documentation=file:%h/OpenCat/mind/README.md
 Type=simple
 EnvironmentFile=-%h/.config/kilo/env
 Environment=PYTHONUNBUFFERED=1
-# --log: JSON-lines frame log in ~/kilo-logs; stderr (the daemon's own log) goes to the journal.
+# --log: JSON-lines frame log in ~/kilo-logs; stderr (the daemon's own log) goes to the journal
+# and to ~/kilo-logs/daemon.log.
 ExecStart=%h/OpenCat/.venv/bin/kilo run --log $KILO_RUN_ARGS
 # SIGTERM: drop goals, go silent (the body's watchdog takes over), close the port.
 KillSignal=SIGTERM

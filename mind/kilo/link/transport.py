@@ -348,7 +348,8 @@ def loopback_pair() -> tuple[LoopbackEnd, LoopbackEnd]:
 
 
 def open_port(port: str, baud: int = DEFAULT_BAUD) -> Transport:
-    """Open ``port``: ptys (virtual body) as raw fds, everything else via pyserial."""
-    if port.startswith("/dev/pts/"):
+    """Open ``port``: ptys (virtual body, also through a symlink) as raw fds,
+    everything else via pyserial. Raises OSError when the port does not exist."""
+    if os.path.realpath(port).startswith("/dev/pts/"):
         return FdTransport.open(port)
     return SerialTransport(port, baud)

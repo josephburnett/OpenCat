@@ -6,19 +6,43 @@ Each tick:
    ``body.snapshot()`` (a BodyState.snapshot()-shaped dict);
 2. on an epoch change the cached posture/balance goals are forgotten (the
    body dropped them), so behaviours re-assert them;
-3. percepts: the ``percepts()`` source (camera, IMU detectors, later) merged
-   with ultrasonic ones from the snapshot (``near``, ``approaching``) and a
-   ``startle`` on a new fall;
-4. drives are advanced by the elapsed time, with the activity of the
+3. body events: ``BodyEvents`` turns the snapshot's epoch, EVENTs and link
+   flags into ``body_event`` log records and the ``on_body_event`` callback
+   (epoch change, FELL, WATCHDOG, LOW_BATTERY, connection...);
+4. percepts: ultrasonic ones from the snapshot (``near``, ``approaching``,
+   using the personality's ``percepts`` thresholds) and a ``startle`` on a new
+   fall, overridden by the ``percepts()`` source when there is one (a
+   ``startle`` is kept if either says so). ``run_behaviour`` uses
+   ``PerceptFeed``: ``kilo.perception.Percepts.update(state)`` each tick;
+5. drives are advanced by the elapsed time, with the activity of the
    behaviour that ran last tick;
-5. the root (library.build_root) is ticked;
-6. a record goes to the JSONL behaviour log when the choice or active path
+6. the root (library.build_root) is ticked;
+7. a record goes to the JSONL behaviour log when the choice or active path
    changes, and at least every ``log_every_s``. Writes go through
    kilo.log.JsonlLogger (queue + writer thread), never blocking the loop.
 
 ``run()`` returns when ``stop()`` is called, ``duration`` has elapsed, or the
 wind-down branch has asked for poweroff (then ``on_poweroff`` is called; the
 runner itself never powers anything off).
+
+Behaviour percepts (``ctx.percepts`` keys, the selector's percept terms) and
+where ``PerceptFeed`` gets them from ``Percepts.as_dict()``:
+
+- ``face``: always False until a camera exists (term ``face``; greet);
+- ``pet``: Percepts ``pet``, gentle rocking (term ``pet``; greet; satisfies
+  sociability);
+- ``near``: Percepts ``near``, ultrasonic < 150 mm with hysteresis (term ``near``);
+- ``approaching``: Percepts ``approaching``, range closing > 100 mm/s (term
+  ``approaching``; arousal spikes);
+- ``alone``: not a percept; the selector derives it as not (face or pet);
+- ``startle``: 1.0 while Percepts ``startle`` is held (1 s after the event),
+  or on a new fall (arousal spikes; the startle behaviour);
+- ``tap``, ``tilted``, ``picked_up``, ``clear``: the Percepts flags of the same
+  name, in ``ctx.percepts`` and the log, no selector term yet;
+- ``percept_events``: names of the PerceptEvents produced this tick.
+
+``run_behaviour(client, state, stop_event, log_dir)`` is the daemon's entry
+point (``kilo run --behaviour``).
 """
 
 from __future__ import annotations
@@ -30,6 +54,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .body_events import BodyEvents
 from .drives import DriveInputs, Drives
 from .library import build_root
 from .personality import load as load_personality
@@ -50,7 +75,8 @@ class Runner:
                  seed: int | None = None, hz: float = 10.0,
                  log_path: str | Path | None = None, log: bool = True, logger: Any = None,
                  log_every_s: float = 1.0, history: int = 0,
-                 on_poweroff: Callable[[], Any] | None = None):
+                 on_poweroff: Callable[[], Any] | None = None,
+                 on_body_event: Callable[[dict[str, Any]], Any] | None = None):
         self.cfg = personality if personality is not None else load_personality()
         self.body = body
         self.percept_source = percepts
@@ -62,6 +88,8 @@ class Runner:
                            drives=Drives.from_personality(self.cfg), personality=self.cfg)
         self.root = build_root(self.cfg)
         self.on_poweroff = on_poweroff
+        self.on_body_event = on_body_event
+        self.body_events = BodyEvents()
         self.log_every_s = log_every_s
         self._own_logger = False
         self.log_path: Path | None = None
@@ -121,10 +149,29 @@ class Runner:
         self._was_fallen = fallen
         if self.percept_source is not None:
             try:
-                p.update(self.percept_source() or {})
+                src = self.percept_source() or {}
             except Exception as e:
                 self.ctx.errors.append(("percepts", repr(e)))
+                src = {}
+            startle = max(float(p.get("startle") or 0.0), float(src.get("startle") or 0.0))
+            p.update(src)
+            if startle:
+                p["startle"] = startle
+            else:
+                p.pop("startle", None)
         return p
+
+    def _body_events(self, snap: dict[str, Any], now: float) -> list[dict[str, Any]]:
+        evs = self.body_events.update(snap)
+        for ev in evs:
+            if self.logger is not None:
+                self.logger.log("body_event", t=round(now, 3), **ev)
+            if self.on_body_event is not None:
+                try:
+                    self.on_body_event(ev)
+                except Exception as e:
+                    self.ctx.errors.append(("on_body_event", repr(e)))
+        return evs
 
     def step(self) -> dict[str, Any]:
         ctx = self.ctx
@@ -138,6 +185,7 @@ class Runner:
         ctx.percepts = self._percepts(snap)
         ctx.begin_tick()
         now = ctx.now
+        ctx.data["body_events"] = self._body_events(snap, now)
         dt = 0.0 if self._last_now is None else now - self._last_now
         self._last_now = now
         p = ctx.percepts
@@ -223,3 +271,83 @@ class Runner:
             if self._own_logger:
                 await asyncio.get_running_loop().run_in_executor(None, self.logger.close)
         return self.stopped_by or "stop"
+
+
+# ---- the daemon's entry point ------------------------------------------------------------
+
+def behaviour_percepts(d: dict[str, Any]) -> dict[str, Any]:
+    """Map a ``Percepts.as_dict()``/``update()`` result to behaviour percepts
+    (the list in the module docstring)."""
+    out: dict[str, Any] = {
+        "face": False,  # no camera yet
+        "pet": bool(d.get("pet")),
+        "near": bool(d.get("near")),
+        "approaching": bool(d.get("approaching")),
+        "clear": bool(d.get("clear")),
+        "tilted": bool(d.get("tilted")),
+        "tap": bool(d.get("tap")),
+        "picked_up": bool(d.get("picked_up")),
+        "startle": 1.0 if d.get("startle") else 0.0,
+    }
+    evs = d.get("events") or []
+    if evs:
+        out["percept_events"] = [getattr(e, "name", str(e)) for e in evs]
+    return out
+
+
+class PerceptFeed:
+    """The runner's percept source over kilo.perception: ``update(state)``
+    once per tick (a sample already seen is ignored), mapped by
+    ``behaviour_percepts``. ``percepts`` may be shared with the daemon."""
+
+    def __init__(self, state: Any, percepts: Any = None):
+        if percepts is None:
+            from kilo.perception import SharedPercepts
+            percepts = SharedPercepts()
+        self.state = state
+        self.percepts = percepts
+
+    def __call__(self) -> dict[str, Any]:
+        return behaviour_percepts(self.percepts.update(self.state))
+
+
+def run_behaviour(client: Any, state: Any, stop_event: Any, log_dir: str | Path, *,
+                  percepts: Any = None, personality: str | Path | None = None, seed: int | None = None,
+                  hz: float = 10.0) -> str:
+    """Run the behaviour layer until ``stop_event`` is set (the daemon's
+    ``kilo run --behaviour`` calls this in its own thread).
+
+    ``client`` is a BodyClient, ``state`` its BodyState, ``stop_event`` a
+    threading.Event, ``log_dir`` where ``behaviour-<time>.jsonl`` goes.
+    ``percepts`` (the daemon's SharedPercepts) is used instead of a private
+    one when given; ``personality`` (else ``$KILO_PERSONALITY``) picks the
+    YAML. Returns why it stopped (``stop``, ``poweroff``...)."""
+    import logging
+    import os
+
+    from .adapter import BodyAdapter
+
+    log = logging.getLogger("kilo.behaviour")
+    cfg = load_personality(personality or os.environ.get("KILO_PERSONALITY") or None)
+    feed = PerceptFeed(state, percepts)
+    body = BodyAdapter(client, percepts=feed.percepts)
+    log_path = Path(log_dir) / time.strftime("behaviour-%Y%m%d-%H%M%S.jsonl")
+    runner = Runner(body, cfg, percepts=feed, seed=seed, hz=hz, log_path=log_path,
+                    on_body_event=lambda ev: log.info("body event %s", ev))
+    log.info("behaviour runner: log %s, seed %s, personality %s", log_path, runner.seed, cfg.get("name"))
+
+    async def main() -> str:
+        async def watch() -> None:
+            while not stop_event.is_set():
+                await asyncio.sleep(0.05)
+            runner.stop()
+        w = asyncio.ensure_future(watch())
+        try:
+            return await runner.run()
+        finally:
+            w.cancel()
+
+    why = asyncio.run(main())
+    log.info("behaviour runner stopped: %s after %d ticks (unsupported calls: %s)", why, runner.ticks,
+             dict(body.unsupported) or "-")
+    return why

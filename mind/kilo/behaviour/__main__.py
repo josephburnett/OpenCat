@@ -19,7 +19,7 @@ import sys
 
 from .adapter import BodyAdapter
 from .personality import PersonalityError, load
-from .runner import Runner
+from .runner import PerceptFeed, Runner
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,7 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         client.wait_ready(3.0)
         client.set_stream(telem_div=2)
-        runner = Runner(BodyAdapter(client), cfg, seed=args.seed, log_path=args.log,
+        feed = PerceptFeed(client.state)  # kilo.perception, as under the daemon
+        runner = Runner(BodyAdapter(client, percepts=feed.percepts), cfg, percepts=feed, seed=args.seed,
+                        log_path=args.log,
                         on_poweroff=(lambda: subprocess.run(shlex.split(args.poweroff_cmd), check=False))
                         if args.poweroff_cmd else None)
         print(f"behaviour log: {runner.log_path} (seed {runner.seed})", file=sys.stderr)

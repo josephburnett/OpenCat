@@ -8,8 +8,10 @@
     kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S]
     kilo vbody [--fall-after S] [--no-keys]
-    kilo run [--port P] [--socket PATH] [--log] [--behaviour]
+    kilo run [--port P] [--socket PATH] [--log] [--kilolog [FILE]] [--behaviour]
     kilo daemon [status|stop]
+    kilo log summary|replay|plot FILE ...
+    kilo --kilolog [FILE] COMMAND ...    (also: kilo monitor --percepts; kilo.cli_tools)
 
 Every command first tries the daemon socket (``kilo run``, kilo.daemon; path
 from kilo.remote.socket_path()); when no daemon listens, or ``--direct`` is
@@ -44,6 +46,7 @@ from typing import Any, Sequence
 from kilo import __version__
 from kilo.body.client import (BALANCE_CLAMP, BALANCE_DEADBAND, BALANCE_KD_S, BALANCE_KP, POSTURE_CHOICES,
                               BodyClient, ProtocolMismatch)
+from kilo.cli_tools import add_log_parser, cmd_log, fix_kilolog_argv
 from kilo.link import consts
 from kilo.link.messages import fields_of
 from kilo.link.ports import detect_port
@@ -64,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", action="store_true",
                    help="write a JSON-lines frame/event log to ~/kilo-logs/kilo-<time>.jsonl")
     p.add_argument("--log-file", metavar="FILE", help="write the JSON-lines log to FILE")
+    p.add_argument("--kilolog", nargs="?", const="", default=None, metavar="FILE",
+                   help="write the raw wire frames to FILE (default ~/kilo-logs/kilo-<time>.kilolog.gz)")
     p.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for the body")
     p.add_argument("-v", "--verbose", action="count", default=0)
     p.add_argument("--socket", metavar="PATH",
@@ -85,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="send nothing (no HELLO, heartbeat or goal; the body's watchdog is not fed) "
                         "and print a timeline: events and mode/epoch/owner/flag changes as they "
                         "happen, a telemetry line every second")
+    s.add_argument("--percepts", action="store_true",
+                   help="also show the percept flags and print percept events (tap, pet, near...) live")
 
     s = sub.add_parser("posture", help="hold a posture (until Ctrl-C or --for)")
     s.add_argument("name", choices=POSTURE_CHOICES)
@@ -172,6 +179,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--socket", default=argparse.SUPPRESS, metavar="PATH", help="socket path")
     s.add_argument("--log", action="store_true", default=argparse.SUPPRESS,
                    help="write the JSON-lines frame log to --log-dir")
+    s.add_argument("--kilolog", nargs="?", const="", default=argparse.SUPPRESS, metavar="FILE",
+                   help="write the raw wire frames (default <log-dir>/kilo-<time>.kilolog.gz)")
+    s.add_argument("--daemon-log", default=None, metavar="FILE",
+                   help="the daemon's own rotating log (default <log-dir>/daemon.log; 'none' = off)")
     s.add_argument("--log-dir", default=None, metavar="DIR",
                    help="telemetry/behaviour log dir (default ~/kilo-logs)")
     s.add_argument("--behaviour", action="store_true",
@@ -185,11 +196,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=("status", "stop"), nargs="?", default="status")
     s.add_argument("--json", action="store_true")
     __import__("kilo.cli_trick").cli_trick.add_parser(sub, LINK_COMMANDS)  # kilo trick (cli_trick.py)
+    add_log_parser(sub)
     return p
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
+    argv = fix_kilolog_argv(sys.argv[1:] if argv is None else argv, {*LINK_COMMANDS, *PORT_COMMANDS})
     args = parser.parse_args(argv)
     if args.cmd == "cal" and args.cal_cmd is None:
         args.cal_cmd = "show"
@@ -259,8 +272,13 @@ def open_link(args: argparse.Namespace, passive: bool = False) -> tuple[SerialLi
         from kilo.log import JsonlLogger, default_path
 
         logger = JsonlLogger(args.log_file or default_path())
+    wire = None
+    if getattr(args, "kilolog", None) is not None:
+        from kilo.cli_tools import open_kilolog
+
+        wire = open_kilolog(args.kilolog, port, f"kilo {args.cmd}")
     link = SerialLink(lambda: open_port(port, args.baud), logger=logger, port_name=port,
-                      passive=passive)
+                      passive=passive, wire_logger=wire)
     link.mark_alive()
     link.start()
     return link, BodyClient(link)
@@ -270,6 +288,8 @@ def close_link(link: SerialLink) -> None:
     link.stop()
     if link.logger is not None:
         link.logger.close()
+    if link.wire_logger is not None:
+        link.wire_logger.close()
 
 
 def _fmt(v: Any, f: str = "{:7.2f}") -> str:
@@ -285,6 +305,7 @@ def cmd_status(args: argparse.Namespace, client: BodyClient) -> int:
             stats = client.stats()
         except LinkError as e:
             stats = f"unavailable: {e}"
+    _fresh_telemetry(client)
     snap = client.state.snapshot()
     snap["body_stats"] = fields_of(stats) if hasattr(stats, "__dataclass_fields__") else stats
     if args.json:
@@ -313,6 +334,19 @@ def cmd_status(args: argparse.Namespace, client: BodyClient) -> int:
     ls = snap["stats"]
     print("link stats  " + " ".join(f"{k}={v}" for k, v in ls.items() if v))
     return EXIT_OK
+
+
+def _fresh_telemetry(client: BodyClient, timeout: float = 0.3) -> None:
+    """Wait for a TELEMETRY that arrives after this point (after the STATS
+    reply, so the body has heard this session): right after the port opens
+    the reader may still be chewing through telemetry the body sent before
+    (buffered in the port), whose flags (link_ok...) predate us. A daemon's
+    link has been up all along: nothing to wait for."""
+    link, st = client.link, client.state
+    if not hasattr(link, "wait_until") or not hasattr(st, "telemetry_at"):
+        return
+    since = link.clock()
+    link.wait_until(lambda: st.telemetry_at is not None and st.telemetry_at > since, timeout)
 
 
 def render_monitor(snap: dict[str, Any]) -> str:
@@ -367,6 +401,10 @@ def watch_timeline(client: BodyClient, t0: float, duration: float | None) -> int
 
 
 def cmd_monitor(args: argparse.Namespace, client: BodyClient) -> int:
+    if args.percepts and not args.passive:
+        from kilo.cli_tools import monitor_percepts
+
+        return monitor_percepts(args, client)
     if args.passive:
         t0 = client.link.clock()
         print(f"passive monitor on {client.state.port} from {_wall(time.time())} (t=0): sending "
@@ -661,17 +699,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
+    from kilo.cli_tools import daemon_link_lines, print_tried
     from kilo.remote import DaemonError, connect, socket_path
 
-    path = socket_path(args.socket)
+    tried: list[Any] = []
     try:
-        conn = connect(path)
+        conn = connect(args.socket, tried=tried)
     except DaemonError as e:
         print(f"kilo daemon: {e}", file=sys.stderr)
+        print_tried(tried)
         return EXIT_ERR
     if conn is None:
-        print(f"no daemon listening on {path}")
+        print(f"no daemon listening on {socket_path(args.socket)}")
+        print_tried(tried)
         return EXIT_ERR if args.action == "status" else EXIT_OK
+    path = conn.path
     with conn:
         info = conn.info
         if args.action == "stop":
@@ -690,6 +732,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     print(f"socket      {info['socket']}")
     print(f"port        {info['port']}  " + ("RELEASED (flashing)" if info["port_released"] else
                                              f"connected={info['connected']} alive={info['alive']}"))
+    for line in daemon_link_lines(info):
+        print(line)
     print(f"holds       {', '.join(info['held_goals']) or '-'}  idle {info['idle'] or '-'}")
     print(f"behaviour   {info['behaviour']}")
     print(f"frame log   {info['log_file'] or '-'}")
@@ -699,7 +743,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 LINK_COMMANDS = {"status": cmd_status, "monitor": cmd_monitor, "posture": cmd_posture, "balance": cmd_balance,
                  "cal": cmd_cal, "param": cmd_param, "pca": cmd_pca, "eeprom": cmd_eeprom}
 # Commands that manage the port (or the daemon) themselves: cmd(args).
-PORT_COMMANDS = {"flash": cmd_flash, "vbody": cmd_vbody, "run": cmd_run, "daemon": cmd_daemon}
+PORT_COMMANDS = {"flash": cmd_flash, "vbody": cmd_vbody, "run": cmd_run, "daemon": cmd_daemon,
+                 "log": cmd_log}
 # Link-command modes that must send nothing, so they cannot share the daemon's port.
 SILENT_MODES = {"monitor": ("passive", "--passive"), "posture": ("then_watch", "--then-watch")}
 
@@ -722,8 +767,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _refuse_port_busy(args, conn, f"`kilo {args.cmd} {silent}`")
         from kilo.remote import RemoteBody
 
-        if args.log or args.log_file:
-            print("note: through the daemon, frames are logged by the daemon (`kilo run --log`)", file=sys.stderr)
+        if args.log or args.log_file or args.kilolog is not None:
+            print("note: through the daemon, frames are logged by the daemon (`kilo run --log`/`--kilolog`)",
+                  file=sys.stderr)
         link, client = None, RemoteBody(conn)
     else:
         link, client = open_link(args, passive=args.cmd == "monitor" and args.passive)
