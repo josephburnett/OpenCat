@@ -46,12 +46,10 @@ on the charger. The second half ran at 20:20 with the pack at 8.43 V.
 6. Link decode errors on connect: one `bad_cobs`/`bad_crc` per session from
    boot garbage. Harmless, counted.
 7. `imu_stale` reached 3 over 153 s with DMP at 100 Hz. Watch in P1.
-8. **Attitude glitch.** One telemetry sample at +7.1 s of the step 8 watch read
-   pitch 15.6° / roll −70.5° while Kilo lay still in REST; the samples either
-   side were level. The fall reflex trips at 75°, so a single bad DMP packet
-   could nearly fire it. P1 must require the fall condition over several
-   consecutive samples (and count/diagnose the bad packet: FIFO misalignment
-   or an I2C read error).
+8. **Attitude follows handling.** Kilo was held in hand and tilted during
+   the step 8 watch; the pitch 15.6° / roll −70.5° sample at +7.1 s was real.
+   The owner reported the postures as correct. Still worth doing in P1: trip
+   the fall reflex only on several consecutive samples over the threshold.
 9. The watchdog cannot be observed with an active `kilo` command because the
    mind feeds it; `kilo monitor --passive` and `posture --then-watch` were
    added (239a89d). The body's mode stays LINK_LOST through all watchdog
