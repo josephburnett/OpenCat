@@ -535,7 +535,7 @@ to be tuned.
 | Param | Unit | Range | Walk / trot / crawl |
 |---|---|---|---|
 | `pattern` | enum | WALK, TROT, CRAWL | |
-| `period_ms` | ms | 300..2000 | 800 / 500 / 1200 |
+| `period_ms` | ms | 300..2000 | 1000 / 500 / 1500 (800 / 1200 until 2026-10-11: with Kilo's measured 45 + 50 mm legs those hit the 10°/tick safety slew in the swing) |
 | `duty` | /256 | 128..230 | 192 / 140 / 218 |
 | `stride_mm` | mm, signed | −60..60 | 30 / 35 / 25 |
 | `turn_mm` | mm, signed, + = left | −40..40 | 0 |
@@ -1808,9 +1808,13 @@ and `src/` are deleted after P2 is accepted.
 
 ## 8. Open questions for the owner
 
-1. **Leg geometry (blocks P2).** Measure L1, L2, the foot contact offset, the
-   shoulder spacing Lb and the foot track W (Appendix B). Confirm that the
-   calibration posture is "upper leg vertical, lower leg at 90°".
+1. ~~**Leg geometry (blocks P2).**~~ Measured by the owner 2026-10-11 (B7):
+   L1 45, L2 50 to the centre of the 6 mm-radius foot disc (56 to the tip),
+   Lb 123, W 65; front knees bend back, back knees forward (the IK's
+   `IK_SIGMA_FRONT` convention). Still open: confirm on Kilo that the
+   calibration posture is "upper leg vertical, lower leg at 90°"
+   (`LEG_SH_ZERO_DEG`, `LEG_KN_ZERO_DEG`) and the joint signs (foot nudge,
+   `docs/p2-hardware-test.md`).
 2. **Battery.** Do one meter reading against the reported `batt_mv` to fix the
    scale. Is a higher-drain pack planned? Petoi warns the stock 1000 mAh pack
    struggles with a Pi aboard, and the thresholds depend on it.
@@ -1966,8 +1970,14 @@ At 115200 the downstream worst case would be ≈80%.
     knee-to-tip line, also the offset angle δ, added to θ2.
 - Measure front-to-back shoulder-axle spacing (Lb) and the left-right foot
   track (W).
-- Rough guesses, **not to be shipped:** L1 ≈ L2 ≈ 45-55 mm, Lb ≈ 100-110 mm,
-  W ≈ 55-65 mm.
+- **Kilo, measured by the owner 2026-10-11** (now the param defaults): L1 =
+  45 mm; lower leg 56 mm axle to tip, ending in a disc of radius 6 mm, so
+  L2 = 50 mm to the disc centre and the floor is 6 mm below the IK's foot
+  point (no offset angle: a disc touches straight down whatever the leg's
+  angle, so the IK controls the disc centre and `body_h_mm` is the shoulder
+  axle's height above the foot centres, 6 mm less than above the floor); Lb =
+  123 mm; W = 65 mm foot centre to foot centre; front knees bend back, back
+  knees forward. (The pre-measurement guesses were 50/50/105/60.)
 
 ---
 
@@ -2193,10 +2203,10 @@ default). The P0 body implements:
 | 10 | `BATT_CRIT_MV` | 6300 | 5000..8400 | mV | CRITICAL trip (latched) |
 | 11 | `TELEM_DIV` | 2 | 0..50 | tick | TELEMETRY divisor at boot (`SET_STREAM` overrides) |
 | 12 | `US_PERIOD_TICKS` | 4 | 3..50 | tick | Ultrasonic cadence |
-| 13 | `LEG_L1_MM` | 50 (guess) | 20..120 | mm | Upper leg, shoulder axle to knee axle (B7) |
-| 14 | `LEG_L2_MM` | 50 (guess) | 20..120 | mm | Lower leg, knee axle to floor contact |
-| 15 | `LEG_LB_MM` | 105 (guess) | 50..200 | mm | Front-back shoulder spacing |
-| 16 | `LEG_W_MM` | 60 (guess) | 30..150 | mm | Left-right foot track |
+| 13 | `LEG_L1_MM` | 45 (Kilo, measured) | 20..120 | mm | Upper leg, shoulder axle to knee axle (B7) |
+| 14 | `LEG_L2_MM` | 50 (Kilo, measured) | 20..120 | mm | Lower leg, knee axle to the round foot's centre (the floor is 6 mm lower) |
+| 15 | `LEG_LB_MM` | 123 (Kilo, measured) | 50..200 | mm | Front-back shoulder spacing |
+| 16 | `LEG_W_MM` | 65 (Kilo, measured) | 30..150 | mm | Left-right foot track |
 | 17 | `LEG_SH_ZERO_DEG` | 0 | -45..45 | deg | Upper link angle at joint angle 0 (θ1_0) |
 | 18 | `LEG_KN_ZERO_DEG` | 90 | 30..150 | deg | Knee bend at joint angle 0 (θ2_0) |
 

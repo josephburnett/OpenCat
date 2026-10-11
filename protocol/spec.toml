@@ -906,17 +906,20 @@ max = 50
 unit = "tick"
 doc = "Ultrasonic ranging cadence (4 = 80 ms)."
 
-# Leg geometry for the P2 IK and gait (doc §3d, Appendix B7). Defaults are the
-# design's rough guesses until the owner measures Kilo (open question 1): set
-# them with `kilo param set NAME value --persist`, no reflash needed.
+# Leg geometry for the P2 IK and gait (doc §3d, Appendix B7). Defaults are
+# Kilo's, measured by the owner with calipers on 2026-10-11 (Appendix B7);
+# `kilo param set NAME value --persist` overrides them, no reflash needed.
+# The feet are 6 mm radius discs: L2 ends at the disc centre, the floor is
+# 6 mm lower, so body_h_mm (shoulder axle to the foot centres) + 6 = the
+# shoulder axle's height above the floor.
 [[params]]
 name = "LEG_L1_MM"
 id = 13
-default = 50
+default = 45
 min = 20
 max = 120
 unit = "mm"
-doc = "Upper leg: shoulder axle centre to knee axle centre. GUESS until measured."
+doc = "Upper leg: shoulder axle centre to knee axle centre. Kilo: 45 (measured 2026-10-11)."
 
 [[params]]
 name = "LEG_L2_MM"
@@ -925,25 +928,25 @@ default = 50
 min = 20
 max = 120
 unit = "mm"
-doc = "Lower leg: knee axle centre to the floor contact point. GUESS until measured."
+doc = "Lower leg: knee axle centre to the centre of the round foot (radius 6 mm; the floor is 6 mm below that point). Kilo: 50 (56 to the tip; measured 2026-10-11)."
 
 [[params]]
 name = "LEG_LB_MM"
 id = 15
-default = 105
+default = 123
 min = 50
 max = 200
 unit = "mm"
-doc = "Front-to-back shoulder axle spacing (pitch lever arm for the pose/balance height terms). GUESS until measured."
+doc = "Front-to-back shoulder axle spacing (pitch lever arm for the pose/balance height terms). Kilo: 123 (measured 2026-10-11)."
 
 [[params]]
 name = "LEG_W_MM"
 id = 16
-default = 60
+default = 65
 min = 30
 max = 150
 unit = "mm"
-doc = "Left-right foot track (roll lever arm). GUESS until measured."
+doc = "Left-right foot track, foot centre to foot centre (roll lever arm). Kilo: 65 (measured 2026-10-11)."
 
 [[params]]
 name = "LEG_SH_ZERO_DEG"

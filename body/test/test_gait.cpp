@@ -795,7 +795,9 @@ static void test_geometric_balance() {
     for (int l = 0; l < 4; l++) ik_only = ik_only && b.arb.out[3 + l] == b.gait.leg[l];
     CHECK(ik_only && b.arb.out[1] == 0);
     p = run_plant(-10, 10, k, 200, false, &r);
-    CHECKF(std::fabs(p) <= 2.3 && std::fabs(r) <= 2.3, "settled %.2f %.2f", p, r);  // to the dead band
+    // To the 2 deg dead band plus the last step's quantisation (0.5 deg; the
+    // roll lever W = 65 mm makes that step coarser than with the 60 mm guess).
+    CHECKF(std::fabs(p) <= 2.5 && std::fabs(r) <= 2.5, "settled %.2f %.2f", p, r);
   }
   // A flipped sensor runs away to the clamp.
   reset();

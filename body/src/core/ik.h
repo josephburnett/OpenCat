@@ -41,7 +41,8 @@ inline bool leg_left(uint8_t leg) { return leg == LEG_LF || leg == LEG_LB; }
 // foot must move FORWARD). What the tables say: in "up" (STAND) the front
 // legs are shoulder +30 / knee +30 and the back legs -30 / -30, i.e. front
 // and back are mirror images (Nybble's front "elbows" point back, its back
-// knees forward, as in a cat), and left and right share the same OpenCat
+// knees forward, as in a cat; the owner confirmed this on Kilo 2026-10-11:
+// "front knees bend back, back knees bend forward"), and left and right share the same OpenCat
 // angles (joints.h's dir handles the mirrored servos). Taking a positive
 // OpenCat shoulder angle as "foot backward" for every leg, and a positive
 // knee angle as "less bend" for the front legs, puts "up" at t1 = -30 deg,

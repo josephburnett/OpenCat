@@ -66,9 +66,9 @@ def test_gait_fields_defaults_per_pattern():
     assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 500, "duty": 140, "stride_mm": 35,
                                "turn_mm": 0, "step_h_mm": 12, "body_h_mm": 80, "flags": 7}
     w = c.gait_fields(pattern="walk")
-    assert (w["pattern"], w["period_ms"], w["duty"], w["stride_mm"], w["step_h_mm"]) == (0, 800, 192, 30, 15)
+    assert (w["pattern"], w["period_ms"], w["duty"], w["stride_mm"], w["step_h_mm"]) == (0, 1000, 192, 30, 15)
     cr = c.gait_fields(pattern="crawl", bob=False, wag=False)
-    assert (cr["pattern"], cr["period_ms"], cr["duty"], cr["body_h_mm"], cr["flags"]) == (2, 1200, 218, 70, 4)
+    assert (cr["pattern"], cr["period_ms"], cr["duty"], cr["body_h_mm"], cr["flags"]) == (2, 1500, 218, 70, 4)
     assert _client((60, 70)).gait_fields(pattern="crawl")["body_h_mm"] == 91  # 0.7 x 130
     assert c.gait_fields(stride_mm=-20, turn_mm=10, period_ms=600, run=False, balance=False)["flags"] == 3
     for bad in ({"stride_mm": 61}, {"turn_mm": -41}, {"period_ms": 299}, {"duty": 231}, {"step_h_mm": 41},
@@ -475,7 +475,7 @@ def test_kilo_walk_direct(vbody_pty):  # noqa: F811
     r = _kilo(path, "walk", "back", "--pattern", "walk", "--stride", "25", "--for", "1.5")
     assert r.returncode == 0, r.stdout + r.stderr
     assert r.stdout.startswith("SAFETY: Kilo walks on the floor only")
-    assert "walking back: walk stride -25 mm, turn 0 mm, period 800 ms" in r.stdout and "stopped" in r.stdout
+    assert "walking back: walk stride -25 mm, turn 0 mm, period 1000 ms" in r.stdout and "stopped" in r.stdout
     got = [P.SetGait.unpack(p) for n, _, p in list(vb.received) if n == "SET_GAIT"]
     assert got[0].run == 1 and got[0].stride_mm == -25 and got[-1].run == 0
     assert vb.gait is None and vb.gait_stops == 1

@@ -172,11 +172,12 @@ body ramps the stride down over one period and hands over to STANCE.
 sets the magnitude) and `--turn` (+ = left) bends the path; `left` /
 `right` turn in place (`--turn` magnitude, default 20 mm; `--stride` makes
 it an arc); `march` steps in place. Fields left out take the
-docs/architecture.md §3d defaults of the pattern (walk 800 ms / duty 192 /
-30 mm / step 15 mm, trot 500 / 140 / 35 / 12, crawl 1200 / 218 / 25 / 18);
+docs/architecture.md §3d defaults of the pattern (walk 1000 ms / duty 192 /
+30 mm / step 15 mm, trot 500 / 140 / 35 / 12, crawl 1500 / 218 / 25 / 18);
 the body height defaults to 0.8 (crawl 0.7) × (LEG_L1_MM + LEG_L2_MM), read
-from the body's params (`kilo param set LEG_L1_MM 52 --persist` when the
-legs are measured). Head bob, tail wag and balance are on unless
+from the body's params (Kilo's measured legs are the defaults: 45 + 50 mm,
+so 76 mm; heights are shoulder axle to the centres of the 6 mm-radius foot
+discs, 6 mm less than above the floor). Head bob, tail wag and balance are on unless
 `--no-...`. Out-of-range values are refused before anything is sent (the
 ranges are the spec's). The body moves to STANCE first from any other
 posture; a walk replaces the posture goal (like a trick). The command exits

@@ -56,38 +56,36 @@ kilo status                                # uptime keeps counting, config OK
 
 ## 1. Measure the legs and store them
 
-Put Kilo in the calibration posture (`kilo posture calib`) on its stand, so
-the joints sit at their zero. With calipers, on one front leg and one back
-leg (and a second of each if they look different):
+**Lengths: done offline by the owner on 2026-10-11** (results doc, section
+1); they are the firmware defaults since protocol 1.4's second revision, so
+nothing has to be set for them. What remains is the two angles, which need
+Kilo in the calibration posture (`kilo posture calib`) on its stand, where
+the joints sit at their zero:
 
-| Param | What to measure | Default (a guess) |
+| Param | What to measure | Default |
 |---|---|---|
-| `LEG_L1_MM` | Shoulder axle centre to knee axle centre | 50 |
-| `LEG_L2_MM` | Knee axle centre to the point of the foot that touches the floor | 50 |
-| `LEG_LB_MM` | Front shoulder axle to back shoulder axle, along the body | 105 |
-| `LEG_W_MM` | Left foot to right foot, across the body (the track) | 60 |
-| `LEG_SH_ZERO_DEG` | Angle of the upper leg from vertical in `calib`, + = foot forward | 0 |
-| `LEG_KN_ZERO_DEG` | Angle between upper and lower leg in `calib` (90 = square) | 90 |
+| `LEG_L1_MM` | Shoulder axle centre to knee axle centre | 45 (Kilo, measured) |
+| `LEG_L2_MM` | Knee axle centre to the centre of the round foot (the floor is 6 mm lower) | 50 (Kilo, measured) |
+| `LEG_LB_MM` | Front shoulder axle to back shoulder axle, along the body | 123 (Kilo, measured) |
+| `LEG_W_MM` | Left foot centre to right foot centre, across the body (the track) | 65 (Kilo, measured) |
+| `LEG_SH_ZERO_DEG` | Angle of the upper leg from vertical in `calib`, + = foot forward | 0 (Petoi's convention, to confirm) |
+| `LEG_KN_ZERO_DEG` | Angle between upper and lower leg in `calib` (90 = square) | 90 (Petoi's convention, to confirm) |
 
-If the foot's contact point is not on the line from the knee axle through the
-foot, note the offset angle too: there is no param for it yet; write it down
-in the results and it will be added to `LEG_KN_ZERO_DEG`'s meaning or as a new
-param.
-
-Then, whole millimetres and degrees:
+In `calib`, look at one front and one back leg from the side: are the upper
+legs vertical and the lower legs horizontal (front ones pointing back, back
+ones pointing forward)? If not, estimate the two angles to about 5° (a photo
+against a square helps) and store them. Any param can be changed later:
 
 ```sh
-kilo param set LEG_L1_MM 48 --persist      # your values
-kilo param set LEG_L2_MM 55 --persist
-kilo param set LEG_LB_MM 104 --persist
-kilo param set LEG_W_MM 62 --persist
-kilo param set LEG_SH_ZERO_DEG 0 --persist
+kilo param set LEG_SH_ZERO_DEG 0 --persist   # your values
 kilo param set LEG_KN_ZERO_DEG 90 --persist
-kilo param list                            # check them
+kilo param list                              # check them
 ```
 
-The params are live: no reboot needed. Front and back legs share one set;
-if they differ by more than a millimetre, note it.
+The params are live: no reboot needed. Front and back legs share one set.
+Because the feet are discs, the IK places the disc centre; `--body-h` in
+`kilo walk` and `--height` in `kilo pose` are measured to the foot centres,
+6 mm above the floor.
 
 ## 2. Foot nudge: the joint signs
 
@@ -146,19 +144,22 @@ its back (or `kilo monitor` for the IMU's pitch and roll).
 Soft surface, room around, Kilo starts in STANCE (or anywhere: a run goal
 moves it to STANCE first). Start small and slow:
 
-1. TROT in place: `run 1, pattern TROT, period 800, duty 0 (default),
-   stride 0, turn 0, step_h 8, body_h 0 (default), flags bob|wag|balance`.
+1. TROT in place, slowly: `kilo walk march --pattern trot --period 800
+   --step-h 8` (bob, wag and balance are on by default; Ctrl-C stops).
    The diagonal pairs (left front with right back) lift together. Watch
    for a foot scuffing, a leg hitting its limit, or the body rocking.
-2. Stop (`run 0`): the stepping fades over one period, every foot lands,
-   STANCE holds, the mind receives one `GAIT_STOPPED`. No foot should jump
-   at the start or the stop (H-P2 acceptance: slow-motion video if you can).
-3. TROT forward: stride 10, then 20, then the default 35, period 500. Then
-   backward (stride -15).
-4. Turning in place: stride 0, turn +15 (left), then -15.
-5. WALK (period 800, stride 20, step_h 12) and CRAWL (period 1200, stride
-   15, step_h 15). One foot in the air at a time, order left back, left
-   front, right back, right front.
+2. Stop (Ctrl-C, or `kilo walk stop` from another shell): the stepping
+   fades over one period, every foot lands, STANCE holds, the command
+   prints the body's `GAIT_STOPPED`. No foot should jump at the start or
+   the stop (H-P2 acceptance: slow-motion video if you can).
+3. TROT forward: `kilo walk forward --stride 10`, then `--stride 20`, then
+   the default (35 mm, period 500). Then `kilo walk back --stride 15`.
+4. Turning in place: `kilo walk left --turn 15`, then `kilo walk right
+   --turn 15`.
+5. WALK: `kilo walk forward --pattern walk --stride 20 --step-h 12` (period
+   default 1000) and CRAWL: `kilo walk forward --pattern crawl --stride 15
+   --step-h 15` (period default 1500). One foot in the air at a time, order
+   left back, left front, right back, right front.
 
 If Kilo falls, the fall reflex takes over as before (the gait ends, `rc`,
 STANCE is lost): pick it up, `kilo posture rest`, and note what happened

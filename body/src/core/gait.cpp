@@ -17,10 +17,15 @@ struct PatRow {
   uint8_t duty, h_256;  // h_256: body height / (L1 + L2), /256
   uint8_t off[4];
 };
+// Periods: WALK 1000 and CRAWL 1500 (§3d first said 800 / 1200). With
+// Kilo's measured legs (45 + 50 mm) the shorter periods asked the knees for
+// 9.3 and 10.0 deg per tick at the default stride and step height, i.e. the
+// safety slew (SLEW_MAX_A16, 10 deg/tick) would have clipped the crawl's
+// swing. Tuning on Kilo will move these again.
 static const PatRow PAT[3] PROGMEM = {
-    {800, 192, 205, {128, 0, 64, 192}},   // WALK
+    {1000, 192, 205, {128, 0, 64, 192}},  // WALK
     {500, 140, 205, {0, 128, 0, 128}},    // TROT
-    {1200, 218, 179, {128, 0, 64, 192}},  // CRAWL
+    {1500, 218, 179, {128, 0, 64, 192}},  // CRAWL
 };
 #define PAT_U8(pat, field) PGM_U8(&PAT[pat].field)
 

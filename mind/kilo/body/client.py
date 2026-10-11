@@ -58,9 +58,9 @@ HEAD_SPEED_DPS = 120    # default look() slew, °/s (0 = only the body's 500°/s
 # tuned on Kilo): period ms, duty /256, stride mm, step height mm, and the body
 # height as a fraction of L1 + L2 (params LEG_L1_MM + LEG_L2_MM).
 GAIT_DEFAULTS: dict[str, dict[str, float]] = {
-    "walk": {"period_ms": 800, "duty": 192, "stride_mm": 30, "step_h_mm": 15, "body_h_frac": 0.80},
+    "walk": {"period_ms": 1000, "duty": 192, "stride_mm": 30, "step_h_mm": 15, "body_h_frac": 0.80},
     "trot": {"period_ms": 500, "duty": 140, "stride_mm": 35, "step_h_mm": 12, "body_h_frac": 0.80},
-    "crawl": {"period_ms": 1200, "duty": 218, "stride_mm": 25, "step_h_mm": 18, "body_h_frac": 0.70},
+    "crawl": {"period_ms": 1500, "duty": 218, "stride_mm": 25, "step_h_mm": 18, "body_h_frac": 0.70},
 }
 GAIT_PATTERN_CHOICES = tuple(consts.GAIT_PATTERNS)  # walk, trot, crawl (spec enum gait_pattern)
 DEFAULT_PATTERN = "trot"
