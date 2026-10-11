@@ -38,7 +38,7 @@ extern FakeEeprom g_ee;
 inline void legacy_fill(FakeEeprom& e, const int8_t calib[16], uint16_t osc_khz, int16_t a2p_override = 0) {
   static const uint8_t pin[16] = {12, 11, 4, 3, 13, 10, 5, 2, 14, 9, 6, 1, 15, 8, 7, 0};
   static const int8_t mid[16] = {0, 15, 0, 0, -45, -45, -45, -45, 10, 10, -10, -10, -30, -30, 30, 30};
-  static const int8_t dir[16] = {1, -1, -1, 1, 1, -1, 1, -1, 1, -1, -1, 1, -1, 1, 1, -1};
+  static const int8_t dir[16] = {1, -1, 1, 1, 1, -1, 1, -1, 1, -1, -1, 1, -1, 1, 1, -1};
   for (int j = 0; j < 16; j++) {
     e.mem[0 + j] = pin[j];
     e.mem[16 + j] = (uint8_t)calib[j];
