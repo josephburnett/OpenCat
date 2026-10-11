@@ -9,6 +9,12 @@ and field names are the generated ones (protocol/spec.toml, Appendix E).
 Tricks (P1, §3e): ``upload_trick`` (cached by (trick_id, crc)),
 ``await play(name_or_trick, mirror, speed)`` which resolves on EVENT
 TRICK_DONE, and ``stop_trick``.
+
+Gait and body pose (P2, §3d): ``walk(...)`` (SET_GAIT run=1 with the
+per-pattern defaults), ``stop_walk()`` (run=0, cleared by EVENT
+GAIT_STOPPED), ``wait_gait_stopped`` / ``await walk_until_stopped``,
+``gait_state``, ``load_geometry`` (LEG_L1_MM/LEG_L2_MM for the default body
+height), ``pose(...)`` / ``release_pose()`` (SET_BODY_POSE).
 """
 
 from __future__ import annotations

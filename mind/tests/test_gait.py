@@ -343,6 +343,18 @@ def test_client_walk_stop_and_geometry(rig):
     assert client.stop_walk(wait_s=2.0) is True
 
 
+def test_geometry_params_persist(rig):
+    client, vb = rig
+    client.wait_ready(2)
+    for name in ("LEG_L1_MM", "LEG_L2_MM", "LEG_LB_MM", "LEG_W_MM", "LEG_SH_ZERO_DEG", "LEG_KN_ZERO_DEG"):
+        info = client.param_info(name)
+        client.param_set(name, info.min, persist=True)
+        assert client.link.wait_until(lambda: not vb.save_busy(), 1)
+        assert vb.params_saved[info.id] == info.min and client.param_get(name).value == info.min
+        with pytest.raises(ValueError):
+            client.param_set(name, info.max + 1)
+
+
 def test_client_walk_goal_cleared_by_a_fall(rig):
     client, vb = rig
     client.wait_ready(2)
