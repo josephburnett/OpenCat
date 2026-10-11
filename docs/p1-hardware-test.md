@@ -203,3 +203,157 @@ a second wedge angle if you can.
 - Step 6: the `--then-watch` timeline.
 - Step 7: the gains you settled on.
 - Step 8: the two readings side by side.
+
+---
+
+# P1 tricks hardware test
+
+The first run of the keyframe trick player (docs/architecture.md §3e, the
+TRICK owner of §3c) on Kilo: every first-version trick uploaded and played
+from the Pi, first on the stand and then on the floor, each compared side by
+side with the legacy firmware, then the H9 looping trick. Do it after the
+balance steps above (same setup, same branch). Allow about two hours.
+
+What the host already checked (`body/tools/host_tests.sh`, test `keyframe`):
+the upload rules (order, CRC, 32-frame limit), tick-exact timing and easing
+(the last tick of every move lands on its target, every move is monotone),
+holds, loops (0/1 = once, N, 255 = until stopped), speed, mirror, the
+crossfades in and out, the end posture, TRICK_DONE reasons, gating and owner
+precedence, and a replay of all 13 library tricks (as the mind encodes them,
+also mirrored and at 1.5×) with every angle inside the joint limits and the
+frame timing exactly as the JSON says. What only Kilo can tell is whether the
+tricks look right: the imported durations (`LEGACY_STEP_MS` 5.5 ms, an
+estimate), the clamped angles, and how the moves feel at full speed.
+
+**Before you start:** as for the balance test (charged battery, CH343 on the
+Pi, `KILO_PORT` set), plus a phone on a tripod or propped up, filming from
+the side at the same spot for both firmwares.
+
+## T0. Host checks and flash
+
+```sh
+body/tools/host_tests.sh                   # ends "host tests: ALL PASSED" (incl. "keyframe ... 0 failed")
+body/tools/size_check.sh                   # flash ~21.2 KB of 22528, globals 1525 of 1540, PASS
+(cd mind && python -m pytest -q)
+kilo -v flash
+kilo status                                # `proto 1.2`
+kilo trick list                            # 13 tricks, no body needed
+kilo trick show hi                         # header, notes, keyframes
+```
+
+## T1. Upload and the cache
+
+```sh
+kilo trick upload hi                       # "uploaded"
+kilo trick upload hi                       # "already on the body (cached)": one TRICK_COMMIT only
+kilo trick upload hi --force               # uploaded again
+```
+
+## T2. Every trick on the stand
+
+Kilo on its stand, legs and head free. For each trick, basics first, then
+social:
+
+```sh
+for t in sit rest stand stretch balance  hi wash_face check_around sniff scratch pee push_up butt_up; do
+  kilo trick play $t --posture stand; sleep 1
+done
+kilo trick play hi --posture stand --mirror          # mirrored: the other paw
+kilo trick play hi --posture stand --speed 0.5       # half speed: easy to watch the easing
+```
+
+Each line ends `TRICK_DONE DONE after X s (expected Y s)`, X within ~0.1 s of
+Y. Watch for:
+
+- **No jump at the start.** The first frame moves from wherever the joints
+  are (the stand posture). A joint that snaps is a bug (except frame 0 of
+  `scratch`, `dur 1`: a legacy "jump to", paced by the 10°/tick slew limit).
+- **No jump between frames**: cosine moves slow down into each keyframe and
+  start again from rest.
+- **No jump at the end**: the joints crossfade over 200 ms (`XFADE_TICKS`)
+  into the trick's end posture (STAND for most, SIT after `sit` and
+  `wash_face`, REST after `rest`), which then holds.
+- Clamped joints (`sit`, `hi`, `wash_face`, `scratch`: back shoulders at
+  −80°; `butt_up`, `wash_face`: front shoulders at 80°; `stretch`: head
+  tilt at 45°) stop at the limit without buzzing.
+- `kilo monitor` in a second terminal shows mode TRICK, owners `TRICK`, the
+  `trick` flag and the frame number while it plays.
+
+## T3. Stop and preemption (stand)
+
+```sh
+kilo trick play push_up --posture stand --repeats 255 --for 3   # stops after 3 s: TRICK_DONE STOPPED
+kilo trick play wash_face --posture stand --then-watch 15       # then the watchdog timeline
+```
+
+The first ends with a 200 ms crossfade to STAND from wherever the stop caught
+it. The second: after `TRICK_DONE DONE` the CLI goes silent; the timeline
+shows `WATCHDOG` at 0.5 s, REST at 1.5 s, LIMP 10 s later. Also, during a
+long play, pull the CH343 cable (or Ctrl-Z the CLI): the trick must stop at
+the watchdog's 0.5 s (TRICK_DONE PREEMPTED in the log, epoch +1), crossfade
+to its end posture, then REST.
+
+## T4. Every trick on the floor
+
+Repeat T2 with Kilo on its feet on the floor, a hand ready. Now the weight
+is on the legs: note any trick that tips Kilo, slides, or where a foot drags.
+The balancing tricks (`sit`, `stand`, `stretch`, `balance`, `butt_up`: the
+`balance` flag on their frame) hold their expected attitude (sit −30°,
+stretch and butt_up +15° nose down) when you tilt the board, like step 5;
+the social tricks never balance (legacy `perform()` did not either).
+
+## T5. Side by side with the legacy firmware
+
+For each trick, film Kilo doing it on the new firmware (T4), then on the
+legacy one, same spot and camera:
+
+```sh
+kilo flash --legacy
+python3 -c "import serial,time; s=serial.Serial('/dev/ttyACM0',115200); time.sleep(3); [s.write(t.encode()+b'\n') or time.sleep(6) for t in ('kup','khi','kup','kwsf','kup','kck','kup','ksnf','kup','kscrh','kup','kpee','kup','kpu','kup','kbuttUp','kup','ksit','kup','kstr','kbalance','krest')]"
+kilo -v flash                                        # back to the new firmware
+```
+
+(Legacy tokens: `k` + the legacy name; a trailing `R` mirrors, e.g. `khiR`.)
+Compare, per trick: the poses at each keyframe, the overall duration and
+rhythm (the new firmware's durations come from `LEGACY_STEP_MS` = 5.5 ms; if
+the legacy one is consistently faster or slower, measure the ratio from the
+video and change `LEGACY_STEP_MS` in `mind/kilo/tricks/legacy.py`, re-run the
+importer, `python3 body/tools/gen_trick_library.py`), the loop count, and how
+it ends (legacy goes back to whatever it did before; Kilo goes to the end
+posture).
+
+## T6. H9: the looping trick
+
+```sh
+kilo trick play push_up --posture stand --repeats 255 --for 60
+kilo status                                         # overruns 0, max tick, stack free
+```
+
+60 s of push-ups (the loop section until stopped), then `TRICK_DONE STOPPED`
+and a crossfade to STAND. H9's numbers: `max_tick_us` < 12000, 0 overruns,
+`stack_free_min` > 150 B (`kilo status` after the run). Watch for the
+loop restart: the first move of each repeat starts from the last frame of
+the loop, with no jump.
+
+## The owner's judgement (§7 P1 acceptance)
+
+For each first-version trick (basics: sit, rest, stand, stretch, balance;
+social: hi, wash face, check around, sniff, scratch, pee, push-up, butt-up):
+
+- [ ] it is recognisably the same trick as on the legacy firmware;
+- [ ] its speed and rhythm match (or the difference is noted);
+- [ ] no visible jump at its start, between frames, or into the end posture;
+- [ ] it ends in a sensible posture and holds it;
+- [ ] on the floor it does not tip Kilo over (or `FALL_OK` is needed: note it);
+- [ ] mirrored (`--mirror`) it is the other side's version.
+
+And once: H9 passes (60 s loop, numbers above), and a stop or a link loss in
+the middle of a trick always ends in a smooth crossfade.
+
+## What to report (tricks)
+
+- T2/T4: per trick, DONE times vs expected, any jump, buzzing or tipping.
+- T3: the two timelines.
+- T5: per trick, same/different, the measured speed ratio if any.
+- T6: `kilo status` after the 60 s loop.
+- The checklist above, ticked per trick.

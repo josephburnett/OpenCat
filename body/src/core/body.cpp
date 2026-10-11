@@ -12,6 +12,7 @@ void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok) {
   b.att.gz = Q14_ONE;  // upright until the first packet says otherwise
   b.imu_fault = imu_ok ? 0 : 1;
   balance_init(b.bal);
+  kf_init(b.kf);
   // Warm boot: the PCA9685 kept driving the servos through our reset; keep
   // exactly that pose until we know which way is up. Cold boot: the servo
   // pose is unknown, so stay limp until the Pi asks.
@@ -21,14 +22,33 @@ void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok) {
 
 KILO_NOINLINE static void event(Body& b, uint8_t code, int16_t arg) { events_push(b.ev, code, arg, b.tick, b.epoch); }
 
-void body_epoch_bump(Body& b) {
+// The trick has stopped playing (or is stopped now): hand back to IDLE.
+KILO_NOINLINE static void trick_finish(Body& b, uint8_t reason, uint8_t ticks) {
+  if (!ticks) ticks = (uint8_t)PARAM(XFADE_TICKS);
+  kf_halt(b.kf, ticks);
+  // IDLE adopts the end posture; joints the trick did not own move there
+  // over the same time, the trick's joints crossfade from their output.
+  arbiter_set_idle(b.arb, b.kf.end_posture, ticks ? ticks : 1);
+  // The corrections restart from zero under the new owner: the crossfade
+  // starts from the corrected output, so nothing jumps.
+  balance_reset(b.bal);
+  event(b, EV_TRICK_DONE, (int16_t)(((uint16_t)reason << 8) | b.kf.id));
+}
+
+void body_trick_end(Body& b, uint8_t reason, uint8_t ticks) {
+  if (b.kf.run) trick_finish(b, reason, ticks);
+}
+
+void body_epoch_bump(Body& b, uint8_t trick_reason) {
   // A new epoch makes every goal the Pi sent before this moment stale, so
   // a goal re-sent from before a fall or a link loss cannot restart motion.
-  // Clearing the latched motion goals (gait, head, body pose, trick) goes
-  // here once those exist (P1/P2). The IDLE posture is not a motion goal,
-  // but its balance flag is: the Pi re-asserts it with the new epoch.
+  // Latched motion goals stop here: the trick (gait, head and body pose
+  // join in P2). The IDLE posture is not a motion goal, but its balance
+  // flag is: the Pi re-asserts it with the new epoch. The trick's
+  // TRICK_DONE carries the new epoch.
   b.epoch++;
   b.balance_req = 0;
+  body_trick_end(b, trick_reason, 0);
 }
 
 // Take the REFLEX owner for `who`, unless a more important reflex holds it.
@@ -191,15 +211,24 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   // corrections are zeroed at once: the reflex or the new posture's mover
   // starts from the corrected output, so nothing jumps. Inside, a request
   // turned off or an IMU_FAULT lets them decay through the filter and slew.
+  //
+  // The keyframe player (doc §3e) steps first. A reflex that took the
+  // joints preempts it. While a trick plays, balance follows the frame's
+  // balance bit alone, against the trick's expected attitude; between
+  // balanced frames the corrections decay through the filter and slew.
+  if (b.kf.run && b.arb.reflex_active) body_trick_end(b, KF_END_PREEMPTED, 0);
+  if (kf_step(b.kf)) trick_finish(b, KF_END_DONE, 0);
   uint8_t p = arbiter_idle_posture(b.arb);
-  if (b.arb.reflex_active || arbiter_idle_moving(b.arb) || !(p == POSTURE_SIT || p == POSTURE_STAND)) {
+  if (b.kf.run && !b.arb.reflex_active) {
+    balance_step(b.bal, kf_balance(b.kf) && !b.imu_fault, b.att, kf_ref_roll(b.kf), kf_ref_pitch(b.kf));
+  } else if (b.arb.reflex_active || arbiter_idle_moving(b.arb) || !(p == POSTURE_SIT || p == POSTURE_STAND)) {
     balance_reset(b.bal);
   } else {
     bool want = (b.balance_req || b.bal.enable) && !b.imu_fault;
     balance_step(b.bal, want, b.att, posture_roll(p), posture_pitch(p));
   }
   // Steps 5-6: owners, crossfade, layers, limits, slew, counts.
-  arbiter_run(b.arb, b.cfg->img.cal, counts, &b.bal);
+  arbiter_run(b.arb, b.cfg->img.cal, counts, &b.bal, &b.kf);
 }
 
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags) {
@@ -211,6 +240,10 @@ GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ti
   if (posture == POSTURE_STAND && b.cfg->state == CFG_DEFAULTED) return GOAL_UNCALIBRATED;
   b.balance_req = flags & 1;
   if (b.holder == RH_WARM_HOLD) release_reflex(b, RH_WARM_HOLD);  // the Pi takes over
+  // LIMP is the Pi's emergency stop: it ends a trick at once. Any other
+  // posture only moves the joints the trick does not own; the trick's end
+  // posture replaces it when the trick ends.
+  if (posture == POSTURE_LIMP) body_trick_end(b, KF_END_STOPPED, 1);
   if (posture == POSTURE_LIMP && b.holder != RH_NONE) arbiter_reflex(b.arb, POSTURE_LIMP, 0);
   arbiter_set_idle(b.arb, posture, ticks);
   return GOAL_OK;
@@ -227,9 +260,27 @@ GoalResult body_goal_balance(Body& b, const uint8_t p[5]) {
   return GOAL_OK;
 }
 
+uint8_t body_trick_play(Body& b, const uint8_t p[4]) {
+  if (p[0] != b.epoch) return GOAL_STALE;
+  uint8_t s = kf_check_play(b.kf, p[1], p[2], p[3]);
+  if (s) return s;
+  if (b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
+  uint8_t idle = arbiter_idle_posture(b.arb);
+  if (b.holder != RH_NONE || b.arb.reflex_active || idle == POSTURE_LIMP || idle == POSTURE_CALIB) return GOAL_BUSY;
+  if (b.cfg->state == CFG_DEFAULTED) return GOAL_UNCALIBRATED;
+  kf_start(b.kf, p[2], p[3] & KILO_TRICK_PLAY_FLAGS_MIRROR);
+  // The trick's first segment starts from the corrected output; the
+  // corrections restart from zero (only balanced frames bring them back).
+  balance_reset(b.bal);
+  return GOAL_OK;
+}
+
+void body_trick_stop(Body& b, uint8_t ticks) { body_trick_end(b, KF_END_STOPPED, ticks); }
+
 uint8_t body_mode(const Body& b) {
   if (b.batt.level >= BATT_LOW) return KILO_MODE_LOW_BATT;
   if (b.wd.stage) return KILO_MODE_LINK_LOST;
+  if (b.kf.run) return KILO_MODE_TRICK;
   if (arbiter_idle_posture(b.arb) == POSTURE_LIMP && !b.arb.reflex_active) return KILO_MODE_LIMP;
   return KILO_MODE_IDLE;
 }

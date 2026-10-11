@@ -320,7 +320,7 @@ def test_contract_e_queries_reply_only_never_deduped():
         assert [t for t, _ in out] == [P.MsgId.PONG] and out[0][1].token == 0x1234
     (t, h), = s.send("HELLO_REQ")
     assert t == P.MsgId.HELLO and (h.proto_major, h.proto_minor) == (P.PROTO_MAJOR, P.PROTO_MINOR)
-    assert (h.trick_capacity, h.joint_count, h.max_payload) == (0, P.JOINT_COUNT, P.MAX_PAYLOAD)
+    assert (h.trick_capacity, h.joint_count, h.max_payload) == (P.TRICK_CAPACITY, P.JOINT_COUNT, P.MAX_PAYLOAD)
     assert [t for t, _ in s.send("STATS_REQ")] == [P.MsgId.STATS]
     assert [t for t, _ in s.send("PCA_READ")] == [P.MsgId.PCA_COUNTS]
     assert s.send("CAL_GET")[0][1].offset == [0] * 16
@@ -364,10 +364,12 @@ def test_contract_f_commands_and_dedup():
     assert acks(s.send("PARAM_SET", id=99, value=0, persist=0)) == [(M.PARAM_SET, S.BAD_ARG)]
     assert acks(s.send("PARAM_SET", id=0, value=600, persist=2)) == [(M.PARAM_SET, S.BAD_ARG)]
     assert acks(s.send("PARAM_SET", id=0, value=700, persist=1)) == [(M.PARAM_SET, S.OK)]
-    for name in ("TRICK_BEGIN", "TRICK_COMMIT", "TRICK_PLAY", "TRICK_STOP"):
-        assert acks(s.send(name)) == [(M[name], S.UNKNOWN_TYPE)], name
+    # P1 trick commands on an empty store (all-zero payloads); tests/test_trick_player.py has the rest
+    expect = {"TRICK_BEGIN": S.BAD_ARG, "TRICK_COMMIT": S.NO_TRICK, "TRICK_PLAY": S.NO_TRICK, "TRICK_STOP": S.OK}
+    for name, st in expect.items():
+        assert acks(s.send(name, epoch=s.vb.epoch) if name == "TRICK_PLAY" else s.send(name)) == [(M[name], st)], name
     tf = P.TrickFrames(first=0, frames=[P.Keyframe(dur=1)])
-    assert acks(s.raw(M.TRICK_FRAMES, tf.pack())) == [(M.TRICK_FRAMES, S.UNKNOWN_TYPE)]
+    assert acks(s.raw(M.TRICK_FRAMES, tf.pack())) == [(M.TRICK_FRAMES, S.NO_TRICK)]
     assert acks(s.send("REBOOT", magic=1)) == [(M.REBOOT, S.BAD_ARG)]
     s.vb.epoch = 7
     out = s.send("REBOOT", magic=P.REBOOT_MAGIC)

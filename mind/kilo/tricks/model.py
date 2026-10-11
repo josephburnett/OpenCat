@@ -283,10 +283,14 @@ class Trick:
 
     # -- wire --------------------------------------------------------------
     def begin(self, trick_id: int) -> P.TrickBegin:
+        """TRICK_BEGIN. exp_roll/exp_pitch are the balance reference for
+        frames with the balance bit (whole degrees, legacy convention)."""
         return P.TrickBegin(trick_id=trick_id, n_frames=len(self.frames),
                             loop_start=self.loop_start, loop_end=self.loop_end,
                             repeats=self.repeats, joint_mask=self.joint_mask,
-                            flags=self.flags, end_posture=int(self.end_posture))
+                            flags=self.flags, end_posture=int(self.end_posture),
+                            exp_roll=max(-127, min(127, _round(self.expected_roll))),
+                            exp_pitch=max(-127, min(127, _round(self.expected_pitch))))
 
     def encode_frames(self) -> bytes:
         """The n_frames x 14 B frame array (what TRICK_COMMIT's CRC covers)."""
@@ -312,7 +316,8 @@ class Trick:
     def from_wire(cls, begin: P.TrickBegin, frames: bytes | Sequence[P.Keyframe],
                   name: str = "", **kw) -> "Trick":
         """Rebuild from a TRICK_BEGIN and the frame array (bytes or Keyframes).
-        Expected roll/pitch are not on the wire: pass them in `kw`."""
+        Expected roll/pitch come from the header (whole degrees) unless
+        given in `kw`."""
         if isinstance(frames, (bytes, bytearray)):
             if len(frames) != begin.n_frames * P.Keyframe.SIZE:
                 raise ValueError(f"frame array is {len(frames)} B, want {begin.n_frames} x 14")
@@ -321,6 +326,8 @@ class Trick:
             kfs = [Keyframe.from_wire(f) for f in frames]
         if len(kfs) != begin.n_frames:
             raise ValueError(f"{len(kfs)} frames, header says {begin.n_frames}")
+        kw.setdefault("expected_roll", begin.exp_roll)
+        kw.setdefault("expected_pitch", begin.exp_pitch)
         return cls(name=name, frames=tuple(kfs), loop_start=begin.loop_start,
                    loop_end=begin.loop_end, repeats=begin.repeats,
                    balance=bool(begin.flags & P.TrickFlags.BALANCE),

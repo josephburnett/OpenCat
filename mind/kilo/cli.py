@@ -150,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="simulate a fall S seconds after start")
     s.add_argument("--no-keys", action="store_true", help="do not read keys from the terminal")
     s.add_argument("--quiet", action="store_true")
+    __import__("kilo.cli_trick").cli_trick.add_parser(sub, LINK_COMMANDS)  # kilo trick (cli_trick.py)
     return p
 
 

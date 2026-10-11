@@ -46,6 +46,16 @@ static_assert(SAME(OWN_IDLE, KILO_OWNER_IDLE) && SAME(OWN_GAIT, KILO_OWNER_GAIT)
 static_assert(SAME(DRIVEN_COUNT, KILO_JOINT_COUNT) && SAME(JOINT_COUNT, KILO_CHANNEL_COUNT), "joint counts != spec");
 static_assert(SAME(PCA_FULL_OFF, KILO_PCA_FULL_OFF_BIT), "full-off bit != spec");
 static_assert(SAME(NOTES_LEN, KILO_BEEP_MAX_NOTES), "BEEP queue != spec");
+static_assert(SAME(GOAL_BUSY, KILO_ACK_STATUS_BUSY) && SAME(GOAL_NO_TRICK, KILO_ACK_STATUS_NO_TRICK) &&
+                  SAME(GOAL_STALE, KILO_ACK_STATUS_STALE) && SAME(GOAL_LOW_BATT, KILO_ACK_STATUS_REFUSED_LOW_BATT),
+              "TRICK_PLAY results != ACK statuses");
+static_assert(SAME(KF_END_DONE, KILO_TRICK_DONE_REASON_DONE) && SAME(KF_END_STOPPED, KILO_TRICK_DONE_REASON_STOPPED) &&
+                  SAME(KF_END_PREEMPTED, KILO_TRICK_DONE_REASON_PREEMPTED) &&
+                  SAME(KF_END_FELL, KILO_TRICK_DONE_REASON_FELL),
+              "TRICK_DONE reasons != spec");
+static_assert(SAME(KF_LINEAR, KILO_EASING_LINEAR) && SAME(KF_COSINE, KILO_EASING_COSINE) &&
+                  SAME(KF_STEP, KILO_EASING_STEP) && SAME(KF_BALANCE_BIT, KILO_KEYFRAME_FLAGS_BALANCE),
+              "keyframe easing/flags != spec");
 
 #define DEDUP_TICKS (KILO_DEDUP_WINDOW_MS / 20u)  // 25 ticks
 #define TICKS_PER_S 50u
@@ -116,7 +126,7 @@ static void send_hello(void) {
   h.last_alive_tick = L.last_alive;
   h.caps = L.caps;
   h.max_payload = KILO_MAX_PAYLOAD;
-  h.trick_capacity = 0;  // no keyframe store until P1
+  h.trick_capacity = KF_CAPACITY;
   h.joint_count = DRIVEN_COUNT;
   h.config_state = B->cfg->state;
   h.epoch = B->epoch;
@@ -275,10 +285,19 @@ static uint8_t command(uint8_t t, const uint8_t* p) {
       g_param[p[0]] = v;
       return KILO_ACK_STATUS_OK;
     }
-    case KILO_MSG_REBOOT:
+    case KILO_MSG_TRICK_BEGIN:
+      return kf_begin(B->kf, p);
+    case KILO_MSG_TRICK_FRAMES:
+      return kf_frames(B->kf, p);
+    case KILO_MSG_TRICK_COMMIT:
+      return kf_commit(B->kf, p[0], rd16(p + 1));
+    case KILO_MSG_TRICK_PLAY:
+      return body_trick_play(*B, p);
+    case KILO_MSG_TRICK_STOP:
+      body_trick_stop(*B, p[0]);
+      return KILO_ACK_STATUS_OK;
+    default:  // KILO_MSG_REBOOT (the only other command)
       return rd16(p) == KILO_REBOOT_MAGIC ? KILO_ACK_STATUS_OK : KILO_ACK_STATUS_BAD_ARG;
-    default:  // TRICK_BEGIN .. TRICK_STOP: no keyframe store until P1
-      return KILO_ACK_STATUS_UNKNOWN_TYPE;
   }
 }
 
@@ -390,9 +409,10 @@ static void telemetry(const Body& b) {
   if (b.batt.no_battery) fl |= KILO_TELEMETRY_FLAGS_NO_BATTERY;
   if (config_busy(*b.cfg)) fl |= KILO_TELEMETRY_FLAGS_EEPROM_PENDING;
   if (s.dist_fresh) fl |= KILO_TELEMETRY_FLAGS_DIST_FRESH;
+  if (b.kf.run) fl |= KILO_TELEMETRY_FLAGS_TRICK;
   m.flags = fl;
   m.last_rx_seq = L.last_rx_seq;
-  m.trick_frame = 0xFF;
+  m.trick_frame = kf_frame(b.kf);
   m.gait_phase = 0;
   m.tick_load = s.tick_load;
   m.rx_err = (uint8_t)(L.cnt.rx_crc_err + L.cnt.rx_overflow);
