@@ -11,3 +11,4 @@ ModuleTests/testI2cDevice/debug_custom.json
 .vscode/*
 */logfile.log
 .claude/worktrees/
+.venv/
