@@ -19,8 +19,14 @@
 #define CFG_SLOT_SIZE 128
 #define CFG_REGION_START CFG_SLOT_A
 #define CFG_REGION_END (CFG_SLOT_B + CFG_SLOT_SIZE)  // exclusive: 960
-#define CFG_VERSION 1
-#define CFG_PARAM_COUNT 16
+// Version 2 (proto 1.4, P2): the 8 reserved bytes became params 16..19. A
+// version 1 slot is still accepted (those params read as default) and is
+// rewritten as version 2 on the next save, so a saved calibration survives
+// the upgrade and `kilo flash --legacy` still finds its EEPROM untouched.
+#define CFG_VERSION 2
+#define CFG_VERSION_OLDEST 1
+#define CFG_PARAM_COUNT 20
+#define CFG_PARAM_COUNT_V1 16
 #define CFG_PARAM_DEFAULT 0x7FFF
 
 // The RAM image is the slot byte for byte (little-endian on both AVR and
@@ -33,8 +39,7 @@ struct ConfigSlot {
   uint16_t pca9685_freq_khz;  // legacy PCA9685_FREQ, stored, unused (see hal/pca9685)
   int16_t imu_offset[6];      // accel xyz, gyro xyz (MPU offset registers)
   uint16_t batt_mv_per_64;    // battery scale: mV per 64 ADC counts
-  int16_t params[CFG_PARAM_COUNT];  // persisted params, 0x7FFF = default
-  uint8_t reserved[8];
+  int16_t params[CFG_PARAM_COUNT];  // persisted params, 0x7FFF = default (16..19 were reserved bytes in v1)
   uint16_t crc;  // CRC-16/CCITT-FALSE over bytes 0..125
 };
 
@@ -81,6 +86,7 @@ ConfigReason config_migrate(ConfigSlot& img);
 void config_defaults(ConfigSlot& img);
 
 bool config_slot_valid(const ConfigSlot& s);
+uint16_t config_slot_crc(const ConfigSlot& s);  // CRC-16/CCITT-FALSE over bytes 0..125
 void config_seal(ConfigSlot& s);  // magic, version, CRC
 
 // Queue a save of img into the older slot (CAL_SAVE, PARAM_SET persist).

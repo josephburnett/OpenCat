@@ -365,8 +365,7 @@ firmware back therefore finds its EEPROM intact. The new firmware uses two
 | 70 | 2 | `pca9685_freq_khz` |
 | 72 | 12 | IMU offsets (accel xyz, gyro xyz, MPU offset-register values) |
 | 84 | 2 | battery scale, mV per 64 ADC counts |
-| 86 | 32 | 16 persisted params (int16, 0x7FFF = default) |
-| 118 | 8 | reserved |
+| 86 | 40 | 20 persisted params (int16, 0x7FFF = default). Layout version 2 (proto 1.4, P2); version 1 had 16 params and 8 reserved bytes, is still accepted (params 16..19 read as default) and is rewritten as version 2 on the next save. |
 | 126 | 2 | CRC-16/CCITT-FALSE over 0..125 |
 
 **Writing a slot (`CAL_SAVE`, `PARAM_SET persist`):**
@@ -2071,6 +2070,12 @@ default). The P0 body implements:
 | 10 | `BATT_CRIT_MV` | 6300 | 5000..8400 | mV | CRITICAL trip (latched) |
 | 11 | `TELEM_DIV` | 2 | 0..50 | tick | TELEMETRY divisor at boot (`SET_STREAM` overrides) |
 | 12 | `US_PERIOD_TICKS` | 4 | 3..50 | tick | Ultrasonic cadence |
+| 13 | `LEG_L1_MM` | 50 (guess) | 20..120 | mm | Upper leg, shoulder axle to knee axle (B7) |
+| 14 | `LEG_L2_MM` | 50 (guess) | 20..120 | mm | Lower leg, knee axle to floor contact |
+| 15 | `LEG_LB_MM` | 105 (guess) | 50..200 | mm | Front-back shoulder spacing |
+| 16 | `LEG_W_MM` | 60 (guess) | 30..150 | mm | Left-right foot track |
+| 17 | `LEG_SH_ZERO_DEG` | 0 | -45..45 | deg | Upper link angle at joint angle 0 (θ1_0) |
+| 18 | `LEG_KN_ZERO_DEG` | 90 | 30..150 | deg | Knee bend at joint angle 0 (θ2_0) |
 
 The two clear levels replace the earlier single `BATT_HYST_MV`, because the
 WARN and LOW hysteresis differ (200 and 400 mV). P1 appends `FALL_DEG` (75),

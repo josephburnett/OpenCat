@@ -30,7 +30,7 @@ extern "C" {
 
 /* ---- Versions and link constants ---- */
 #define KILO_PROTO_MAJOR 1u
-#define KILO_PROTO_MINOR 3u
+#define KILO_PROTO_MINOR 4u
 #define KILO_BAUD 250000UL
 #define KILO_MAX_PAYLOAD 60u
 #define KILO_HEADER_BYTES 2u
@@ -66,7 +66,7 @@ extern "C" {
 #define KILO_EEPROM_READ_MAX 56u
 #define KILO_REBOOT_MAGIC 0x4B49u
 #define KILO_RESET_PULSE_MS 100u
-#define KILO_PARAM_SLOTS 16u
+#define KILO_PARAM_SLOTS 20u
 #define KILO_TRICK_CAPACITY 24u
 #define KILO_TRICK_FRAMES_PER_MSG 4u
 #define KILO_BEEP_MAX_NOTES 8u
@@ -980,8 +980,14 @@ enum kilo_param_id {
     KILO_PARAM_BATT_CRIT_MV = 10, /* mV: Battery CRITICAL trip (held 1 s, latched): LIMP now. */
     KILO_PARAM_TELEM_DIV = 11, /* tick: TELEMETRY divisor at boot (SET_STREAM telem_div overrides it until the next boot); 0 = off. */
     KILO_PARAM_US_PERIOD_TICKS = 12, /* tick: Ultrasonic ranging cadence (4 = 80 ms). */
+    KILO_PARAM_LEG_L1_MM = 13, /* mm: Upper leg: shoulder axle centre to knee axle centre. GUESS until measured. */
+    KILO_PARAM_LEG_L2_MM = 14, /* mm: Lower leg: knee axle centre to the floor contact point. GUESS until measured. */
+    KILO_PARAM_LEG_LB_MM = 15, /* mm: Front-to-back shoulder axle spacing (pitch lever arm for the pose/balance height terms). GUESS until measured. */
+    KILO_PARAM_LEG_W_MM = 16, /* mm: Left-right foot track (roll lever arm). GUESS until measured. */
+    KILO_PARAM_LEG_SH_ZERO_DEG = 17, /* deg: Upper link angle from straight down (+ = foot forward) at joint angle 0 (the calibration posture). Petoi: upper leg vertical = 0; verify on Kilo. */
+    KILO_PARAM_LEG_KN_ZERO_DEG = 18, /* deg: Knee bend relative to the upper link at joint angle 0 (the calibration posture). Petoi: lower leg at 90 deg; verify on Kilo. */
 };
-#define KILO_PARAM_COUNT 13u
+#define KILO_PARAM_COUNT 19u
 #define KILO_PARAM_WD_STOP_MS_DEFAULT 500
 #define KILO_PARAM_WD_STOP_MS_MIN 100
 #define KILO_PARAM_WD_STOP_MS_MAX 5000
@@ -1021,6 +1027,24 @@ enum kilo_param_id {
 #define KILO_PARAM_US_PERIOD_TICKS_DEFAULT 4
 #define KILO_PARAM_US_PERIOD_TICKS_MIN 3
 #define KILO_PARAM_US_PERIOD_TICKS_MAX 50
+#define KILO_PARAM_LEG_L1_MM_DEFAULT 50
+#define KILO_PARAM_LEG_L1_MM_MIN 20
+#define KILO_PARAM_LEG_L1_MM_MAX 120
+#define KILO_PARAM_LEG_L2_MM_DEFAULT 50
+#define KILO_PARAM_LEG_L2_MM_MIN 20
+#define KILO_PARAM_LEG_L2_MM_MAX 120
+#define KILO_PARAM_LEG_LB_MM_DEFAULT 105
+#define KILO_PARAM_LEG_LB_MM_MIN 50
+#define KILO_PARAM_LEG_LB_MM_MAX 200
+#define KILO_PARAM_LEG_W_MM_DEFAULT 60
+#define KILO_PARAM_LEG_W_MM_MIN 30
+#define KILO_PARAM_LEG_W_MM_MAX 150
+#define KILO_PARAM_LEG_SH_ZERO_DEG_DEFAULT 0
+#define KILO_PARAM_LEG_SH_ZERO_DEG_MIN -45
+#define KILO_PARAM_LEG_SH_ZERO_DEG_MAX 45
+#define KILO_PARAM_LEG_KN_ZERO_DEG_DEFAULT 90
+#define KILO_PARAM_LEG_KN_ZERO_DEG_MIN 30
+#define KILO_PARAM_LEG_KN_ZERO_DEG_MAX 150
 /* Initializer for an int16_t [KILO_PARAM_COUNT][3] table of {min, max, default}, in id order. */
 #define KILO_PARAM_TABLE_INIT { \
     {100, 5000, 500}, /* WD_STOP_MS */ \
@@ -1036,9 +1060,15 @@ enum kilo_param_id {
     {5000, 8400, 6300}, /* BATT_CRIT_MV */ \
     {0, 50, 2}, /* TELEM_DIV */ \
     {3, 50, 4}, /* US_PERIOD_TICKS */ \
+    {20, 120, 50}, /* LEG_L1_MM */ \
+    {20, 120, 50}, /* LEG_L2_MM */ \
+    {50, 200, 105}, /* LEG_LB_MM */ \
+    {30, 150, 60}, /* LEG_W_MM */ \
+    {-45, 45, 0}, /* LEG_SH_ZERO_DEG */ \
+    {30, 150, 90}, /* LEG_KN_ZERO_DEG */ \
 }
 /* Initializer for an int16_t [KILO_PARAM_COUNT] array of defaults, in id order. */
-#define KILO_PARAM_DEFAULTS_INIT { 500, 1500, 10, 10, 25, 160, 6900, 7100, 6600, 7000, 6300, 2, 4 }
+#define KILO_PARAM_DEFAULTS_INIT { 500, 1500, 10, 10, 25, 160, 6900, 7100, 6600, 7000, 6300, 2, 4, 50, 50, 105, 60, 0, 90 }
 
 #ifdef KILO_PROTOCOL_FIELD_TABLE
 /* Scalar field layout, for host tests and tools. Not for the AVR build. */

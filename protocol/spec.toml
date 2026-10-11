@@ -36,7 +36,7 @@
 
 [meta]
 proto_major = 1
-proto_minor = 3
+proto_minor = 4
 
 # ---------------------------------------------------------------------------
 [link]
@@ -75,7 +75,7 @@ default_transition_ticks = 25  # SET_POSTURE transition_ticks = 0 means this
 eeprom_read_max = 56
 reboot_magic = 0x4B49          # "KI"
 reset_pulse_ms = 100           # GPIO4 low time for the flash reset (Appendix F)
-param_slots = 16               # persisted param slots in the config block; param ids < this
+param_slots = 20               # persisted param slots in the config block; param ids < this (16 until proto 1.4: the slot's reserved bytes became params 16..19)
 trick_capacity = 24            # keyframes in the body's store (32 until the P1 fall/head RAM shrink, doc §3h)
 trick_frames_per_msg = 4
 beep_max_notes = 8
@@ -905,3 +905,60 @@ min = 3
 max = 50
 unit = "tick"
 doc = "Ultrasonic ranging cadence (4 = 80 ms)."
+
+# Leg geometry for the P2 IK and gait (doc §3d, Appendix B7). Defaults are the
+# design's rough guesses until the owner measures Kilo (open question 1): set
+# them with `kilo param set NAME value --persist`, no reflash needed.
+[[params]]
+name = "LEG_L1_MM"
+id = 13
+default = 50
+min = 20
+max = 120
+unit = "mm"
+doc = "Upper leg: shoulder axle centre to knee axle centre. GUESS until measured."
+
+[[params]]
+name = "LEG_L2_MM"
+id = 14
+default = 50
+min = 20
+max = 120
+unit = "mm"
+doc = "Lower leg: knee axle centre to the floor contact point. GUESS until measured."
+
+[[params]]
+name = "LEG_LB_MM"
+id = 15
+default = 105
+min = 50
+max = 200
+unit = "mm"
+doc = "Front-to-back shoulder axle spacing (pitch lever arm for the pose/balance height terms). GUESS until measured."
+
+[[params]]
+name = "LEG_W_MM"
+id = 16
+default = 60
+min = 30
+max = 150
+unit = "mm"
+doc = "Left-right foot track (roll lever arm). GUESS until measured."
+
+[[params]]
+name = "LEG_SH_ZERO_DEG"
+id = 17
+default = 0
+min = -45
+max = 45
+unit = "deg"
+doc = "Upper link angle from straight down (+ = foot forward) at joint angle 0 (the calibration posture). Petoi: upper leg vertical = 0; verify on Kilo."
+
+[[params]]
+name = "LEG_KN_ZERO_DEG"
+id = 18
+default = 90
+min = 30
+max = 150
+unit = "deg"
+doc = "Knee bend relative to the upper link at joint angle 0 (the calibration posture). Petoi: lower leg at 90 deg; verify on Kilo."

@@ -85,7 +85,7 @@ ConfigReason config_migrate(ConfigSlot& s) {
   return CFG_REASON_NONE;
 }
 
-static uint16_t slot_crc(const ConfigSlot& s) {
+uint16_t config_slot_crc(const ConfigSlot& s) {
   return kilo_crc16((const uint8_t*)&s, CFG_SLOT_SIZE - 2);
 }
 
@@ -93,12 +93,13 @@ void config_seal(ConfigSlot& s) {
   s.magic[0] = 'K';
   s.magic[1] = 'L';
   s.version = CFG_VERSION;
-  s.crc = slot_crc(s);
+  s.crc = config_slot_crc(s);
 }
 
 KILO_NOINLINE bool config_slot_valid(const ConfigSlot& s) {
-  if (s.magic[0] != 'K' || s.magic[1] != 'L' || s.version != CFG_VERSION) return false;
-  if (s.crc != slot_crc(s)) return false;
+  if (s.magic[0] != 'K' || s.magic[1] != 'L') return false;
+  if (s.version < CFG_VERSION_OLDEST || s.version > CFG_VERSION) return false;
+  if (s.crc != config_slot_crc(s)) return false;
   // A CRC-valid slot is trusted, but only within the ranges the transfer
   // function's integer maths is written for (joints.cpp).
   if (s.cal.b_offset_counts > 2550) return false;
@@ -114,7 +115,11 @@ static bool load_slot(ConfigSlot& img, uint8_t slot) {
   uint16_t base = config_slot_addr(slot);
   uint8_t* p = (uint8_t*)&img;
   for (uint8_t i = 0; i < CFG_SLOT_SIZE; i++) p[i] = ee_read((uint16_t)(base + i));
-  return config_slot_valid(img);
+  if (!config_slot_valid(img)) return false;
+  // A v1 slot: its reserved bytes (now params 16..19) mean "default".
+  if (img.version < CFG_VERSION)
+    for (uint8_t i = CFG_PARAM_COUNT_V1; i < CFG_PARAM_COUNT; i++) img.params[i] = CFG_PARAM_DEFAULT;
+  return true;
 }
 
 void config_boot(Config& c) {

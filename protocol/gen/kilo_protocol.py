@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, ClassVar
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 3
+PROTO_MINOR = 4
 BAUD = 250000
 MAX_PAYLOAD = 60
 HEADER_BYTES = 2
@@ -48,7 +48,7 @@ DEFAULT_TRANSITION_TICKS = 25
 EEPROM_READ_MAX = 56
 REBOOT_MAGIC = 0x4B49
 RESET_PULSE_MS = 100
-PARAM_SLOTS = 16
+PARAM_SLOTS = 20
 TRICK_CAPACITY = 24
 TRICK_FRAMES_PER_MSG = 4
 BEEP_MAX_NOTES = 8
@@ -2382,6 +2382,12 @@ class ParamId(enum.IntEnum):
     BATT_CRIT_MV = 10
     TELEM_DIV = 11
     US_PERIOD_TICKS = 12
+    LEG_L1_MM = 13
+    LEG_L2_MM = 14
+    LEG_LB_MM = 15
+    LEG_W_MM = 16
+    LEG_SH_ZERO_DEG = 17
+    LEG_KN_ZERO_DEG = 18
 
 
 PARAMS: dict[int, ParamInfo] = {
@@ -2411,6 +2417,18 @@ PARAMS: dict[int, ParamInfo] = {
                          'TELEMETRY divisor at boot (SET_STREAM telem_div overrides it until the next boot); 0 = off.'),
     12: ParamInfo(12, 'US_PERIOD_TICKS', 4, 3, 50, 'tick',
                          'Ultrasonic ranging cadence (4 = 80 ms).'),
+    13: ParamInfo(13, 'LEG_L1_MM', 50, 20, 120, 'mm',
+                         'Upper leg: shoulder axle centre to knee axle centre. GUESS until measured.'),
+    14: ParamInfo(14, 'LEG_L2_MM', 50, 20, 120, 'mm',
+                         'Lower leg: knee axle centre to the floor contact point. GUESS until measured.'),
+    15: ParamInfo(15, 'LEG_LB_MM', 105, 50, 200, 'mm',
+                         'Front-to-back shoulder axle spacing (pitch lever arm for the pose/balance height terms). GUESS until measured.'),
+    16: ParamInfo(16, 'LEG_W_MM', 60, 30, 150, 'mm',
+                         'Left-right foot track (roll lever arm). GUESS until measured.'),
+    17: ParamInfo(17, 'LEG_SH_ZERO_DEG', 0, -45, 45, 'deg',
+                         'Upper link angle from straight down (+ = foot forward) at joint angle 0 (the calibration posture). Petoi: upper leg vertical = 0; verify on Kilo.'),
+    18: ParamInfo(18, 'LEG_KN_ZERO_DEG', 90, 30, 150, 'deg',
+                         'Knee bend relative to the upper link at joint angle 0 (the calibration posture). Petoi: lower leg at 90 deg; verify on Kilo.'),
 }
 PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}
 

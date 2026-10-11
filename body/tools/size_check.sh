@@ -85,6 +85,9 @@ near=$("$OBJDUMP" -d "$ELF" | awk '
   function hex(s,   i, v, c) { v = 0; s = tolower(s); sub(/^0x/, "", s)
     for (i = 1; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)); if (!c) break; v = v * 16 + c - 1 }
     return v }
+  /^[0-9a-f]+ <.*>:$/ { fn = $2 }
+  # The vector table is fixed 4-byte jmps; the linker never relaxes it.
+  fn == "<__vectors>:" { next }
   /\t(call|jmp)\t0x/ { a = $1; sub(/:$/, "", a); n = split($0, f, "\t")
     for (i = 1; i < n; i++) if (f[i] == "call" || f[i] == "jmp") t = f[i + 1]
     d = hex(t) - (hex(a) + 2); if (d >= -4096 && d <= 4094) near++ }

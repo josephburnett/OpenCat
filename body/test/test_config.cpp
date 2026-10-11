@@ -150,5 +150,41 @@ int main() {
   Config e;
   config_boot(e);
   CHECK(e.state == CFG_OK && e.newest == 0 && e.img.seq == 1);
+
+  // 7. A version 1 slot (16 params + 8 reserved bytes, as written before
+  //    proto 1.4) still loads: params 16..19 read as default whatever the
+  //    reserved bytes held, the saved calibration survives, and the next
+  //    save seals version 2. An unknown newer version is refused.
+  {
+    Config v;
+    config_boot(v);
+    v.img.version = 1;
+    v.img.params[3] = 777;
+    for (int i = CFG_PARAM_COUNT_V1; i < CFG_PARAM_COUNT; i++) v.img.params[i] = 0;  // v1 reserved = 0
+    v.img.crc = 0;
+    // seal by hand as v1: config_seal() would stamp CFG_VERSION
+    config_seal(v.img);
+    v.img.version = 1;
+    v.img.crc = config_slot_crc(v.img);
+    uint8_t* src = (uint8_t*)&v.img;
+    for (int i = 0; i < CFG_SLOT_SIZE; i++) g_ee.mem[CFG_SLOT_A + i] = src[i];
+    g_ee.mem[CFG_SLOT_B] = 0;  // only slot A valid
+    Config f;
+    config_boot(f);
+    CHECK(f.state == CFG_OK && f.newest == 0 && f.img.version == 1 && f.img.params[3] == 777);
+    for (int i = CFG_PARAM_COUNT_V1; i < CFG_PARAM_COUNT; i++) CHECK(f.img.params[i] == CFG_PARAM_DEFAULT);
+    CHECK(f.img.cal.zero_a16[8] == v.img.cal.zero_a16[8]);
+    config_save(f);
+    run_writer(f);
+    Config g;
+    config_boot(g);
+    CHECK(g.state == CFG_OK && g.img.version == CFG_VERSION && g.img.params[3] == 777);
+    g_ee.mem[CFG_SLOT_A + 2] = CFG_VERSION + 1;  // newer than this firmware: slot A invalid
+    g_ee.mem[CFG_SLOT_B] = 0;
+    Config h;
+    config_boot(h);
+    CHECK(h.state != CFG_OK || h.img.version <= CFG_VERSION);
+    CHECK(!config_slot_valid(*(const ConfigSlot*)&g_ee.mem[CFG_SLOT_A]));
+  }
   return report("config");
 }
