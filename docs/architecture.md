@@ -198,6 +198,15 @@ loop():
 The measured value is reported as `tick_load` in TELEMETRY and `max_tick_us`
 in STATS. Acceptance: under 12 ms over a 10-minute trot.
 
+*Step 5 in P2, counted on the host* (`test_gait.cpp`, host-only counters in
+`core/fx`): one walking tick costs 12 `fx_atan2` (each with one int32
+division and a shared-shift loop), 4 `fx_isqrt32`, 8 `fx_sin`/`fx_cos`, 4
+int32 divisions in the IK and 2 in the trajectory (1/β and 1/(1−β), shared
+by the four legs), plus ≈40 32-bit multiplies; no loop over the phase.
+At ≈40 µs per int32 division and ≈30 µs per `isqrt` on the 328P that is
+≈0.75 ms **(est.)**, within the 0.8 ms budget; `max_tick_us` while trotting
+(H9) is the measurement.
+
 **Non-blocking rules**
 
 - No `delay()` and no `pulseIn()`. Busy-waits are limited to 50 µs, except
@@ -436,7 +445,13 @@ Layers on top of the base pose:
      LOW_BATT in that order. The hold lasts `HEAD_HOLD_MS / 20` = 100 ticks
      from the last refresh (the 5 Hz goal refresh keeps it).
 2. **Balance layer** (3f, `core/balance.*`):
-   - For GAIT and STANCE, corrections enter the IK as body pitch/roll (P2).
+   - For GAIT and STANCE, corrections enter the IK as body pitch/roll.
+     Implemented in P2 (`body_tick`, `core/gait`): the geometric balance runs
+     while the gait owns the legs (gated by `SET_GAIT` flags bit 2) and in
+     IDLE STANCE once settled (gated like SIT/STAND: the posture flag or
+     `SET_BALANCE enable`); its corrections reach no joint directly (the
+     arbiter gets no joint-space corrections then, head included), and
+     leaving it for a joint-space owner zeroes them. See 3f.
    - For joint-space owners (built-in postures, tricks with `BALANCE`), they
      pass through the per-joint gain table and are added to the joint's base
      angle after the crossfade, before the safety stage.
@@ -483,6 +498,11 @@ gait after recovery. So:
   `EVENT GOAL_REFUSED(type, STALE)` (`ACK STALE` for `TRICK_PLAY`), except
   `SET_POSTURE` LIMP or REST, which is never stale.
 - An EVENT carries the epoch after any bump it reports.
+- As implemented in P2: a bump stops the gait through its ramp-down and
+  landing (the watchdog's REST waits for it, 3g), or at once with
+  `GAIT_STOPPED` if it had not started yet; a fall or low-battery reflex
+  then takes the legs and ends it at once. The body pose goes back to
+  neutral (slewed).
 - `BALANCE` is not a posture: it is `SET_POSTURE STAND` with flags bit 0.
 - Each goal carries the epoch that was current on the mind when the goal was
   set; it is never re-stamped. Any epoch change the mind sees, in TELEMETRY,
@@ -592,9 +612,17 @@ IK:  d² = x² + z²   (clamp d to [d_min, 0.95(L1+L2)])
 
 - `θ1_0` and `θ2_0` describe the calibration posture. Petoi's guide says it is
   upper leg vertical and lower leg at 90° to it; this must be verified on Kilo.
-- The signs `sgn_sh`, `sgn_kn` and `σ` are fixed in P2. A host test checks that
-  FK of the legacy `up`, `sit` and `rest` postures puts the feet below the body
-  and symmetric left/right. A HIL test nudges one foot +10 mm forward.
+- The signs `sgn_sh`, `sgn_kn` and `σ` are fixed in P2 as `IK_SGN_SH = −1`,
+  `IK_SGN_KN = −1`, `IK_SIGMA_FRONT = +1` (back legs −1) in `core/ik.h`, read
+  off the legacy tables: front and back legs are mirror images (`up` is
+  +30/+30 in front, −30/−30 behind), a positive shoulder angle swings the
+  foot backward, the front "elbows" point back and the back knees forward.
+  With them `up` puts every foot under its shoulder at 0.87 (L1+L2), `rest`
+  is a sphinx fold (front paws forward) and `sit` reads 28° nose up (its
+  header says −30°). A host test checks that FK of the legacy `up`, `sit` and
+  `rest` postures puts the feet below the body and symmetric left/right
+  (`test_ik.cpp`). A HIL test nudges the feet +10 mm forward
+  (`docs/p2-hardware-test.md`), which is the only real check of these signs.
 - `L1`, `L2`, `Lb`, `W` and the foot offset must be measured (open question 1).
   Appendix B describes how and gives rough guesses.
 
@@ -606,6 +634,62 @@ IK:  d² = x² + z²   (clamp d to [d_min, 0.95(L1+L2)])
 - Targets: |FK(IK(p)) − p| ≤ 0.25 mm and angle error ≤ 0.25° against a double
   reference.
 - Cost **(est.)**: 0.8 ms per tick and ≈2 KB of flash.
+
+**As implemented in P2** (`body/src/core/ik.*`, `gait.*`; host tests
+`body/test/test_ik.cpp`, `test_gait.cpp`). Where it differs from or adds to
+the text above:
+- **IK.** `θ1_0 = LEG_SH_ZERO_DEG` applies to every leg as written (a
+  physical "foot forward" angle), `θ2_0 = σ_i·LEG_KN_ZERO_DEG`. `d_min` keeps
+  the knee bend ≤ 150°. The clamp works on `d²` before the division, so a
+  target outside the workspace gives the nearest foot on the same ray, and
+  `ik_leg` reports it. Round trip on the default 50/50 mm legs over a 1 mm
+  grid: 0.11 mm, 0.07°; the 0.25 mm target holds for L1 + L2 ≤ 160 mm (the
+  a16 output step alone is (L1+L2)·1.1e-3 mm).
+- **Swing height.** `z = H_i − h·(1 − cos 2πs)/2` instead of
+  `H_i − h·sin πs`: the latter has its largest vertical speed at lift-off and
+  touchdown, against the stated "zero velocity at lift-off and touchdown".
+  Same peak height.
+- **Neutral foot** `x0_i = 0` (under the shoulder), plus the pose x-shift.
+- **Goal fields.** `period_ms`, `duty` and `body_h_mm` may be 0 (outside
+  their range) for the pattern's default; `stride_mm`, `turn_mm` and
+  `step_h_mm` are always as sent (0 is meaningful). BAD_ARG for any other
+  value outside the spec's ranges, `pattern ≥ 3` or unknown flag bits;
+  `body_h_mm` is never refused (the IK clamps it). Refusals as `SET_POSTURE`
+  STAND: STALE, FALLEN, LOW_BATT, UNCALIBRATED; `run = 0` is never stale.
+  `SET_BODY_POSE`: STALE, FALLEN, LOW_BATT; pitch and roll clamped to ±30°.
+- **Slews per tick:** stride, turn, step and body height 0.5 mm, duty
+  1/256, pose pitch/roll 0.5°, pose height and x-shift 1 mm. The period
+  applies at once (`dphi` is computed when the goal arrives).
+- **Start.** A run goal makes IDLE move to STANCE first (the posture move,
+  `POSTURE_TICKS`), then the gait takes the legs at `φ = 0`, `amp = 0`. A
+  leg that is already in its swing phase does not lift until it has been in
+  stance once, so the start never jumps whatever the duty.
+- **Stop.** The stride ramps out over one period, then no new swing lifts
+  its foot and the gait waits until every foot is down (this also ends the
+  wait for duty patterns where all four are never in stance together, e.g.
+  a TROT at duty 128), then IDLE takes the legs in STANCE at the gait's
+  height, and `EVENT GAIT_STOPPED` (arg 0) is sent once. `run = 1` during
+  the ramp-down resumes; a new pattern lands, then starts again with no
+  `GAIT_STOPPED`. A stop before the gait started ends it at once (with
+  `GAIT_STOPPED`), as do `SET_POSTURE LIMP` and a reflex.
+- **Under the gait.** `SET_POSTURE` while walking only changes the IDLE
+  posture underneath (head and tail follow it); the stop hands the legs to
+  STANCE and the refreshed posture goal moves on from there. A trick that
+  owns a leg pauses the gait: the phase runs on, the stride and the lifting
+  start again from nothing, so when the trick hands the legs back (its
+  crossfade) every foot is down under its shoulder and the stride ramps in.
+- **Head bob and tail wag** ride on IDLE's head, scaled by the stride ramp,
+  so they fade in and out with it; a `SET_HEAD` hold replaces them.
+- **TELEMETRY.** Mode GAIT, flag GAIT and leg-owner nibble GAIT from the
+  moment the run goal is accepted (including the move to STANCE); head
+  nibble GAIT while bob or wag is on; `gait_phase = φ >> 8` while the gait
+  owns the legs, else 0.
+- **Defaults vs Appendix H.** At §3d's default parameters the legs step up to
+  8.8° (WALK), 6.7° (TROT) and 9.6° (CRAWL) per tick at mid-swing (a 15-18 mm
+  lift in 9-11 ticks), not the ≤ 3°/tick of the H "gait" row, though below
+  the 10°/tick safety slew (which never clips them). Tuning on Kilo will
+  move these (longer swings, lower steps).
+- **Cost**: 3a. **Memory**: 3h.
 
 ### 3e. Keyframe interpolator for tricks
 
@@ -775,6 +859,24 @@ Kp ≈ 20..40 through this map, which the legacy table was never meant for.
 **Owner's decision 2026-10-11: keep the P1 layer as the legacy-feel lean and
 defer body levelling to P2, where the IK gives a proper leg-length solution
 for a target body attitude** (open question 8 below moves to P2).
+
+*Implemented in P2* (geometric balance for GAIT and STANCE, `body_tick`):
+the same controller, but fed the **ground slope** instead of the body's
+tilt: `slope = measured − corr − pose`, the attitude the body would read
+with no correction and no commanded pose, with `ref` 0. So
+`corr = −Kp·deadband(slope)` and the body ends at `pose + slope·(1 − Kp)`:
+at Kp ≈ 1 (`kp_q8` 255) level to within the dead band, whatever the slope,
+with no integrator (the correction is bounded by the clamp, nothing
+accumulates). If the legs move the body by `k`× what the model says, the
+loop gain on `corr` is `(k − 1)·Kp`, stable for `0 < k < 2`; the result is
+still level as long as the clamp allows (`slope/k ≤ 15°`). A commanded
+`SET_BODY_POSE` pitch or roll is therefore the target attitude, not
+something the balance fights. Host test (`test_gait.cpp`, a plant that
+reads the body's tilt off the commanded feet with a 0.15 s servo lag):
+10° of pitch and roll slope, Kp 255/256 → within 2.3° after 1 s and settled
+at the 2° dead band for leg responses 0.7×, 1× and 1.6×; a flipped sensor
+runs away to the clamp. At the default Kp 0.5 half the slope remains: H13
+on Kilo is to be run with `kp_q8` 255 (`docs/p2-hardware-test.md`).
 
 **Joint-space mapping** (`balance_map`). The per-joint gains are the legacy
 `adaptiveParameterArray` {roll, pitch} factors in PROGMEM, which are also
@@ -1091,6 +1193,12 @@ under the P1 ceiling.
 **Measured with the IR receiver** (2026-10-11, 3a; from 22102 B / 1433 B):
 **22548 B flash** (+446 B), **1450 B globals** (+17 B: the decoder state and
 the previous `PIND`); `-DKILO_IR=0` gives the bytes back.
+**Measured with the P2 gait + IK** (2026-10-11; from 22642 B / 1462 B):
+**26938 B flash** (+4296 B: `ik_leg` 818 B, the gait trajectory, the goal
+handling and the tick glue; the 2.4 KB estimated in Appendix B6 was low),
+**1517 B globals** (+55 B: the `Gait` struct, of which 16 B are this tick's
+leg angles). The owner raised the P2 flash ceiling to 30 KB (30720 B) the
+same day; globals stay the tight resource (23 B left).
 
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
 use is reported through a painted canary (`stack_free_min` in STATS). RAM is
@@ -1182,7 +1290,8 @@ data reply (queries) or an `ACK(seq, type, status)`. Status values:
   LOW_BATT 7, FALLEN 8, UNCALIBRATED 11 (STAND while the config is
   DEFAULTED), or UNKNOWN_TYPE 4 for a goal this firmware does not implement
   yet (in P0: `SET_GAIT`, `SET_HEAD`, `SET_BODY_POSE`, `SET_BALANCE`,
-  `SET_EYES`; `SET_BALANCE` is implemented from P1).
+  `SET_EYES`; `SET_BALANCE` is implemented from P1, `SET_HEAD` from P1,
+  `SET_GAIT` and `SET_BODY_POSE` from P2).
   Telemetry confirms what took effect: `mode`, owners, `epoch`, `last_rx_seq`.
 - **Queries** (`HELLO_REQ`, `PING`, `STATS_REQ`, `PCA_READ`, `CAL_GET`,
   `PARAM_GET`, `EEPROM_READ`; `query = true` in the spec) are answered by their
@@ -1658,6 +1767,13 @@ and `src/` are deleted after P2 is accepted.
   Flash ≤ 24 KB.
 - **Then cut over:** delete the legacy firmware (its hex is kept in
   `mind/firmware/`).
+- **Status (2026-10-11):** body side done on the host: planar IK
+  (`core/ik`), gait generator, STANCE, `SET_GAIT`/`SET_BODY_POSE`, geometric
+  balance, bob and wag (`core/gait`, `body_tick`, arbiter, link), host tests
+  `test_ik.cpp` and `test_gait.cpp` (3d "As implemented in P2"). Flash
+  26938 B, globals 1517 B (3h). Not yet done: the leg measurements and the
+  sign check on Kilo, tuning, H9/H13/H14 on the floor
+  (`docs/p2-hardware-test.md`), the simavr runs.
 
 **P3: mind v1 (ultrasonic + IMU personality).**
 - **Deliverables:** the behaviour-tree engine, drives, personality YAML, and
@@ -2239,8 +2355,8 @@ opens the port directly if the daemon is not running. As built
 | fx | atan2 vs `std::atan2` over a 1000² grid incl. axes, zero and large magnitudes (≤ 0.02°); sin over all a16 (≤ 2e-4); isqrt exact (edges + sampled) |
 | joints | Transfer function vs a transcription of legacy float `writeAngle`, using the dumped EEPROM: all 16 joints × every whole degree in limits; exact or ±1 count (listed). Limits, slew. |
 | config | Migration accept/reject paths; torn write at every byte offset recovers to the other slot; sequence wrap |
-| ik | Round trip on a 1 mm grid ≤ 0.25 mm; ≤ 0.25° vs double; reach clamp; legacy postures plausible |
-| gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change |
+| ik | Round trip on a 1 mm grid ≤ 0.25 mm; ≤ 0.25° vs double; reach clamp; legacy postures plausible. P2: `body/test/test_ik.cpp` (0.11 mm / 0.07° at 50/50 mm; 7 geometries incl. the params' extremes under the sanitizers; clamp on the ray; `up`/`sit`/`rest` FK; STANCE within the joint limits) |
+| gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change. P2: `body/test/test_gait.cpp`, all of these except the 3°/tick (8.8 / 6.7 / 9.6°/tick at §3d's defaults, below the 10°/tick slew; see 3d), plus zero foot velocity at lift-off/touchdown, the stop's landing and single `GAIT_STOPPED`, pattern change, bob/wag amplitudes, refusals, pending start, pre-emption by a trick, a reflex and the watchdog, STANCE pose terms and foot nudge, geometric balance closed through a plant, TELEMETRY through the link, fx cost per tick |
 | keyframe | Tick-exact dur/hold; easing endpoints; −128; loops; mirror (incl. roll ref); speed. P1: `body/test/test_keyframe.cpp` (also upload edge cases, crossfades, end posture, TRICK_DONE reasons, gating, per-frame balance, and all 13 library tricks within the joint limits with the JSON's timing) |
 | arbiter | Per-joint priority; crossfade length/monotonicity; head and balance gating; epoch refusal and LIMP/REST exemption. P1 head layer in `body/test/test_reflex.cpp`: slew, timeout, release crossfade, epoch release, no balance on held joints, precedence with TRICK and REFLEX, TELEMETRY |
 | balance | Toy-plant closed loop converges; every sign flip diverges; dead band; saturation; slew. Gain table = legacy `adaptiveParameterArray` = Kilo's EEPROM; mapping vs legacy `adjust()` ≤ 0.07° (grid), controller vs legacy ≤ 1° (0.16°); physical direction vs the posture tables; gating by owner, posture, request, epoch bump, IMU_FAULT |
@@ -2264,7 +2380,7 @@ opens the port directly if the daemon is not running. As built
 | H10 | 30 min soak, max streams + 5 Hz goals | `rx_crc_err` ≈ 0 (eye updates explain any); seq gaps < 0.1% |
 | H11 | Ultrasonic at 10 / 30 / 100 cm | ±1 / ±2 / ±4 cm |
 | H12 | Eyes R/G/B/W per side; BEEP scale | Correct LEDs; clean tones; no ultrasonic degradation while beeping |
-| H13 | Board tilted 0 → 10° pitch and roll | Body within 3° of level after 1 s. **Not met by the P1 joint-space layer (measured 2026-10-11: ≈0.17° body per degree of correction); deferred to P2 IK levelling by the owner.** |
+| H13 | Board tilted 0 → 10° pitch and roll | Body within 3° of level after 1 s. **Not met by the P1 joint-space layer (measured 2026-10-11: ≈0.17° body per degree of correction); deferred to P2 IK levelling by the owner.** P2: geometric levelling in STANCE/GAIT on the slope estimate (3f); host plant within 2.3° after 1 s at `kp_q8` 255; on Kilo: `docs/p2-hardware-test.md`. |
 | H14 | Walk 2 m (P2) | Drift < 20 cm **(target)**; 360° turn in place < 20 s; 30 s trot without a fall |
 | H15 | `kilo flash --legacy` | Old `kup`, `kwkF` work with the old calibration |
 
