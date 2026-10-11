@@ -245,6 +245,18 @@ int main() {
     CHECK(body_goal_posture(b, 0, POSTURE_STAND, 0, 0) == GOAL_STALE);
   }
 
+  // ---- epoch bump clears the SET_BALANCE enable (P1 hardware finding B1):
+  // a dead `kilo balance on` client must not leave later STANDs balancing.
+  // The gains survive (they are not a motion goal).
+  reset();
+  {
+    const uint8_t on[5] = {1, 200, 30, 2, 15};
+    CHECK(body_goal_balance(b, on) == GOAL_OK);
+    CHECK(b.bal.enable == 1 && b.bal.kp_q8 == 200);
+    body_epoch_bump(b);
+    CHECK(b.bal.enable == 0 && b.bal.kp_q8 == 200);
+  }
+
   // ---- IMU health: 10 ticks without a packet -> IMU_FAULT; recovery.
   reset();
   in.imu = IMU_NONE;

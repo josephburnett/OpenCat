@@ -748,6 +748,15 @@ larger than 1 (the legacy gains were never calibrated to it), or `kp_q8`
 needs a coarser scale (Q6 would allow Kp up to 4) or the gain table a
 global multiplier. Measured in `docs/p1-hardware-test.md` step 5.
 
+*Measured 2026-10-11* (`docs/p1-hardware-test-results.md`): the leg response
+is **≈0.17° of body per degree of `corr`**, not 1. On a board propped 15°
+nose up, Kp 0.99 moved the body from −10.2° to −8.8°, three times out of
+three; the signs are right, the legs settle. H13 (3° residual) would need
+Kp ≈ 20..40 through this map, which the legacy table was never meant for.
+**Owner's decision 2026-10-11: keep the P1 layer as the legacy-feel lean and
+defer body levelling to P2, where the IK gives a proper leg-length solution
+for a target body attitude** (open question 8 below moves to P2).
+
 **Joint-space mapping** (`balance_map`). The per-joint gains are the legacy
 `adaptiveParameterArray` {roll, pitch} factors in PROGMEM, which are also
 byte-for-byte Kilo's legacy EEPROM `ADAPT_PARAM` @128; units are joint degrees
@@ -1591,7 +1600,8 @@ and `src/` are deleted after P2 is accepted.
     logger.
   - Optional baseline: legacy `wkF` subsampled to 22 frames as a looping
     trick.
-- **Acceptance:** H7, H9 (looping trick), H11-H13. Each first-version trick
+- **Acceptance:** H7, H9 (looping trick), H11-H12 (H13 moved to P2, see
+  §3f "Proportional-only limits H13"). Each first-version trick
   matches the old firmware side by side, in the owner's judgement. Attitude
   agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 24 KB
   (22 KB until 2026-10-11).
@@ -2223,7 +2233,7 @@ opens the port directly if the daemon is not running. As built
 | H10 | 30 min soak, max streams + 5 Hz goals | `rx_crc_err` ≈ 0 (eye updates explain any); seq gaps < 0.1% |
 | H11 | Ultrasonic at 10 / 30 / 100 cm | ±1 / ±2 / ±4 cm |
 | H12 | Eyes R/G/B/W per side; BEEP scale | Correct LEDs; clean tones; no ultrasonic degradation while beeping |
-| H13 | Board tilted 0 → 10° pitch and roll | Body within 3° of level after 1 s |
+| H13 | Board tilted 0 → 10° pitch and roll | Body within 3° of level after 1 s. **Not met by the P1 joint-space layer (measured 2026-10-11: ≈0.17° body per degree of correction); deferred to P2 IK levelling by the owner.** |
 | H14 | Walk 2 m (P2) | Drift < 20 cm **(target)**; 360° turn in place < 20 s; 30 s trot without a fall |
 | H15 | `kilo flash --legacy` | Old `kup`, `kwkF` work with the old calibration |
 
