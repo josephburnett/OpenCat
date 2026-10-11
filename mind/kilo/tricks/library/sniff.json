@@ -1,0 +1,38 @@
+{
+  "name": "sniff",
+  "source": {
+    "file": "src/InstinctNybble.h",
+    "legacy_name": "snf",
+    "kind": "behaviour",
+    "period": -5,
+    "angle_ratio": 1,
+    "loop": [
+      2,
+      3,
+      3
+    ]
+  },
+  "notes": [
+    "behaviour: dur = ceil(round(maxDelta/(speed/4)) * 5.5 ms / 20 ms), frame 0 from `up`; hold = round(|delay| * 50 ms / 20 ms); loop [2, 3, 3] -> start 2 end 3 repeats 3; balance off (legacy perform() never balances behaviours)",
+    "end_posture STAND (nearest built-in posture, max leg diff 0 deg)"
+  ],
+  "expected": {
+    "roll": 0,
+    "pitch": 0
+  },
+  "loop": {
+    "start": 2,
+    "end": 3,
+    "repeats": 3
+  },
+  "balance": false,
+  "fall_ok": false,
+  "end_posture": "STAND",
+  "frames": [
+    {"dur": 5, "hold": 0, "easing": "cosine", "joints": {"head_pan": -8, "head_tilt": -50, "tail": -40, "lf_shoulder": 16, "rf_shoulder": 16, "rb_shoulder": -28, "lb_shoulder": -31, "lf_knee": 34, "rf_knee": 34, "rb_knee": -27, "lb_knee": -19}},
+    {"dur": 8, "hold": 0, "easing": "cosine", "joints": {"head_pan": -1, "head_tilt": -31, "tail": -21, "lf_shoulder": 25, "rf_shoulder": 33, "rb_shoulder": -37, "lb_shoulder": -37, "lf_knee": -15, "rf_knee": -20, "rb_knee": -55, "lb_knee": -55}},
+    {"dur": 8, "hold": 0, "easing": "cosine", "joints": {"head_pan": -5, "head_tilt": -45, "tail": -7, "lf_shoulder": 51, "rf_shoulder": 59, "rb_shoulder": -20, "lb_shoulder": -20, "lf_knee": -27, "rf_knee": -32, "rb_knee": -56, "lb_knee": -56}},
+    {"dur": 9, "hold": 0, "easing": "cosine", "joints": {"head_pan": 5, "head_tilt": -51, "tail": -37, "lf_shoulder": 47, "rf_shoulder": 55, "rb_shoulder": -24, "lb_shoulder": -24, "lf_knee": -27, "rf_knee": -32, "rb_knee": -56, "lb_knee": -56}},
+    {"dur": 9, "hold": 0, "easing": "cosine", "joints": {"head_pan": -17, "head_tilt": 5, "tail": 23, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -30, "lb_shoulder": -30, "lf_knee": 30, "rf_knee": 30, "rb_knee": -30, "lb_knee": -30}}
+  ]
+}

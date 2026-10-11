@@ -1,0 +1,31 @@
+{
+  "name": "sit",
+  "source": {
+    "file": "src/InstinctNybble.h",
+    "legacy_name": "sit",
+    "kind": "posture",
+    "period": 1,
+    "angle_ratio": 1
+  },
+  "notes": [
+    "dropped nonzero values on unused joints [4, 5, 6, 7]",
+    "clamped to joint limits (legacy clamps too): ['lb_shoulder', 'rb_shoulder']",
+    "posture: dur 25 ticks (legacy moves from the current pose at 2 deg/step), balance on (legacy gyro balance applies to postures)",
+    "end_posture SIT (nearest built-in posture, max leg diff 0 deg)"
+  ],
+  "expected": {
+    "roll": 0,
+    "pitch": -30
+  },
+  "loop": {
+    "start": 0,
+    "end": 0,
+    "repeats": 0
+  },
+  "balance": true,
+  "fall_ok": false,
+  "end_posture": "SIT",
+  "frames": [
+    {"dur": 25, "hold": 0, "easing": "cosine", "balance": true, "joints": {"head_pan": 10, "head_tilt": -20, "tail": -60, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -80, "lb_shoulder": -80, "lf_knee": 60, "rf_knee": 60, "rb_knee": 45, "lb_knee": 45}}
+  ]
+}

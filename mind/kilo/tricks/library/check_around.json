@@ -1,0 +1,37 @@
+{
+  "name": "check_around",
+  "source": {
+    "file": "src/InstinctNybble.h",
+    "legacy_name": "ck",
+    "kind": "behaviour",
+    "period": -3,
+    "angle_ratio": 1,
+    "loop": [
+      0,
+      1,
+      2
+    ]
+  },
+  "notes": [
+    "dropped nonzero values on unused joints [4, 5, 6, 7]",
+    "behaviour: dur = ceil(round(maxDelta/(speed/4)) * 5.5 ms / 20 ms), frame 0 from `up`; hold = round(|delay| * 50 ms / 20 ms); loop [0, 1, 2] -> start 0 end 1 repeats 2; balance off (legacy perform() never balances behaviours)",
+    "end_posture STAND (nearest built-in posture, max leg diff 50 deg)"
+  ],
+  "expected": {
+    "roll": 0,
+    "pitch": 0
+  },
+  "loop": {
+    "start": 0,
+    "end": 1,
+    "repeats": 2
+  },
+  "balance": false,
+  "fall_ok": false,
+  "end_posture": "STAND",
+  "frames": [
+    {"dur": 7, "hold": 3, "easing": "cosine", "joints": {"head_pan": 25, "head_tilt": 7, "tail": -70, "lf_shoulder": 27, "rf_shoulder": 19, "rb_shoulder": -21, "lb_shoulder": -35, "lf_knee": 5, "rf_knee": 21, "rb_knee": -33, "lb_knee": -5}},
+    {"dur": 20, "hold": 0, "easing": "cosine", "joints": {"head_pan": -25, "head_tilt": 7, "tail": 70, "lf_shoulder": 19, "rf_shoulder": 27, "rb_shoulder": -35, "lb_shoulder": -21, "lf_knee": 21, "rf_knee": 5, "rb_knee": -5, "lb_knee": -33}},
+    {"dur": 10, "hold": 0, "easing": "cosine", "joints": {"head_pan": 23, "head_tilt": 26, "tail": -38, "lf_shoulder": 15, "rf_shoulder": 15, "rb_shoulder": -33, "lb_shoulder": -33, "lf_knee": 80, "rf_knee": 80, "rb_knee": 4, "lb_knee": 4}}
+  ]
+}

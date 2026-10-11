@@ -18,5 +18,8 @@ kilo = "kilo.cli:main"
 [tool.setuptools.packages.find]
 include = ["kilo*"]
 
+[tool.setuptools.package-data]
+"kilo.tricks" = ["library/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,29 @@
+{
+  "name": "stand",
+  "source": {
+    "file": "src/InstinctNybble.h",
+    "legacy_name": "up",
+    "kind": "posture",
+    "period": 1,
+    "angle_ratio": 1
+  },
+  "notes": [
+    "posture: dur 25 ticks (legacy moves from the current pose at 2 deg/step), balance on (legacy gyro balance applies to postures)",
+    "end_posture STAND (nearest built-in posture, max leg diff 0 deg)"
+  ],
+  "expected": {
+    "roll": 0,
+    "pitch": 0
+  },
+  "loop": {
+    "start": 0,
+    "end": 0,
+    "repeats": 0
+  },
+  "balance": true,
+  "fall_ok": false,
+  "end_posture": "STAND",
+  "frames": [
+    {"dur": 25, "hold": 0, "easing": "cosine", "balance": true, "joints": {"head_pan": 0, "head_tilt": 0, "tail": 0, "lf_shoulder": 30, "rf_shoulder": 30, "rb_shoulder": -30, "lb_shoulder": -30, "lf_knee": 30, "rf_knee": 30, "rb_knee": -30, "lb_knee": -30}}
+  ]
+}
