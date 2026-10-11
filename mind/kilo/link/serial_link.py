@@ -17,6 +17,15 @@ Threads:
   mind itself are sent immediately regardless.
 - **logger**: ``kilo.log.JsonlLogger`` (optional) writes every frame off-thread.
 
+Silence (``passive=True`` or ``go_silent()``): the link keeps reading and
+decoding, but writes nothing at all to the transport: no HELLO_REQ, no
+heartbeat, no goal refresh, no commands (``request()`` raises). The body
+streams TELEMETRY from boot at its TELEM_DIV rate and sends EVENTs and HELLO
+unprompted, so a silent link still sees everything the body does on its own;
+it just does not feed (or arm) the body's link watchdog. Every write holds
+``_tx_lock`` and checks the flag under it, so once ``go_silent()`` returns no
+further byte is written.
+
 Goals and the epoch rule (§3c, §4, §5):
 
 - ``set_goal(name, **fields)`` latches a goal. Epoch-bearing goals (SET_POSTURE,
@@ -130,6 +139,7 @@ class SerialLink:
         dispatch: Callable[..., Any] | None = None,
         port_name: str | None = None,
         clock: Callable[[], float] = time.monotonic,
+        passive: bool = False,
     ):
         self._factory = transport_factory
         self.codec = codec or default_codec()
@@ -163,6 +173,10 @@ class SerialLink:
         self._last_reboot_at = -1e9
         self._was_alive = False
         self._ever_connected = False
+        self._tx_lock = threading.Lock()
+        self._silent = passive
+        self.last_tx: tuple[float, float, str] | None = None  # (clock, wall time, type) of the last frame
+        self.last_heartbeat: tuple[float, float] | None = None  # (clock, wall time)
 
     # ---- lifecycle -------------------------------------------------------------
     def start(self) -> "SerialLink":
@@ -194,6 +208,31 @@ class SerialLink:
 
     def __exit__(self, *exc: Any) -> None:
         self.stop()
+
+    # ---- silence -------------------------------------------------------------------
+    @property
+    def silent(self) -> bool:
+        return self._silent
+
+    def go_silent(self) -> tuple[float, float, str] | None:
+        """Stop writing to the transport, at once and for good.
+
+        Drops every latched goal and queued frame without sending them (no
+        final refresh). Returns ``last_tx``: (clock, wall time, type) of the
+        last frame written, which is when the body's watchdog last got fed.
+        """
+        with self._tx_lock:
+            self._silent = True
+            with self._lock:
+                self._goals.clear()
+            while True:
+                try:
+                    self._txq.get_nowait()
+                except queue.Empty:
+                    break
+            last = self.last_tx
+        self._log("link", silent=True)
+        return last
 
     # ---- mind liveness ----------------------------------------------------------
     def mark_alive(self) -> None:
@@ -325,6 +364,8 @@ class SerialLink:
         typ = self.messages.type_of(name)
         timeout = self.cfg.ack_timeout_s if timeout is None else timeout
         retries = self.cfg.retries if retries is None else retries
+        if self._silent:
+            raise LinkError(f"{name}: the link is passive (sends nothing)")
         if self._transport is None:
             raise NotConnected(f"{name}: not connected")
         with self._req_lock:
@@ -393,8 +434,15 @@ class SerialLink:
                 log.exception("link housekeeping failed")
 
     def _send_frame(self, typ: int, seq: int, payload: bytes, name: str) -> bool:
+        with self._tx_lock:
+            return self._send_frame_locked(typ, seq, payload, name)
+
+    def _send_frame_locked(self, typ: int, seq: int, payload: bytes, name: str) -> bool:
         t = self._transport
         st = self.state.stats
+        if self._silent:
+            st.tx_silenced += 1
+            return False
         if t is None or self._broken.is_set():
             st.tx_dropped += 1
             return False
@@ -411,6 +459,9 @@ class SerialLink:
             st.tx_dropped += 1
             return False
         self._last_tx_at = self.clock()
+        self.last_tx = (self._last_tx_at, time.time(), name)
+        if name == "HEARTBEAT":
+            self.last_heartbeat = self.last_tx[:2]
         st.frames_tx += 1
         st.bytes_tx += len(data)
         if self.logger is not None and name != "HEARTBEAT":
@@ -425,7 +476,7 @@ class SerialLink:
             log.info("body %s", "alive" if alive else "lost (no telemetry for 300 ms)")
             self._log("link", alive=alive, connected=self.state.connected)
             self._emit("connection", self.state.connected, alive)
-        if self._transport is None or self._broken.is_set():
+        if self._transport is None or self._broken.is_set() or self._silent:
             return
         st = self.state.stats
         # goals changed by the mind: send immediately

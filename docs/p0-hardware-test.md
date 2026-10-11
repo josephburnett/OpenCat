@@ -217,15 +217,18 @@ kilo monitor
 ## 5. Postures (H2 counts, REST → STAND → SIT → REST)
 
 Each `posture` command holds the posture until it exits. Then the watchdog
-stops at 0.5 s, lies down at 1.5 s, and limps 10 s later. That is the H5
-timeline, so watch it every time.
+stops at 0.5 s, lies down at 1.5 s, and limps 10 s after the 1 s REST move.
+Every `kilo` command feeds the watchdog while it runs (and each one restarts
+the timeline), so the timeline is only observable with `--then-watch`: after
+the hold, the command stops sending at once and prints what the body does,
+in seconds since the last frame it sent (see step 8 for how to read it).
 
 ```sh
-kilo posture rest --for 3      # from LIMP: straight to REST (slew-limited), then the watchdog
-kilo posture stand --for 5 --pca   # REST -> STAND over 0.5 s; prints the PCA counts while standing
-kilo posture sit --for 5
-kilo posture balance --for 3   # = STAND with the balance flag (balance itself is P1)
-kilo posture rest --for 3
+kilo posture rest --for 3 --then-watch 3     # from LIMP: straight to REST (slew-limited)
+kilo posture stand --for 5 --pca --then-watch 3   # REST -> STAND over 0.5 s; PCA counts while standing
+kilo posture sit --for 5 --then-watch 3
+kilo posture balance --for 3 --then-watch 3  # = STAND with the balance flag (balance itself is P1)
+kilo posture rest --for 3 --then-watch 3
 ```
 
 - The moves are smooth, with no jumps at the start or the end.
@@ -233,8 +236,11 @@ kilo posture rest --for 3
   process can hold the port, so it is read inside the posture command): channels 0-2 and 8-15 within
   ±1 count of what the legacy `kup` drove. Compare them with a legacy
   read-back if you have one; otherwise record them.
-- After each command exits: still for 0.5 s, REST by ≈2.5 s, LIMP ≈10 s after
-  that.
+- In each 3 s watch: `EVENT WATCHDOG` and `mode IDLE -> LINK_LOST` at
+  +0.5 s, `owners IDLE/IDLE -> REFLEX/REFLEX (... watchdog REST)` at +1.5 s,
+  and Kilo lying down by ≈2.5 s. The full timeline to LIMP is step 8.
+- Starting the next command within the 12.5 s feeds the watchdog again
+  (`EVENT LINK_RESTORED`); the body stays in REST until the new goal.
 
 ## 6. Calibration and params
 
@@ -261,14 +267,37 @@ since the last `kilo` command), the next `kilo` open resets Kilo once more and
 
 ## 8. Watchdog with a held posture (H5, standing)
 
+One command, one open port: hold STAND for 2 s, then go silent and watch for
+15 s.
+
 ```sh
-kilo posture stand --for 2
+kilo posture stand --for 2 --then-watch 15
 ```
 
-Then Kilo stops (0.5 s), lies down (REST by ≈1.5 s plus 1 s of movement),
-and limps 10 s later. To repeat it while monitoring, run `kilo monitor` in a
-second terminal: the mode goes IDLE → LINK_LOST → LIMP, and the epoch
-increments at the watchdog trip.
+After the hold it prints `silent: last frame HEARTBEAT sent at HH:MM:SS.mmm
+(t=0), last HEARTBEAT at ...`; from then on nothing is written to the port
+(the closing `done: 0 frames sent while watching` confirms it). Every timeline
+line is seconds since t=0, i.e. since the watchdog was last fed. Expect:
+
+| t | line | Kilo |
+|---|---|---|
+| +0.0 | `state: mode IDLE  epoch N  owners IDLE/IDLE  flags link_ok,servos_powered` | standing |
+| +0.5 | `EVENT WATCHDOG ... epoch=N+1`, `mode IDLE -> LINK_LOST`, `epoch N -> N+1`, `flags -link_ok` | stops |
+| +1.5 | `owners IDLE/IDLE -> REFLEX/REFLEX  (reflex took over: watchdog REST)` | lies down over 1 s |
+| +12.5 | `flags -servos_powered  (servos off: LIMP)` | goes limp |
+
+The mode stays LINK_LOST through REST and LIMP: the body reports LINK_LOST
+while any watchdog stage is active. LIMP is `WD_LIMP_S` (10 s) after the REST
+move ends, so 1.5 + 1 + 10. If step 6 left `WD_LIMP_S` at 5, LIMP is at +7.5
+(the param is not persisted, so a power cycle in step 7 restores 10). A
+`tel tick ...` summary line follows every second; 25 Hz and a steady tick are
+expected. Record the timings.
+
+To watch the body later without feeding it (for example after the
+`--then-watch` ends, or after a boot), `kilo monitor --passive --duration 20`
+prints the same timeline and writes nothing to the port at all: the body
+streams TELEMETRY and EVENTs on its own. A second terminal does not work for
+any of this: only one process can hold the port.
 
 ## 9. Roll back (H15)
 
@@ -286,4 +315,4 @@ with the old calibration. Its EEPROM was never written.
   line and `config_state`.
 - Anything that moved when it should not, with the step number.
 - The `--pca` counts while standing (H2) and the diff result from step 4.
-- The watchdog timings you saw in steps 5 and 8.
+- The `--then-watch` timelines from steps 5 and 8 (copy the output).
