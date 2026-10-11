@@ -258,7 +258,7 @@ def test_monitor_passive_sends_nothing(vbody_pty_fast_limp):
 
 def test_posture_then_watch_shows_the_watchdog_timeline(vbody_pty_fast_limp):
     vb, path = vbody_pty_fast_limp
-    p = _run(path, "posture", "stand", "--for", "0.6", "--then-watch", "3.5")
+    p = _run(path, "posture", "stand", "--for", "0.6", "--then-watch", "4.5")
     assert p.returncode == 0, p.stderr
     out = p.stdout
     assert re.search(r"silent: last frame \w+ sent at \d\d:\d\d:\d\d\.\d{3} \(t=0\)", out), out
