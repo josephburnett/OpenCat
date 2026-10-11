@@ -144,6 +144,11 @@ re-run `body/tools/host_tests.sh`, `kilo -v flash`, and repeat this step.
 
 Ctrl-C ends the hold; the watchdog then lays Kilo down.
 
+*Done 2026-10-11 in the hand instead of on the stand (lift Kilo under the
+belly, legs free): the same observations apply. Run the hold without `--for`
+in the background on the Pi so the owner is not on a timer, and end it with
+SIGTERM (a `nohup … &` client ignores SIGINT: the shell set it to ignore).*
+
 ## 5. Closed loop on a slope (H13, Kilo on its feet)
 
 Put Kilo on the board, level, and hold balance with the defaults (Kp 0.5,
@@ -171,6 +176,25 @@ left up, right up. Record the body's pitch/roll 1 s after each tilt:
   firmware change (§3f, "Proportional-only limits H13").
 - No oscillation: the legs settle, they do not hunt. If they hunt, lower Kp or
   raise Kd (step 7).
+
+**Fixed-angle A/B (the measurement that worked, 2026-10-11).** Hand tilts
+vary by ±5° from run to run, which swamps the residual, so measure the
+response with the board propped on a block at one angle and the balance
+toggled while nothing else changes. The daemon keeps the link fed between
+commands and `--idle-posture none` keeps STAND up between them:
+
+```sh
+kilo run --idle-posture none &                      # terminal A (or nohup)
+kilo posture stand                                  # terminal B: Kilo stands; prop the board now
+# terminal C, once the board is propped:
+for i in 1 2 3; do kilo balance off --for 8; kilo balance on --kp 0.99 --for 10; done
+```
+
+Read the body pitch in the two states from the daemon's `--log` file (or the
+once-a-second lines). The difference is the correction's effect; the
+computed correction is about Kp × (board − dead band), clamped. Result on
+Kilo: 1.4° of body for ≈8° of correction (≈0.17°/°), so H13 is out of reach
+of this layer and is deferred to P2 (architecture §3f).
 
 ## 6. Gating (stand)
 
@@ -206,6 +230,14 @@ Limits: Kp 0..0.99, Kd 0..0.255 s, dead band and clamp 0..30°. Nothing is
 persisted: a reboot returns to the defaults. Note the values that work best.
 
 ## 8. Attitude A/B against the legacy firmware (§7, optional)
+
+*2026-10-11: as written this step does not work. Flashing moves the legs
+and a limp body sags, so the two readings are of different poses; and the
+legacy `v` five seconds after its boot printed −34° on a board a phone
+measured at 15°, so the legacy readout is not a reference. Use a phone
+level app on the board next to Kilo instead: the new firmware agreed with
+it within the pose slack (REST −12.8°/−7.3° on a 15°/6° board). Kept below
+for the record.*
 
 Put Kilo on a fixed wedge (or flat), not touched between the two readings.
 

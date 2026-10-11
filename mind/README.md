@@ -885,3 +885,13 @@ kilo/vbody/                 virtual body
 firmware/                   stored hex images (legacy firmware)
 systemd/                    kilo.service (user unit), env.example, install.sh
 ```
+
+## Background clients over ssh
+
+A `kilo` hold started with `nohup kilo balance on … &` (or any command
+without `--for`) from a non-interactive shell ignores Ctrl-C/SIGINT: the
+shell starts background jobs with SIGINT ignored. End it with SIGTERM
+(`kill -TERM $(cat the.pid)`); the watchdog then lays Kilo down as usual.
+Keep the pid in a file rather than `pkill -f` a pattern that matches your
+own ssh command line.
+
