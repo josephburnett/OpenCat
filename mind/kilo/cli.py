@@ -6,12 +6,13 @@
     kilo balance on|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand|sit] [--for S]
     kilo cal show | set JOINT DEGREES | save | revert
     kilo param list | get ID | set ID VALUE [--persist]
-    kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S]
+    kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S] [--force]
     kilo vbody [--fall-after S] [--no-keys]
     kilo run [--port P] [--socket PATH] [--log] [--kilolog [FILE]] [--behaviour]
     kilo daemon [status|stop]
     kilo log summary|replay|plot FILE ...
     kilo --kilolog [FILE] COMMAND ...    (also: kilo monitor --percepts; kilo.cli_tools)
+    kilo --override posture|balance|trick ...   (through a daemon whose behaviour runner is active)
 
 Every command first tries the daemon socket (``kilo run``, kilo.daemon; path
 from kilo.remote.socket_path()); when no daemon listens, or ``--direct`` is
@@ -75,6 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="daemon socket (default $KILO_SOCKET, $XDG_RUNTIME_DIR/kilo/kilo.sock, "
                         "/run/kilo/kilo.sock as root, else ~/.kilo/kilo.sock)")
     p.add_argument("--direct", action="store_true", help="never use the daemon: open the port directly")
+    p.add_argument("--override", action="store_true",
+                   help="through a daemon running the behaviour runner: pause it while this command holds "
+                        "the body (posture, balance, trick) instead of being refused")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     s = sub.add_parser("status", help="HELLO, state and link statistics")
@@ -166,6 +170,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--settle-cycles", type=int, default=3, metavar="N",
                    help="open/close cycles that settle DTR/HUPCL after avrdude (default 3)")
     s.add_argument("--dry-run", action="store_true", help="print the commands only")
+    s.add_argument("--force", action="store_true",
+                   help="flash even if another process holds the port (warns; avrdude and that process "
+                        "will fight over it)")
 
     s = sub.add_parser("vbody", help="run a virtual body on a pty")
     s.add_argument("--fall-after", type=float, default=None, metavar="S",
@@ -577,10 +584,12 @@ def cmd_eeprom(args: argparse.Namespace, client: BodyClient) -> int:
 
 def cmd_flash(args: argparse.Namespace) -> int:
     from kilo.tools.flash import (DEFAULT_BUILD_DIR, DEFAULT_SKETCH, FlashError, FlashOptions, VerifyResult,
-                                  flash, is_usb_port, verify_hello)
+                                  describe_hello, flash, is_usb_port, port_busy, verify_hello)
 
     conn = None if args.dry_run else _daemon_for(args)
-    port = conn.info["port"] if conn is not None else _resolve_port(args)
+    # A daemon that has not found a port yet still gets asked to release (it
+    # would open one mid-flash otherwise); the port is then resolved here.
+    port = (conn.info.get("port") if conn is not None else None) or _resolve_port(args)
     opts = FlashOptions(
         port=port, legacy=args.legacy, build=not (args.no_build or args.hex), hex_path=args.hex,
         sketch=args.sketch or DEFAULT_SKETCH, build_dir=args.build_dir or DEFAULT_BUILD_DIR,
@@ -596,15 +605,30 @@ def cmd_flash(args: argparse.Namespace) -> int:
             r = conn.call("verify_hello", timeout=timeout + 10, since=since, expected_build=expected_build,
                           any_cause=any_cause, wait_s=timeout)
             return VerifyResult(bool(r["ok"]), r.get("hello"))
-        link = SerialLink(lambda: open_port(port, args.baud), port_name=port)
-        holder["link"] = link
-        link.mark_alive()
-        link.start()
-        return verify_hello(link, since, expected_build, timeout=timeout, any_cause=any_cause)
+        link = holder.get("link")
+        if link is None:  # the second verify reuses it
+            link = SerialLink(lambda: open_port(port, args.baud), port_name=port)
+            holder["link"] = link
+            link.mark_alive()
+            link.start()
+        return verify_hello(link, since, expected_build, timeout=timeout, any_cause=any_cause, stamp=True)
+
+    def precheck() -> None:
+        """Right before avrdude: nobody else may hold the port (a daemon this
+        command did not reach: --direct, another user's, root's)."""
+        why = port_busy(port)
+        if why is None:
+            return
+        if args.force:
+            print(f"warning: {port} is in use ({why}); flashing anyway (--force)", file=sys.stderr, flush=True)
+            return
+        raise FlashError(f"{port} is in use ({why}): probably a `kilo run` daemon this command could not "
+                         f"reach (--direct, another user's, or root's). Stop it first (`kilo daemon stop`, "
+                         f"`systemctl --user stop kilo`), or pass --force to flash anyway.")
 
     lease = DaemonPortLease(conn, port) if conn is not None else None
     try:
-        flash(opts, link=lease, verify=verify)
+        res = flash(opts, link=lease, verify=verify, precheck=precheck)
     except FlashError as e:
         print(f"kilo flash: {e}", file=sys.stderr)
         return EXIT_ERR
@@ -618,6 +642,11 @@ def cmd_flash(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
             conn.close()
+    if res.verified is False:
+        seen = describe_hello(res.hello)
+        print("kilo flash: verify FAILED: the body did not report the new firmware"
+              + (f" (last HELLO seen: {seen})" if seen else " (no HELLO seen at all)"), file=sys.stderr)
+        return EXIT_ERR
     return EXIT_OK
 
 
@@ -747,7 +776,8 @@ LINK_COMMANDS = {"status": cmd_status, "monitor": cmd_monitor, "posture": cmd_po
 PORT_COMMANDS = {"flash": cmd_flash, "vbody": cmd_vbody, "run": cmd_run, "daemon": cmd_daemon,
                  "log": cmd_log}
 # Link-command modes that must send nothing, so they cannot share the daemon's port.
-SILENT_MODES = {"monitor": ("passive", "--passive"), "posture": ("then_watch", "--then-watch")}
+SILENT_MODES = {"monitor": ("passive", "--passive"), "posture": ("then_watch", "--then-watch"),
+                "trick": ("then_watch", "--then-watch")}
 
 
 def _silent_mode(args: argparse.Namespace) -> str | None:
@@ -771,7 +801,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.log or args.log_file or args.kilolog is not None:
             print("note: through the daemon, frames are logged by the daemon (`kilo run --log`/`--kilolog`)",
                   file=sys.stderr)
-        link, client = None, RemoteBody(conn)
+        link, client = None, RemoteBody(conn, override=args.override)
     else:
         link, client = open_link(args, passive=args.cmd == "monitor" and args.passive)
     try:

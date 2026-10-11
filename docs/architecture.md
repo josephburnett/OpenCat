@@ -469,6 +469,19 @@ gait after recovery. So:
   set; it is never re-stamped. Any epoch change the mind sees, in TELEMETRY,
   in any EVENT or in HELLO, clears its motion goals from older epochs; it
   then adopts the new epoch and decides afresh (§5).
+- **Gap: a reboot restarts the epoch at 0.** A body that reboots (brown-out,
+  watchdog reset, the DTR edge of a port reopen) comes back at epoch 0, so a
+  goal the mind set at epoch 0 and refreshes during the 0.3-2 s init (the
+  UART buffers it) is accepted after the boot as if nothing happened. The
+  mind narrows this (§5 "Contact": no motion goal after a reconnect or once
+  telemetry has been missing for 300 ms, until the body is heard again; a
+  HELLO with a new identity is a reboot), but the refreshes of the first
+  300 ms of a reboot on a live connection still reach the booting body.
+  **TODO (body):** a boot epoch that never repeats: keep a boot counter in
+  `.noinit` RAM (survives a warm reset; validated with a magic and its
+  complement, reseeded from the EEPROM or the ADC noise on a cold boot) and
+  start `epoch` at a value derived from it (never 0 after a reboot, and not
+  the previous boot's), so every goal stamped before the reboot is STALE.
 
 ### 3d. Gait generator
 
@@ -1231,7 +1244,9 @@ their 8-deep queue until there is room. Drops are reported by a rate-limited `EV
 **Boot and reboot detection.** On every boot the body sends an unsolicited
 `HELLO` (with `reset_cause` from 3a, `last_alive_tick`, build hash, protocol
 version and current epoch) and `EVENT BOOT`. The Pi treats an unsolicited HELLO,
-or a tick that goes backwards, as a reboot. It then:
+a HELLO whose identity (reset cause, `last_alive_tick`, build) differs from
+the last one, or a tick that goes backwards, as a reboot (and clears its
+motion goals before anything else can be sent; §5 "Contact"). It then:
 
 1. logs the cause;
 2. checks `proto_major`, and refuses to drive and offers to flash on a mismatch;
@@ -1284,6 +1299,19 @@ On `FELL`, `WATCHDOG` or `LOW_BATTERY`, and on any epoch change seen in
 TELEMETRY, an EVENT or HELLO, the client **clears the desired motion goals from
 older epochs**, adopts the new epoch, and notifies the behaviour layer. Nothing
 from before the change is replayed.
+
+**Contact.** A body that may just have rebooted must not get the old goals
+(a reboot restarts the epoch at 0, §3c). After every (re)connect, and once
+telemetry has been missing for 300 ms, the link sends and refreshes no
+motion goal (`SET_POSTURE` other than REST/LIMP, a `SET_BALANCE` enable, the
+other epoch goals) and refuses `TRICK_PLAY` until the body is heard on this
+connection: a HELLO that proves a reboot (the goals are cleared first, under
+the lock the writer packs goals under), or a TELEMETRY whose tick has been
+checked for a restart. A reboot clears the motion goals every time; only its
+count is debounced. The behaviour runner forgets its posture/balance cache on
+an epoch, `reboots` or `connected` change. What is left (refreshes sent in
+the first 300 ms of a reboot on a live connection) needs the body's boot
+epoch, **TODO (body)** in §3c.
 
 **Body state.** `BodyState` holds:
 - the latest telemetry, with time unwrapped;

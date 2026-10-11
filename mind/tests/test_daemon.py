@@ -21,7 +21,7 @@ from kilo.body.client import BodyClient
 from kilo.body.state import BodyState
 from kilo.daemon import Daemon
 from kilo.link import consts
-from kilo.link.serial_link import CommandError, LinkConfig, NotConnected
+from kilo.link.serial_link import CommandError, LinkConfig, LinkError, NotConnected
 from kilo.remote import DaemonError, RemoteBody, connect, socket_candidates, socket_path
 from kilo.vbody.sim import VirtualBody, open_pty
 
@@ -343,17 +343,35 @@ def test_release_and_reacquire_port(start_daemon):
         body.close()
 
 
-def test_release_lease_expires_and_disconnect_reacquires(start_daemon):
+def test_release_lease_expires_and_disconnect_keeps_the_lease(start_daemon, monkeypatch):
+    """Finding 9: a flashing CLI that dies mid-avrdude must not get the port
+    reopened under avrdude: the lease is honoured after the disconnect, and
+    every reopen settles the port first."""
+    settled = []
+    monkeypatch.setattr(dmod, "settle_port", lambda port, baud=None, **kw: settled.append(port) or [])
     d, vb, path, sock = start_daemon()
     body = remote(sock)
     try:
         body.conn.call("release_port", lease_s=0.3)
         assert wait_for(lambda: not body.conn.call("daemon")["port_released"], 2)
+        assert settled == [path]  # settled before the reopen
         assert body.wait_ready(3)
-        body.conn.call("release_port", lease_s=60)
+        body.conn.call("release_port", lease_s=1.5)
     finally:
-        body.close()  # the releasing client went away: reacquired
-    assert wait_for(lambda: not d.port_released and d.client.state.connected, 2)
+        body.close()  # the releasing client went away: still released until the lease ends
+    time.sleep(0.8)
+    assert d.port_released and not d.client.state.connected
+    n_rx = len(vb.received)
+    assert wait_for(lambda: not d.port_released and d.client.state.connected, 3)
+    assert settled == [path, path] and len(vb.received) >= n_rx
+    # an explicit reacquire settles too
+    body = remote(sock)
+    try:
+        body.conn.call("release_port", lease_s=60)
+        assert body.conn.call("reacquire_port")["reacquired"] is True
+        assert settled == [path] * 3 and body.wait_ready(3)
+    finally:
+        body.close()
 
 
 # ---- shutdown and the behaviour hook --------------------------------------------------------
@@ -398,8 +416,13 @@ def test_behaviour_runner_hook(start_daemon, monkeypatch):
     assert isinstance(ev, threading.Event) and isinstance(log_dir, Path) and log_dir.is_dir()
     assert wait_for(lambda: vb.posture == "SIT")
     assert remote(sock).conn.info["behaviour"] == "running"
-    # with a runner the end of a CLI hold leaves the body to the runner (no idle REST)
+    # with a runner a CLI goal is refused unless --override ...
     body = remote(sock)
+    with pytest.raises(LinkError, match="behaviour runner active"):
+        body.posture("stand")
+    body.close()
+    # ... and the end of an override hold leaves the body to the runner (no idle REST)
+    body = RemoteBody(connect(sock), override=True)
     body.posture("stand")
     assert wait_for(lambda: vb.posture == "STAND")
     body.close()

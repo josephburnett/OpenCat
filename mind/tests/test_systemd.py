@@ -50,14 +50,14 @@ def test_install_is_idempotent_and_does_not_start(fake_home):
     assert envf.read_text() == "KILO_PORT=/dev/ttyAMA0\n"  # never overwritten
     p = run("--start", "--kilo", "/opt/kilo/bin/kilo")
     assert p.returncode == 0
-    assert "ExecStart=/opt/kilo/bin/kilo run --log $KILO_RUN_ARGS" in unit.read_text()
+    assert "ExecStart=/opt/kilo/bin/kilo run $KILO_RUN_ARGS" in unit.read_text()
     assert "systemctl --user restart kilo.service" in calls.read_text()
     assert run("--bogus").returncode == 2
 
 
 def test_unit_file_shape():
     text = (SYSTEMD / "kilo.service").read_text()
-    for line in ("EnvironmentFile=-%h/.config/kilo/env", "ExecStart=%h/OpenCat/.venv/bin/kilo run --log $KILO_RUN_ARGS",
+    for line in ("EnvironmentFile=-%h/.config/kilo/env", "ExecStart=%h/OpenCat/.venv/bin/kilo run $KILO_RUN_ARGS",
                  "KillSignal=SIGTERM", "WantedBy=default.target", "Restart=on-failure"):
         assert line in text
     assert os.access(SYSTEMD / "install.sh", os.X_OK)

@@ -46,7 +46,10 @@ def test_goal_sent_immediately_and_refreshed_at_5hz(make_link):
     link.set_goal("SET_POSTURE", posture=3, transition_ticks=0, flags=0)
     assert peer.wait_for(lambda: peer.of("SET_POSTURE"), 0.1)
     assert peer.of("SET_POSTURE")[0][0] - t0 < 0.05
-    keep_alive(link, 1.0)
+    end = time.monotonic() + 1.0
+    while time.monotonic() < end:  # a live body streams telemetry (a lost one gets no refresh)
+        peer.telemetry(epoch=5)
+        keep_alive(link, 0.04)
     sends = peer.of("SET_POSTURE")
     assert 5 <= len(sends) <= 8, len(sends)
     assert all(p[3][0] == 5 for p in sends)  # stamped with the epoch they were set under

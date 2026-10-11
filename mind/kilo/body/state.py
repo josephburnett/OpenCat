@@ -81,12 +81,27 @@ class LinkStats:
     goals_refused: Counter = field(default_factory=Counter)
     goals_cleared: int = 0
     hello_polls: int = 0
+    # The BodyState lock: the reader thread adds Counter keys under it, so
+    # as_dict() copies under it too (no "dictionary changed size").
+    lock: Any = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> dict[str, Any]:
-        d = dict(self.__dict__)
-        d["decode_errors"] = dict(self.decode_errors)
-        d["goals_refused"] = dict(self.goals_refused)
+        with self.lock if self.lock is not None else _NO_LOCK:
+            d = {k: v for k, v in self.__dict__.items() if k != "lock"}
+            d["decode_errors"] = dict(self.decode_errors)
+            d["goals_refused"] = dict(self.goals_refused)
         return d
+
+
+class _NoLock:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+_NO_LOCK = _NoLock()
 
 
 class BodyState:
@@ -98,7 +113,7 @@ class BodyState:
         self.connected = False
         self.connected_since: float | None = None
         self.last_rx_at: float | None = None
-        self.stats = LinkStats()
+        self.stats = LinkStats(lock=self.lock)
         # telemetry
         self.telemetry: Any = None
         self.telemetry_at: float | None = None

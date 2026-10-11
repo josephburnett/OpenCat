@@ -16,6 +16,14 @@ goes silent at once and prints the watchdog timeline, like ``kilo posture
 --then-watch``. A trick cannot start from LIMP: pass ``--posture stand``
 (or set one first).
 
+Through the daemon (``kilo run``) the daemon does the work with its
+``trick_upload``/``trick_play``/``trick_stop`` ops: it plays the trick on its
+loop and owns it for this command's session, so a killed ``kilo trick
+play`` (even ``--repeats 255``) stops the trick and the daemon's idle
+REST/LIMP follows. ``--then-watch`` needs the port to itself and is refused
+through the daemon, like ``kilo posture --then-watch``. Directly, the CLI's
+own asyncio loop is the liveness source while it waits.
+
 Registered in cli.py with one line (``add_parser`` adds the subcommand and
 its handler to LINK_COMMANDS).
 """
@@ -139,7 +147,14 @@ def _load(name: str, repeats: int | None) -> Trick:
     return t
 
 
+def _remote(client: Any) -> bool:
+    """True for kilo.remote.RemoteBody (the daemon's session)."""
+    return hasattr(client, "trick_play") and hasattr(client, "conn")
+
+
 def cmd_trick(args: argparse.Namespace, client: BodyClient) -> int:
+    if _remote(client):
+        return _cmd_trick_daemon(args, client)
     if args.trick_cmd == "upload":
         client.wait_ready(args.timeout, require_telemetry=False)
         t = _load(args.name, None)
@@ -174,15 +189,24 @@ def _play(args: argparse.Namespace, client: BodyClient) -> int:
           + f", expected {_seconds(t, args.speed)}", flush=True)
     stopped_by_us = False
 
+    async def alive() -> None:
+        while True:  # this loop is the mind's main loop while the trick plays
+            client.link.mark_alive()
+            await asyncio.sleep(0.1)
+
     async def run() -> Any:
         nonlocal stopped_by_us
-        task = asyncio.ensure_future(client.play(t, mirror=args.mirror, speed=args.speed))
-        if args.hold is not None:
-            done, _ = await asyncio.wait({task}, timeout=args.hold)
-            if not done:
-                stopped_by_us = True
-                client.stop_trick()
-        return await task
+        ticker = asyncio.ensure_future(alive())
+        try:
+            task = asyncio.ensure_future(client.play(t, mirror=args.mirror, speed=args.speed))
+            if args.hold is not None:
+                done, _ = await asyncio.wait({task}, timeout=args.hold)
+                if not done:
+                    stopped_by_us = True
+                    client.stop_trick()
+            return await task
+        finally:
+            ticker.cancel()
 
     try:
         res = asyncio.run(run())
@@ -199,6 +223,44 @@ def _play(args: argparse.Namespace, client: BodyClient) -> int:
     ok = res.reason == "DONE" or (stopped_by_us and res.reason == "STOPPED")
     if args.then_watch is not None:
         _then_watch(client, args.then_watch)
+    return EXIT_OK if ok else EXIT_ERR
+
+
+def _cmd_trick_daemon(args: argparse.Namespace, client: Any) -> int:
+    """`kilo trick upload|play|stop` through the daemon's trick ops."""
+    if args.trick_cmd == "stop":
+        client.stop_trick(args.transition)
+        print("stopped")
+        return EXIT_OK
+    if args.trick_cmd == "upload":
+        client.wait_ready(args.timeout, require_telemetry=False)
+        r = client.trick_upload(name=args.name, force=args.force)
+        print(f"{r['name']}: trick_id {r['trick_id']}, crc 0x{r['crc16']:04X}, {r['frames']} frames "
+              + ("uploaded" if r["uploaded"] else "already on the body (cached)"))
+        return EXIT_OK
+    t = _load(args.name, args.repeats)
+    BodyClient.speed_q6(args.speed)
+    if args.repeats == FOREVER and args.hold is None:
+        print("note: --repeats 255 plays until stopped: Ctrl-C (or --for S) stops it", flush=True)
+    client.wait_ready(args.timeout)
+    r = client.trick_upload(name=args.name)
+    print(f"{t.name}: trick_id {r['trick_id']} {'uploaded' if r['uploaded'] else 'cached'}; playing"
+          + (" mirrored" if args.mirror else "") + (f" at x{args.speed:g}" if args.speed != 1 else "")
+          + f", expected {_seconds(t, args.speed)}", flush=True)
+    try:
+        res = client.trick_play(name=args.name, mirror=args.mirror, speed=args.speed, repeats=args.repeats,
+                                posture=args.posture, hold_s=args.hold)
+    except KeyboardInterrupt:
+        client.stop_trick()
+        print("interrupted: trick stopped")
+        return EXIT_OK
+    except TrickError as e:
+        print(f"kilo trick: {e}", file=sys.stderr)
+        return EXIT_ERR
+    exp = "" if res["expected_ticks"] is None else f" (expected {(res['expected_ticks'] + 1) * TICK_S:.2f} s)"
+    print(f"TRICK_DONE {res['reason']} after {res['elapsed_s']:.2f} s{exp}; end posture "
+          f"{t.end_posture.name.lower()}, epoch {res['epoch']}", flush=True)
+    ok = res["reason"] == "DONE" or (res["stopped_by_us"] and res["reason"] == "STOPPED")
     return EXIT_OK if ok else EXIT_ERR
 
 

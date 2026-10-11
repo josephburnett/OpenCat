@@ -247,9 +247,11 @@ def test_flash_prints_the_hello_it_saw(tmp_path):
 
     res = fl.flash(fl.FlashOptions(port="/dev/ttyAMA0", hex_path=hexf, avrdude="avrdude", reset="none"),
                    run=lambda cmd, check: None, say=said.append, settle=lambda p: [], verify=verify)
-    assert timeouts == [8.0] and res.verified is False and res.hello == seen
-    assert said[-1].startswith("warning: no HELLO with reset_cause=FLASHED within 8 s; last HELLO seen: build "
-                               "56424f44 reset ")
+    assert timeouts == [8.0, 8.0] and res.verified is False and res.hello == seen  # verified twice
+    assert said[-2].startswith("no HELLO with reset_cause=FLASHED within 8 s (last HELLO seen: build 56424f44 "
+                               "reset ") and said[-2].endswith("; verifying once more")
+    assert said[-1].startswith("verify FAILED: no HELLO with reset_cause=FLASHED within 2 x 8 s; last HELLO "
+                               "seen: build 56424f44 reset ")
     said.clear()
     fl.flash(fl.FlashOptions(port="/dev/ttyACM0", hex_path=hexf, avrdude="avrdude", verify_timeout=2.5),
              run=lambda cmd, check: None, say=said.append, settle=lambda p: [],
@@ -259,7 +261,7 @@ def test_flash_prints_the_hello_it_saw(tmp_path):
     fl.flash(fl.FlashOptions(port="/dev/ttyACM0", hex_path=hexf, avrdude="avrdude", verify_timeout=2.5),
              run=lambda cmd, check: None, say=said.append, settle=lambda p: [],
              verify=lambda s, b, t: fl.VerifyResult(False, None))
-    assert said[-1] == "warning: no HELLO with any reset cause within 2.5 s; no HELLO seen at all"
+    assert said[-1] == "verify FAILED: no HELLO with any reset cause within 2 x 2.5 s; no HELLO seen at all"
 
 
 @pytest.fixture

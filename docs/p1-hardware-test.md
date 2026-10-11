@@ -63,6 +63,13 @@ kilo status
 `verified: HELLO ...` with the new build, then `config OK`, `balance off`,
 `overruns 0`. Kilo lies down, then limps (the P0 watchdog timeline).
 
+A failed verify now exits non-zero: `kilo flash` checks for the HELLO twice
+(`verifying once more`), then prints `verify FAILED: ...` with the last HELLO
+it saw and exits 1, so `kilo -v flash && kilo status` stops there. A port
+still held by a daemon `kilo flash` could not reach (`--direct`, root's, or
+another user's) is refused before avrdude runs ("... is in use"); stop it,
+or pass `--force`.
+
 **No reset after the flash** (the post-flash DTR settle, mind/README.md "DTR
 and resets"). Run the flash verbose and read the uptime twice:
 

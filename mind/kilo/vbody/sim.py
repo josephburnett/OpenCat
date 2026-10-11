@@ -45,6 +45,10 @@ both the same frames and compares the replies:
   if uncalibrated) and EVENT RECOVERED; the body's rc timing is not
   simulated); TRICK_PLAY is refused REFUSED_FALLEN meanwhile;
 - boot: unsolicited HELLO and EVENT BOOT; TELEMETRY at the TELEM_DIV divider.
+  ``boot_delay`` (seconds, default 0) mimics the real body's 0.3-2 s init:
+  after a reboot the body is silent for that long (no tick, no telemetry) and
+  the bytes that arrive meanwhile are buffered, as in the UART's RX buffer,
+  and handled right after the boot HELLO.
 
 Two ways to drive it:
 
@@ -141,7 +145,7 @@ class VirtualBody:
                  config_state: int = P.ConfigState.OK, batt_mv: int = 8100,
                  batt_level: int = 0, reset_cause: int = P.ResetCause.COLD,
                  fw_build: int = FW_BUILD, save_busy_s: float = 0.1,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, boot_delay: float = 0.0):
         self.t = transport
         self.codec = codec or default_codec()
         self.msgs = messages or default_messages()
@@ -175,6 +179,9 @@ class VirtualBody:
         self._running = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time = self.clock()
+        self.boot_delay = boot_delay
+        self.booting_until: float | None = None  # silent init after a reboot (boot_delay)
+        self._boot_rx = bytearray()
         self._power_on(int(reset_cause), 0)
 
     def _power_on(self, cause: int, last_alive: int) -> None:
@@ -288,10 +295,27 @@ class VirtualBody:
             elif level == 0 and prev:
                 self._event(EV.BATTERY_OK, 0)
 
-    def reboot(self, cause: int = P.ResetCause.REQUESTED) -> None:
+    def reboot(self, cause: int = P.ResetCause.REQUESTED, boot_delay: float | None = None) -> None:
+        """Restart: power-on state, then (after ``boot_delay``, default the
+        constructor's) the boot HELLO and EVENT BOOT."""
+        delay = self.boot_delay if boot_delay is None else boot_delay
         with self.lock:
             self._power_on(int(cause), self.tick)
-            self._boot()
+            if delay > 0:
+                self.booting_until = self.clock() + delay
+                self._boot_rx.clear()
+                self._say(f"rebooting ({delay:g} s init)")
+            else:
+                self._boot()
+
+    def _finish_boot(self) -> None:
+        """End of the init: the boot HELLO, then the bytes buffered meanwhile."""
+        self.booting_until = None
+        self.booted_at = self.clock()
+        self._boot()
+        data, self._boot_rx = bytes(self._boot_rx), bytearray()
+        if data:
+            self.process(data)
 
     def take_sent(self) -> list[tuple[int, int, bytes]]:
         with self.lock:
@@ -324,6 +348,10 @@ class VirtualBody:
             if now - next_tick > 0.2:
                 next_tick = now  # we were suspended; do not burst
             with self.lock:
+                if self.booting_until is not None:
+                    if now < self.booting_until:
+                        continue  # still initialising: no tick, no telemetry
+                    self._finish_boot()
                 self._tick(now)
 
     def _boot(self) -> None:
@@ -436,6 +464,9 @@ class VirtualBody:
     def process(self, data: bytes, now: float | None = None) -> None:
         """Decode ``data`` and handle every complete frame now (deterministic)."""
         with self.lock:
+            if self.booting_until is not None:
+                self._boot_rx += data  # the UART buffers it until the init is done
+                return
             now = self.clock() if now is None else now
             self._housekeeping(now)
             for item in self.decoder.feed(data):

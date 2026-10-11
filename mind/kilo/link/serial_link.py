@@ -46,6 +46,20 @@ Goals and the epoch rule (§3c, §4, §5):
   body reboot, desired motion goals from older epochs are cleared and
   ``goals_cleared`` subscribers are told. Nothing is replayed.
 - EVENT GOAL_REFUSED with reason STALE drops the refused goal and logs it.
+- Contact (a body that may just have rebooted): after every (re)connect, and
+  after the body was lost (no TELEMETRY for 300 ms), no motion goal
+  (SET_POSTURE other than REST/LIMP, a SET_BALANCE enable, the other epoch
+  goals) is sent or refreshed, and TRICK_PLAY is refused, until the body has
+  been heard on this connection: a HELLO that proves a reboot (motion goals
+  are cleared first, under the same lock the writer packs goals under), or a
+  TELEMETRY (its tick is checked for a restart first). After a reconnect or a
+  loss a HELLO that looks like the last one is not enough: only the tick of
+  the next TELEMETRY tells a quiet reboot apart. A HELLO is a reboot when it
+  is unsolicited, or when its identity (reset cause, last_alive_tick,
+  fw_build) differs from the previous HELLO's. Goals set meanwhile stay
+  latched and go out once contact is back. (A body that reboots without the
+  mind noticing within 300 ms still sees the refreshes sent meanwhile: the
+  body-side fix is a boot epoch that never repeats, docs §3c.)
 
 Commands: ``request()`` assigns a seq, waits 50 ms for the matching ACK (or
 the data reply, for queries), and retries up to 3 times. Non-query commands
@@ -59,6 +73,7 @@ one inside the body's 500 ms de-dup window.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import random
@@ -187,6 +202,12 @@ class SerialLink:
         self._last_reboot_at = -1e9
         self._was_alive = False
         self._ever_connected = False
+        self._ever_contact = False
+        # Contact with the body on this connection (see "Contact" above).
+        self._contact = False
+        self._contact_needs_telemetry = False
+        self.alive_stamps: dict[str, float] = {}
+        self._deferred: tuple[int, list[tuple[str, tuple]]] | None = None
         self._tx_lock = threading.Lock()
         self._silent = passive
         self.last_tx: tuple[float, float, str] | None = None  # (clock, wall time, type) of the last frame
@@ -249,9 +270,15 @@ class SerialLink:
         return last
 
     # ---- mind liveness ----------------------------------------------------------
-    def mark_alive(self) -> None:
-        """Called by the mind's main loop each iteration (≥ 1 Hz)."""
-        self._mind_alive_at = self.clock()
+    def mark_alive(self, source: str = "mind") -> None:
+        """Called by the mind's main loop each iteration (≥ 1 Hz).
+
+        ``source`` names who stamped (kept in ``alive_stamps``): the daemon's
+        pump stamps as "daemon", so it can tell whether the behaviour runner
+        (which stamps as "mind") is still ticking."""
+        now = self.clock()
+        self._mind_alive_at = now
+        self.alive_stamps[source] = now
 
     def mind_alive(self) -> bool:
         return self.clock() - self._mind_alive_at < self.cfg.liveness_window_s
@@ -281,11 +308,27 @@ class SerialLink:
         self._subs.setdefault(kind, []).append(fn)
 
     def _emit(self, kind: str, *args: Any) -> None:
+        d = self._deferred
+        if d is not None and d[0] == threading.get_ident():
+            d[1].append((kind, args))  # inside _locked_then_emit(): after the lock
+            return
         for fn in self._subs.get(kind, ()):
             if self._dispatch_fn is not None:
                 self._dispatch_fn(self._safe_call, fn, args)
             else:
                 self._safe_call(fn, args)
+
+    @contextlib.contextmanager
+    def _locked_then_emit(self) -> Any:
+        """Hold the state lock; callbacks emitted inside run after it is released."""
+        with self._lock:
+            self._deferred = (threading.get_ident(), [])
+            try:
+                yield
+            finally:
+                held, self._deferred = self._deferred[1], None
+        for kind, args in held:
+            self._emit(kind, *args)
 
     @staticmethod
     def _safe_call(fn: Callable[..., Any], args: tuple) -> None:
@@ -382,6 +425,8 @@ class SerialLink:
             raise LinkError(f"{name}: the link is passive (sends nothing)")
         if self._transport is None:
             raise NotConnected(f"{name}: not connected")
+        if name == "TRICK_PLAY" and not self._contact:
+            raise NotConnected(f"{name}: the body has not been heard on this connection yet")
         with self._req_lock:
             p = _Pending(name, typ, reply_name)
             self.state.stats.commands += 1
@@ -414,11 +459,12 @@ class SerialLink:
             raise CommandError(name, p.status)
         return p.reply_msg
 
-    def wait_until(self, pred: Callable[[], bool], timeout: float, *, alive: bool = True) -> bool:
+    def wait_until(self, pred: Callable[[], bool], timeout: float, *, alive: bool = False) -> bool:
         """Wait until ``pred()`` is true (checked on every received frame).
 
-        With ``alive=True`` the waiting thread counts as the mind's main loop
-        and keeps the liveness stamp fresh while it waits on purpose.
+        Waiting does not stamp liveness: a pool thread waiting for a reply
+        must not keep a stalled mind looking alive. Only a caller that *is*
+        the mind's main loop (a CLI's main thread) passes ``alive=True``.
         """
         deadline = self.clock() + timeout
         with self._changed:
@@ -489,6 +535,11 @@ class SerialLink:
         alive = self.state.alive
         if alive != self._was_alive:
             self._was_alive = alive
+            if not alive:
+                with self._lock:
+                    # it may be rebooting: no motion goal until it is heard again
+                    self._contact = False
+                    self._contact_needs_telemetry = True
             log.info("body %s", "alive" if alive else "lost (no telemetry for 300 ms)")
             self._log("link", alive=alive, connected=self.state.connected)
             self._emit("connection", self.state.connected, alive)
@@ -502,9 +553,12 @@ class SerialLink:
             refresh = self.mind_alive() and now - self._last_refresh_at >= self.cfg.goal_refresh_s
             if refresh:
                 self._last_refresh_at = now
+            contact = self._contact
             for g in self._goals.values():
                 if not (g.dirty or refresh):
                     continue
+                if not contact and _is_motion(g):
+                    continue  # stays dirty: sent once the body is heard on this connection
                 epoch_goal = g.name in consts.EPOCH_GOALS
                 if epoch_goal and g.epoch is None:
                     if have_epoch is None:
@@ -585,6 +639,10 @@ class SerialLink:
                 self.state.stats.reconnects += 1
             self._ever_connected = True
             self._hello_solicited_at = self.clock()
+            # A (re)opened port may have reset the body (DTR): no motion goal
+            # until it is heard on this connection.
+            self._contact = False
+            self._contact_needs_telemetry = self._ever_contact
             for g in self._goals.values():
                 g.dirty = True
             # first contact: ask who is there (sent by the writer, liveness-gated)
@@ -642,7 +700,8 @@ class SerialLink:
     def _handle(self, item: Frame | DecodeError, now: float) -> None:
         st = self.state.stats
         if isinstance(item, DecodeError):
-            st.decode_errors[item.kind] += 1
+            with self._lock:  # LinkStats.as_dict() copies the counters under it
+                st.decode_errors[item.kind] += 1
             self._log("rx_error", error=item.kind, raw=bytes(item.raw).hex(), type=item.type,
                       seq=item.seq)
             return
@@ -692,16 +751,29 @@ class SerialLink:
                 st.unmatched_acks += 1
 
     def _on_telemetry(self, msg: Any, now: float) -> None:
-        with self._lock:
+        with self._locked_then_emit():
             backwards, prev_epoch = self.state.on_telemetry(msg, now)
             had_hello = self.state.hello is not None
-        if backwards and had_hello:
-            self._reboot(None, "tick went backwards", msg.epoch)
-        elif prev_epoch is not None and msg.epoch != prev_epoch:
-            self.clear_motion_goals(f"epoch {prev_epoch}->{msg.epoch}", keep_epoch=msg.epoch)
-        elif prev_epoch is None:
-            self.clear_motion_goals("first epoch", keep_epoch=msg.epoch)
+            # Under the lock: no goal refresh is packed between the reboot or
+            # epoch check and the contact that re-enables motion goals.
+            if backwards and had_hello:
+                self._reboot(None, "tick went backwards", msg.epoch)
+            elif prev_epoch is not None and msg.epoch != prev_epoch:
+                self.clear_motion_goals(f"epoch {prev_epoch}->{msg.epoch}", keep_epoch=msg.epoch)
+            elif prev_epoch is None:
+                self.clear_motion_goals("first epoch", keep_epoch=msg.epoch)
+            self._set_contact()
         self._emit("telemetry", msg)
+
+    def _set_contact(self) -> None:
+        """The body was heard on this connection (lock held): motion goals may go out."""
+        if not self._contact:
+            self._contact = True
+            self._contact_needs_telemetry = False
+            self._ever_contact = True
+            for g in self._goals.values():
+                if _is_motion(g):
+                    g.dirty = True
 
     def _on_event(self, msg: Any, now: float) -> None:
         code = msg.code
@@ -723,7 +795,8 @@ class SerialLink:
             gtype, reason = arg >> 8, arg & 0xFF
             gname = self.messages.name_of(gtype)
             rname = consts.REFUSE_REASON.get(reason, str(reason))
-            self.state.stats.goals_refused[f"{gname}:{rname}"] += 1
+            with self._lock:
+                self.state.stats.goals_refused[f"{gname}:{rname}"] += 1
             if reason == consts.STALE:
                 with self._lock:
                     g = self._goals.get(gname)
@@ -740,38 +813,67 @@ class SerialLink:
         self._emit("event", msg)
 
     def _on_hello(self, msg: Any, now: float) -> None:
-        with self._lock:
+        cause = consts.RESET_CAUSES.get(msg.reset_cause, msg.reset_cause)
+        with self._locked_then_emit():
             p = self._pending
             solicited = (now - self._hello_solicited_at < self.cfg.hello_solicit_window_s
                          or (p is not None and p.name == "HELLO_REQ"))
-            first = self.state.hello is None
+            prev = self.state.hello
+            first = prev is None
+            changed = prev is not None and _hello_identity(prev) != _hello_identity(msg)
             self.state.on_hello(msg, now, self.messages.PROTO_MAJOR)
-        cause = consts.RESET_CAUSES.get(msg.reset_cause, msg.reset_cause)
+            # Clear before contact, both under the lock: no refresh of an old
+            # goal can be packed between this HELLO and the clear.
+            rebooted = not first and (not solicited or changed)
+            if rebooted:
+                self._reboot(msg, f"{'new' if solicited else 'unsolicited'} HELLO (reset cause {cause})", msg.epoch)
+            else:
+                self.clear_motion_goals("hello", keep_epoch=msg.epoch)
+            if rebooted or not self._contact_needs_telemetry:
+                self._set_contact()
         log.info("HELLO proto %s.%s build %08x reset %s epoch %s%s", msg.proto_major,
                  msg.proto_minor, msg.fw_build, cause, msg.epoch,
                  "" if solicited else " (unsolicited)")
         if self.state.proto_ok is False:
             log.error("protocol major %s != expected %s: refusing to drive; flash the body",
                       msg.proto_major, self.messages.PROTO_MAJOR)
-        if not solicited and not first:
-            self._reboot(msg, f"unsolicited HELLO (reset cause {cause})", msg.epoch)
-        else:
-            self.clear_motion_goals("hello", keep_epoch=msg.epoch)
         self._emit("hello", msg, solicited)
 
     def _reboot(self, hello: Any, why: str, epoch: int) -> None:
+        """A body reboot. Motion goals are cleared every time, before
+        anything else (a second reboot within 3 s, a crash loop, must not
+        keep goals set after the first); only the count and the ``reboot``
+        notice are debounced (the HELLO and the tick reset of one reboot)."""
         now = self.clock()
-        if now - self._last_reboot_at < 3.0:
-            return  # HELLO and tick reset of the same reboot
-        self._last_reboot_at = now
         with self._lock:
-            self.state.reboots += 1
             self.state.reset_session()
             self.state.epoch = epoch
+            self.clear_motion_goals("reboot")
+            if now - self._last_reboot_at < 3.0:
+                return
+            self._last_reboot_at = now
+            self.state.reboots += 1
         log.warning("body rebooted: %s", why)
         self._log("link", reboot=why)
-        self.clear_motion_goals("reboot")
         self._emit("reboot", hello, why)
+
+
+_SAFE_POSTURES = frozenset({consts.POSTURES["rest"], consts.POSTURES["limp"]})
+
+
+def _is_motion(g: Goal) -> bool:
+    """A goal that moves the body: SET_POSTURE but REST/LIMP, a SET_BALANCE
+    enable, any other epoch goal. Held back while out of contact."""
+    if g.name == "SET_POSTURE":
+        return g.fields.get("posture") not in _SAFE_POSTURES
+    if g.name == "SET_BALANCE":
+        return bool(g.fields.get("enable"))
+    return g.name in consts.MOTION_GOALS
+
+
+def _hello_identity(h: Any) -> tuple:
+    """What every HELLO of one boot of the body repeats."""
+    return (getattr(h, "reset_cause", None), getattr(h, "last_alive_tick", None), getattr(h, "fw_build", None))
 
 
 def _fields(m: Any) -> Any:
