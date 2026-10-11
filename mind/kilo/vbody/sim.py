@@ -96,6 +96,7 @@ EEPROM_SIZE = 1024
 P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.MsgId.SET_BALANCE,
                       P.MsgId.SET_HEAD})
 HEAD_HOLD_S = P.HEAD_HOLD_MS / 1000.0
+REST_MOVE_S = 1.0  # REST_MOVE_TICKS on the body: reflex moves to REST take 1 s
 
 
 def boot_epoch(last_epoch: int) -> int:
@@ -420,7 +421,9 @@ class VirtualBody:
             silent = now - self.last_rx_at
             stop_s = self.params[P.ParamId.WD_STOP_MS] / 1000.0
             rest_s = max(stop_s, self.params[P.ParamId.WD_REST_MS] / 1000.0)
-            limp_s = self.params[P.ParamId.WD_LIMP_S]
+            # LIMP counts from the end of the 1 s REST move (REST_MOVE_TICKS
+            # on the body), so 0.5 + 1.0 + 1.0 + 10 = 12.5 s at the defaults.
+            limp_s = REST_MOVE_S + self.params[P.ParamId.WD_LIMP_S]
             if self.wd_stage == 0 and silent >= stop_s:
                 self.wd_stage = 1
                 self._epoch_bump()

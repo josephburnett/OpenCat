@@ -452,7 +452,9 @@ def test_contract_g_watchdog_stages_and_params():
     assert s.vb.wd_stage == 1 and s.vb.mode == P.Mode.LINK_LOST and s.vb.epoch == 1
     s.vb._tick(t0 + 1.5)
     assert s.vb.wd_stage == 2 and s.vb.posture == "REST"
-    s.vb._tick(t0 + 11.5)
+    s.vb._tick(t0 + 12.49)  # the 1 s REST move counts before the 10 s LIMP timer
+    assert s.vb.wd_stage == 2 and s.vb.posture == "REST"
+    s.vb._tick(t0 + 12.5)  # 12.5 s, as measured on Kilo (P1, 2026-10-11)
     assert s.vb.wd_stage == 3 and s.vb.posture == "LIMP"
     # already limp stays limp; WD_STOP_MS is live
     s2 = Sync()

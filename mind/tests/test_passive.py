@@ -275,9 +275,9 @@ def test_posture_then_watch_shows_the_watchdog_timeline(vbody_pty_fast_limp):
     t_rest = _when(lines, r"^owners IDLE/IDLE -> REFLEX/REFLEX.*watchdog REST")
     assert 1.4 <= t_rest <= 1.8, out
     assert vb.posture in ("REST", "LIMP")
-    # LIMP WD_LIMP_S (1 s here) after REST: servos off
+    # LIMP the 1 s REST move + WD_LIMP_S (1 s here) after REST: servos off
     t_limp = _when(lines, r"^flags .*-servos_powered")
-    assert 0.9 <= t_limp - t_rest <= 1.3, out
+    assert 1.9 <= t_limp - t_rest <= 2.3, out
     assert vb.posture == "LIMP"
     # nothing was sent after the hold: no LINK_RESTORED, no heartbeat
     assert not any("LINK_RESTORED" in t for _, t in lines), out
