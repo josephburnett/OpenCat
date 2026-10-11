@@ -49,7 +49,7 @@ EEPROM_READ_MAX = 56
 REBOOT_MAGIC = 0x4B49
 RESET_PULSE_MS = 100
 PARAM_SLOTS = 16
-TRICK_CAPACITY = 32
+TRICK_CAPACITY = 24
 TRICK_FRAMES_PER_MSG = 4
 BEEP_MAX_NOTES = 8
 JOINT_COUNT = 11
@@ -724,7 +724,7 @@ class SetGait:
 
 @dataclass
 class SetHead:
-    """0x12 SET_HEAD (goal). Hold/release pan, tilt, tail plus speed."""
+    """0x12 SET_HEAD (goal). Hold (mode 1) or release (mode 0) pan, tilt, tail. Held joints follow the targets slew-limited at max_speed_dps (0 = only the safety slew) while the head joints' owner is IDLE or GAIT, without balance corrections; released by mode 0, head_hold_ms without a refresh, or an epoch bump. BAD_ARG for mode > 1; mode 0 is never stale; mode 1: STALE, FALLEN, LOW_BATT. TELEMETRY flags HEAD_HELD, head owner nibble PI_HOLD."""
     ID: ClassVar[int] = 0x12
     NAME: ClassVar[str] = 'SET_HEAD'
     KIND: ClassVar[Kind] = Kind.GOAL
@@ -737,10 +737,10 @@ class SetHead:
     _FMT: ClassVar[struct.Struct] = struct.Struct('<BBhhhH')
     epoch: int = 0
     mode: int = 0  # enum head_mode
-    pan: int = 0  # deg x 0.0625
-    tilt: int = 0  # deg x 0.0625
-    tail: int = 0  # deg x 0.0625
-    max_speed_dps: int = 0  # deg/s
+    pan: int = 0  # deg x 0.0625; -32768 = not held (follows the posture)
+    tilt: int = 0  # deg x 0.0625; -32768 = not held
+    tail: int = 0  # deg x 0.0625; -32768 = not held
+    max_speed_dps: int = 0  # deg/s; 0 = no limit below the safety slew
 
     def _fixed_values(self) -> list:
         v: list = []
@@ -883,7 +883,7 @@ class SetBalance:
 
 @dataclass
 class TrickBegin:
-    """0x20 TRICK_BEGIN (command). Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..32, loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE)."""
+    """0x20 TRICK_BEGIN (command). Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..trick_capacity (24), loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE)."""
     ID: ClassVar[int] = 0x20
     NAME: ClassVar[str] = 'TRICK_BEGIN'
     KIND: ClassVar[Kind] = Kind.COMMAND
@@ -895,7 +895,7 @@ class TrickBegin:
     MAX_LEN: ClassVar[int] = 11
     _FMT: ClassVar[struct.Struct] = struct.Struct('<BBBBBHBBbb')
     trick_id: int = 0
-    n_frames: int = 0  # range 1..32
+    n_frames: int = 0  # range 1..24
     loop_start: int = 0
     loop_end: int = 0
     repeats: int = 0  # total plays of loop_start..loop_end: 0 and 1 = once, 255 = until stopped

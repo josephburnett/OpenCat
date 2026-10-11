@@ -346,7 +346,7 @@ rejects it). A `Trick` has the frames, `loop_start`/`loop_end` (inclusive) and
   Head tilt is unchanged. It is an involution.
 - `speed(f)` plays `f` times faster: `dur` and `hold` are divided by `f`
   (`dur` ≥ 1; a result over 255 raises).
-- `validate()` / `problems()`: 1..32 frames, `dur`/`hold` in range, loop inside
+- `validate()` / `problems()`: 1..24 frames (`TRICK_CAPACITY`), `dur`/`hold` in range, loop inside
   the frames, angles within the joint limits of `body/src/core/joints.cpp`
   (a test cross-checks the table), no driven unused slot, no trigger.
 - Wire: `Keyframe.encode()`/`decode()` are the 14 B frame of
@@ -386,6 +386,25 @@ rejects it). A `Trick` has the frames, `loop_start`/`loop_end` (inclusive) and
   trick upload NAME [--force]`, `kilo trick play NAME [--mirror] [--speed X]
   [--repeats N] [--for S] [--posture stand] [--then-watch T]`, `kilo trick
   stop`. A trick cannot start from LIMP: `--posture stand` first.
+
+**Head (P1, architecture §3c layer 1).** `client.look(pan_deg, tilt_deg,
+tail_deg=None, speed_dps=120)` latches `SET_HEAD` mode HOLD (refreshed at
+5 Hz, epoch-stamped, dropped on an epoch change like every motion goal; the
+tail is sent as −32768, "not held", unless given; `speed_dps=0` leaves only
+the body's 500°/s safety slew). The body holds the head while its owner is
+IDLE or GAIT, without balance corrections, and lets go after 2 s without a
+refresh, on an epoch bump, or on `client.release_head()` (clears the goal
+and sends mode RELEASE once). TELEMETRY shows head owner `PI_HOLD` and the
+`head_held` flag. CLI: `kilo look PAN TILT [--tail T] [--speed DPS] [--for S]
+[--posture stand]`, which releases the head when it ends.
+
+**Fall (P1, architecture §3g).** The body's fall reflex sends `FELL` (±1 roll,
+±2 pitch) with a new epoch (the link clears the motion goals), plays the
+legacy `rc` itself and ends with `RECOVERED` (it then stands) or
+`RECOVERY_FAILED` (REST, then LIMP). Meanwhile current goals are refused
+`FALLEN` (`TRICK_PLAY`: `REFUSED_FALLEN`); only `SET_POSTURE LIMP` ends the
+reflex. The vbody's `trigger_fall(side)` mimics the events and refusals
+with a fixed 1 s + 1 s timeline.
 
 **Library layout.** One JSON file per trick in `kilo/tricks/library/`, named by
 the Kilo name. JSON because §5 specifies JSON keyframes, it is in the stdlib
@@ -672,6 +691,7 @@ kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (p
 kilo/tricks/                trick model, legacy importer, library/*.json (generated), player timing
 kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner
 kilo/cli_trick.py           `kilo trick` (registered by one line in cli.py)
+kilo/cli_head.py            `kilo look` (registered by one line in cli.py)
 kilo/cli.py                 the `kilo` command
 kilo/daemon.py              `kilo run`: owns the port, serves the socket, holds, port release
 kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody (BodyClient over the socket)

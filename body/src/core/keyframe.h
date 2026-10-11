@@ -32,7 +32,7 @@
 // on the tick after its last phase; body.cpp then emits TRICK_DONE and hands
 // the joints back to IDLE (end posture) with a crossfade.
 //
-// Fixed point only, no float. RAM: 32 x 14 B store + 24 B of header, upload
+// Fixed point only, no float. RAM: 24 x 14 B store + 24 B of header, upload
 // and player state (no from[] array: see kf_angle).
 #ifndef KILO_CORE_KEYFRAME_H
 #define KILO_CORE_KEYFRAME_H
@@ -40,7 +40,7 @@
 #include "../proto/kilo_protocol.h"
 #include "joints.h"
 
-#define KF_CAPACITY KILO_TRICK_CAPACITY  // 32 frames
+#define KF_CAPACITY KILO_TRICK_CAPACITY  // 24 frames (32 before the §3h shrink)
 #define KF_UNCHANGED ((int8_t)-128)
 #define KF_EASE_MASK 0x03u
 #define KF_BALANCE_BIT 0x04u  // keyframe flags bit 2

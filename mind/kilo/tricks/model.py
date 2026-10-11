@@ -1,7 +1,7 @@
 """Trick model: keyframes, mirror, speed, validation and the wire encoding.
 
 A trick is a list of keyframes the body plays in joint space (§3e). The Pi
-owns the library and uploads a trick into the body's 32-frame RAM store with
+owns the library and uploads a trick into the body's 24-frame RAM store with
 TRICK_BEGIN / TRICK_FRAMES / TRICK_COMMIT; the bytes are exactly the
 generated `kilo_protocol.Keyframe` (14 B) and `TrickBegin` structs.
 
@@ -52,7 +52,7 @@ JOINT_LIMITS = {
 MIRROR_NEGATE = (0, 2)
 MIRROR_PAIRS = ((8, 9), (10, 11), (12, 13), (14, 15))
 
-MAX_FRAMES = P.TRICK_CAPACITY            # 32
+MAX_FRAMES = P.TRICK_CAPACITY            # 24 (32 before the P1 RAM shrink, docs §3h)
 FRAMES_PER_MSG = P.TRICK_FRAMES_PER_MSG  # 4
 TICK_MS = 20                             # 50 Hz body tick
 REPEAT_FOREVER = 255

@@ -6,7 +6,7 @@
 #include "posture.h"
 
 static_assert(sizeof(KfFrame) == sizeof(kilo_keyframe_t), "KfFrame != spec keyframe (14 B)");
-static_assert(KF_CAPACITY == 32, "trick store is 32 frames (doc §3e)");
+static_assert(KF_CAPACITY == 24, "trick store is 24 frames (doc §3e, §3h shrink step 1)");
 
 // Joint ids 0-2 and 8-15: the bits a joint_mask may hold.
 #define DRIVEN_MASK 0xFF07u
@@ -117,9 +117,9 @@ bool kf_step(Keyframe& kf) {
   return false;
 }
 
-// Mirror: canonical 3..10 are LF RF RB LB shoulders then knees, so the L/R
-// partner of k is ((k - 3) ^ 1) + 3; pan (0) and tail (2) are negated.
-static inline uint8_t mirror_k(uint8_t k) { return k < 3 ? k : (uint8_t)(((k - 3) ^ 1) + 3); }
+// Mirror: joint_mirror_k (joints.h) swaps the L/R pairs; pan (0) and tail
+// (2) are negated.
+#define mirror_k joint_mirror_k
 
 bool kf_claims(const Keyframe& kf, uint8_t k) {
   if (!kf.run) return false;

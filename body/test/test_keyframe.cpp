@@ -163,7 +163,7 @@ static void test_upload(void) {
     return kf_begin(b.kf, p.data());
   };
   CHECK(bad_begin(1, 0) == KILO_ACK_STATUS_BAD_ARG);   // no frames
-  CHECK(bad_begin(1, 33) == KILO_ACK_STATUS_BAD_ARG);  // more than the store holds
+  CHECK(bad_begin(1, KF_CAPACITY + 1) == KILO_ACK_STATUS_BAD_ARG);  // more than the store holds
   CHECK(bad_begin(3, 2) == KILO_ACK_STATUS_BAD_ARG);   // loop_end >= n
   {
     std::vector<uint8_t> p = begin_payload(t);
@@ -215,10 +215,10 @@ static void test_upload(void) {
   CHECK(b.kf.store == KF_READY);  // a failed probe leaves a good trick alone
   CHECK(kf_frames(b.kf, chunk(t, 0, 1).data()) == KILO_ACK_STATUS_NO_TRICK);  // committed: begin again
 
-  // The full store: 32 frames in 8 chunks.
+  // The full store: KF_CAPACITY (24) frames in 6 chunks; one more is BAD_ARG.
   T big;
-  for (int i = 0; i < 32; i++) big.f.push_back(fr_off(2, 0, KF_LINEAR, (i % 5) - 2));
-  CHECK(upload(big) == KILO_ACK_STATUS_OK && b.kf.n == 32);
+  for (int i = 0; i < (int)KF_CAPACITY; i++) big.f.push_back(fr_off(2, 0, KF_LINEAR, (i % 5) - 2));
+  CHECK(upload(big) == KILO_ACK_STATUS_OK && b.kf.n == KF_CAPACITY);
 
   // While a trick plays: BEGIN and FRAMES are BUSY, COMMIT still answers.
   stand();

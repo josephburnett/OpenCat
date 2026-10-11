@@ -1,5 +1,6 @@
 // body: the logic half of the 50 Hz tick (doc §3a steps 2, 4, 5, 6) plus
-// the reflexes of P0: battery, link watchdog, IMU health, warm-boot hold.
+// the reflexes: battery, link watchdog, IMU health, warm-boot hold (P0) and
+// the fall reflex (P1; core/reflex.h, fall_step in body.cpp).
 //
 // Pure C++: the caller (src/app/main.cpp) does the hardware steps (IMU FIFO
 // read, PCA9685 burst, ADC, ultrasonic) and passes the results in TickIn.
@@ -16,6 +17,7 @@
 #include "keyframe.h"
 #include "notes.h"
 #include "params.h"
+#include "reflex.h"
 
 // Durations in 20 ms ticks. The watchdog's are live params (core/params.h).
 #define WD_STOP_TICKS param_ms_ticks(KILO_PARAM_WD_STOP_MS)        // 0.5 s without a valid frame: stop
@@ -26,11 +28,12 @@
 #define WARM_HOLD_TICKS 50   // warm boot: hold at most 1 s waiting for the IMU
 #define IMU_STALE_TICKS 10   // no fresh packet for 10 ticks -> IMU_FAULT
 #define IMU_ERR_RUN 3        // or 3 consecutive I2C errors
+#define HEAD_HOLD_TICKS (KILO_HEAD_HOLD_MS / 20u)  // SET_HEAD hold without a refresh: 2 s
 
 enum ImuStatus : uint8_t { IMU_NONE = 0, IMU_FRESH = 1, IMU_ERR = 2 };
 
 // Who holds the REFLEX owner. A higher value may take it from a lower one.
-enum ReflexHolder : uint8_t { RH_NONE = 0, RH_WARM_HOLD = 1, RH_WATCHDOG = 2, RH_BATTERY = 3 };
+enum ReflexHolder : uint8_t { RH_NONE = 0, RH_WARM_HOLD = 1, RH_FALL = 2, RH_WATCHDOG = 3, RH_BATTERY = 4 };
 
 // Goal results. The values are the ACK status codes, which EVENT
 // GOAL_REFUSED reuses as its reason (core/link.cpp static_asserts them).
@@ -40,6 +43,7 @@ enum GoalResult : uint8_t {
   GOAL_BUSY = 3,
   GOAL_NO_TRICK = 6,
   GOAL_LOW_BATT = 7,
+  GOAL_FALLEN = 8,  // the fall reflex holds the joints (ACK REFUSED_FALLEN)
   GOAL_STALE = 10,
   GOAL_UNCALIBRATED = 11,  // STAND refused while CONFIG_DEFAULTED (doc §3b)
 };
@@ -74,6 +78,7 @@ struct Body {
   uint8_t balance_req;  // SET_POSTURE flags bit 0; cleared by an epoch bump
   Balance bal;          // the balance layer: SET_BALANCE settings + controller
   Keyframe kf;          // the trick store and player (TRICK owner)
+  Fall fall;            // the fall reflex (core/reflex.h)
   // IMU health
   uint8_t imu_fault;
   uint8_t imu_stale_run, imu_err_run;
@@ -92,6 +97,13 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]);
 void body_link_frame(Body& b);
 // SET_POSTURE goal.
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags);
+// SET_HEAD goal (payload: epoch, mode, pan, tilt, tail, max_speed_dps; doc
+// §3c layer 1). mode 0 releases (never stale); mode 1 holds: STALE, FALLEN,
+// LOW_BATT; BAD_ARG for mode > 1. The safety stage clamps the targets;
+// -32768 leaves that joint to its owner.
+GoalResult body_goal_head(Body& b, const uint8_t* p);
+// The fall reflex holds the joints (FALLEN, RECOVERING or FAILED).
+inline bool body_fallen(const Body& b) { return b.fall.state != FS_UPRIGHT; }
 // SET_BALANCE goal: enable, Kp (Q8), Kd (ms), dead band and clamp (deg).
 // Live, not persisted. BAD_ARG if enable > 1 or a band/clamp > 30 deg.
 GoalResult body_goal_balance(Body& b, const uint8_t p[5]);
@@ -100,8 +112,9 @@ GoalResult body_goal_balance(Body& b, const uint8_t p[5]);
 // TELEMETRY flags bit 0.
 inline bool body_balance_active(const Body& b) { return b.bal.active; }
 // TRICK_PLAY (payload: epoch, trick_id, speed_q6, flags). Returns the ACK
-// status: STALE, NO_TRICK, BAD_ARG, BUSY (a trick plays, a reflex holds the
-// joints, or the IDLE posture is LIMP or CALIB), LOW_BATT, UNCALIBRATED.
+// status: STALE, NO_TRICK, BAD_ARG, BUSY (a trick plays), REFUSED_FALLEN
+// (the fall reflex holds the joints), LOW_BATT, BUSY (another reflex holds
+// the joints, or the IDLE posture is LIMP or CALIB), UNCALIBRATED.
 uint8_t body_trick_play(Body& b, const uint8_t p[4]);
 // TRICK_STOP: crossfade to the end posture over `ticks` (0 = XFADE_TICKS),
 // EVENT TRICK_DONE(STOPPED). Always OK (nothing playing is not an error).
@@ -115,7 +128,8 @@ void body_trick_end(Body& b, uint8_t reason, uint8_t ticks);
 inline bool body_fall_suppressed(const Body& b) { return kf_fall_ok(b.kf); }
 // IMU re-initialised (hal finished a runtime DMP upload while LIMP).
 void body_imu_recovered(Body& b);
-// TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 4 TRICK, 7 LOW_BATT, 9 LINK_LOST.
+// TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 4 TRICK, 5 FALLEN, 6 RECOVERING,
+// 7 LOW_BATT, 9 LINK_LOST.
 uint8_t body_mode(const Body& b);
 
 // A new goal epoch (doc §3c): clears the latched motion goals and ends a

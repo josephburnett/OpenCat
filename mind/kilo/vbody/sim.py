@@ -11,10 +11,15 @@ both the same frames and compares the replies:
   after a trip the next frame gives EVENT LINK_RESTORED;
 - unknown type → ACK UNKNOWN_TYPE; bad payload length → ACK BAD_LEN for a
   command, EVENT GOAL_REFUSED(type, BAD_LEN) for a goal; body→Pi types ignored;
-- goals are never acked. SET_POSTURE: BAD_ARG / STALE / (FALLEN, sim only) /
-  LOW_BATT / UNCALIBRATED refusals, LIMP and REST never stale; BEEP accepted;
-  SET_BALANCE (P1) accepted (BAD_ARG if enable > 1 or a band/clamp > 30 deg);
-  the other goals (gait, head, body pose, eyes) are refused UNKNOWN_TYPE.
+- goals are never acked. SET_POSTURE: BAD_ARG / STALE / FALLEN / LOW_BATT /
+  UNCALIBRATED refusals, LIMP and REST never stale, every posture but LIMP
+  refused FALLEN while the fall reflex holds the joints (LIMP ends it); BEEP
+  accepted; SET_BALANCE (P1) accepted (BAD_ARG if enable > 1 or a band/clamp
+  > 30 deg); SET_HEAD (P1, §3c layer 1): BAD_ARG for mode > 1, mode 0
+  releases (never stale), mode 1 holds (STALE, FALLEN, LOW_BATT) until
+  HEAD_HOLD_MS without a refresh or an epoch bump: TELEMETRY flag HEAD_HELD
+  and head owner PI_HOLD (unless a trick owns the head or a reflex holds
+  it); the other goals (gait, body pose, eyes) are refused UNKNOWN_TYPE.
   At most one GOAL_REFUSED per goal type per second;
 - balance (P1): the SET_POSTURE balance flag (cleared by an epoch bump) or
   SET_BALANCE enable turns it on in SIT and STAND outside any reflex; TELEMETRY
@@ -35,7 +40,10 @@ both the same frames and compares the replies:
   (seq, type) within 500 ms is re-ACKed with the cached status and not
   executed again. BAD_ARG is checked before EEPROM_BUSY;
 - the two-stage watchdog (stop + epoch bump + EVENT WATCHDOG, REST, LIMP)
-  driven by the WD_* params; a simulated fall (EVENT FELL, epoch bump);
+  driven by the WD_* params; a simulated fall (``trigger_fall``: EVENT
+  FELL(+-1) with the epoch bump, 1 s FALLEN, 1 s RECOVERING, then STAND (REST
+  if uncalibrated) and EVENT RECOVERED; the body's rc timing is not
+  simulated); TRICK_PLAY is refused REFUSED_FALLEN meanwhile;
 - boot: unsolicited HELLO and EVENT BOOT; TELEMETRY at the TELEM_DIV divider.
 
 Two ways to drive it:
@@ -76,7 +84,9 @@ POSTURE_NAMES = {int(p): p.name for p in P.Posture}
 CAL_LIMIT_A16 = 400
 EEPROM_SIZE = 1024
 # Goals the body implements; every other goal is refused UNKNOWN_TYPE.
-P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.MsgId.SET_BALANCE})
+P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.MsgId.SET_BALANCE,
+                      P.MsgId.SET_HEAD})
+HEAD_HOLD_S = P.HEAD_HOLD_MS / 1000.0
 # SET_BALANCE defaults (body/src/core/balance.h) and the posture it runs in.
 BALANCE_DEFAULTS = {"enable": 0, "kp_q8": 128, "kd_ms": 30, "deadband_deg": 2, "max_corr_deg": 15}
 BALANCE_MAX_DEG = 30
@@ -184,6 +194,8 @@ class VirtualBody:
         self.goals: dict[str, bytes] = {}
         self.balance_req = False  # SET_POSTURE flags bit 0
         self.balance: dict[str, int] = dict(BALANCE_DEFAULTS)  # SET_BALANCE (live, not persisted)
+        self.head_until: float | None = None  # SET_HEAD hold: released at this time (None = not held)
+        self.head: tuple[int, int, int] = (0, 0, 0)  # pan, tilt, tail a16 of the hold
         self.refused_at: dict[int, float] = {}
         self.save_until: float | None = None
         self.trick = TrickStore()
@@ -210,6 +222,11 @@ class VirtualBody:
                 or self.batt_level >= P.BatteryLevel.LOW)
 
     @property
+    def fallen(self) -> bool:
+        """The fall reflex holds the joints (FALLEN or RECOVERING)."""
+        return self.fall_until is not None or self.recover_until is not None
+
+    @property
     def balance_active(self) -> bool:
         """TELEMETRY flags bit 0, as the body gates it (§3c): requested, SIT or STAND, no reflex."""
         return ((self.balance_req or bool(self.balance["enable"])) and self.posture in BALANCE_POSTURES
@@ -219,6 +236,7 @@ class VirtualBody:
         self.epoch = (self.epoch + 1) & 0xFF
         self.goals.clear()
         self.balance_req = False  # the posture flag is a motion goal; SET_BALANCE settings stay
+        self.head_until = None    # the head hold too
         self._trick_end(trick_reason)  # TRICK_DONE carries the new epoch
 
     def _trick_end(self, reason: int) -> None:
@@ -342,9 +360,12 @@ class VirtualBody:
             self.recover_until = now + 1.0
         if self.recover_until is not None and now >= self.recover_until:
             self.recover_until = None
-            self.posture = "REST"
+            self.posture = "REST" if self.config_state == P.ConfigState.DEFAULTED else "STAND"
             self._event(EV.RECOVERED, 0)
             self._say("recovered")
+        if self.head_until is not None and now >= self.head_until:
+            self.head_until = None  # HEAD_HOLD_MS without a refresh
+            self._say("head released (no refresh)")
         # watchdog (params in ms / s, like the body)
         if self.wd_armed and self.last_rx_at is not None:
             silent = now - self.last_rx_at
@@ -399,6 +420,10 @@ class VirtualBody:
             flags |= F.TRICK
             leg = int(P.Owner.TRICK) if self.trick.claims(8) else owner
             head = int(P.Owner.TRICK) if self.trick.claims(0) else owner
+        if self.head_until is not None:
+            flags |= F.HEAD_HELD
+            if head == P.Owner.IDLE and self.head[0] != -32768:
+                head = int(P.Owner.PI_HOLD)
         self._send("TELEMETRY", tick=self.tick, pitch=int(pitch * 16), roll=int(roll * 16),
                    rate_pitch=int(1.4 * math.cos(t * 0.7) * 16), rate_roll=int(1.6 * math.cos(t * 1.1) * 16),
                    rate_yaw=0, dist_mm=600 + int(100 * math.sin(t * 0.3)), batt_mv=self.batt_mv,
@@ -482,6 +507,8 @@ class VirtualBody:
         if type == P.MsgId.BEEP:
             self.goals[name] = payload
             return
+        if type == P.MsgId.SET_HEAD:
+            return self._head_goal(msg, now)
         if type == P.MsgId.SET_BALANCE:
             if msg.enable > 1 or msg.deadband_deg > BALANCE_MAX_DEG or msg.max_corr_deg > BALANCE_MAX_DEG:
                 return self._refuse(type, R.BAD_ARG, now)
@@ -495,11 +522,14 @@ class VirtualBody:
         if msg.posture >= len(P.Posture) or msg.posture == P.Posture.STANCE:
             return self._refuse(type, R.BAD_ARG, now)
         safe = msg.posture in (P.Posture.LIMP, P.Posture.REST)
+        if not safe and msg.epoch != self.epoch:
+            return self._refuse(type, R.STALE, now)
+        if self.fallen:
+            # The fall reflex holds the joints; only LIMP (the emergency stop) ends it.
+            if msg.posture != P.Posture.LIMP:
+                return self._refuse(type, R.FALLEN, now)
+            self.fall_until = self.recover_until = None
         if not safe:
-            if msg.epoch != self.epoch:
-                return self._refuse(type, R.STALE, now)
-            if self.fall_until is not None or self.recover_until is not None:
-                return self._refuse(type, R.FALLEN, now)  # sim only: no fall reflex in the P0 body
             if self.batt_level >= P.BatteryLevel.LOW:
                 return self._refuse(type, R.LOW_BATT, now)
             if msg.posture == P.Posture.STAND and self.config_state == P.ConfigState.DEFAULTED:
@@ -512,6 +542,29 @@ class VirtualBody:
         if new != self.posture:
             self._say(f"posture {new}")
         self.posture = new
+
+    def _head_goal(self, msg: Any, now: float) -> None:
+        """SET_HEAD in the body's order (core/body.cpp body_goal_head)."""
+        R = P.GoalRefusedReason
+        if msg.mode > P.HeadMode.HOLD:
+            return self._refuse(P.MsgId.SET_HEAD, R.BAD_ARG, now)
+        if msg.mode == P.HeadMode.RELEASE:  # never stale
+            if self.head_until is not None:
+                self._say("head released")
+            self.head_until = None
+            return None
+        if msg.epoch != self.epoch:
+            return self._refuse(P.MsgId.SET_HEAD, R.STALE, now)
+        if self.fallen:
+            return self._refuse(P.MsgId.SET_HEAD, R.FALLEN, now)
+        if self.batt_level >= P.BatteryLevel.LOW:
+            return self._refuse(P.MsgId.SET_HEAD, R.LOW_BATT, now)
+        if self.head_until is None or self.head != (msg.pan, msg.tilt, msg.tail):
+            self._say(f"head hold pan {msg.pan / 16:g} tilt {msg.tilt / 16:g}"
+                      + ("" if msg.tail == -32768 else f" tail {msg.tail / 16:g}"))
+        self.head = (msg.pan, msg.tilt, msg.tail)
+        self.head_until = now + HEAD_HOLD_S
+        return None
 
     def _refuse(self, gtype: int, reason: int, now: float) -> None:
         if now - self.refused_at.get(gtype, -1e9) >= REFUSE_INTERVAL_S:
@@ -662,6 +715,8 @@ class VirtualBody:
             return S.BAD_ARG
         if tr.running:
             return S.BUSY
+        if self.fallen:
+            return S.REFUSED_FALLEN
         if self.batt_level >= P.BatteryLevel.LOW:
             return S.REFUSED_LOW_BATT
         if self.reflex or self.posture in ("LIMP", "CALIB"):

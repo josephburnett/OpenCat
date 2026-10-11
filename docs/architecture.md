@@ -39,9 +39,11 @@ operations notes and test tables. The main body links to them.
 | Arbitration | Owners REFLEX > TRICK > GAIT > IDLE per joint, a 200 ms crossfade, then head and balance layers, then limits and slew. | 3c |
 | Stale goals | A goal epoch byte. Reflex takeovers and watchdog trips bump it, and goals carrying an old epoch are refused. | 3c, 4 |
 | Gait | Parametric phase oscillator, per-leg planar 2-link IK, fixed point. | 3d |
-| Tricks | 32 × 14 B keyframes in RAM, int8 degrees, cosine, linear or step easing, uploaded by the Pi (CRC-checked, cached by `(trick_id, crc)`), played with speed and mirror by the body; the TRICK owner hands back with a 200 ms crossfade into the trick's end posture. Implemented in P1. | 3e |
+| Tricks | 24 × 14 B keyframes in RAM (32 until the P1 RAM shrink, 3h), int8 degrees, cosine, linear or step easing, uploaded by the Pi (CRC-checked, cached by `(trick_id, crc)`), played with speed and mirror by the body; the TRICK owner hands back with a 200 ms crossfade into the trick's end posture. Implemented in P1. | 3e |
 | Balance | `corr = −(Kp·e + Kd·rate)` at 50 Hz. Geometric (through IK) for gait and stance, legacy joint gains for joint-space owners (P1: implemented for IDLE SIT and STAND). | 3f |
 | Attitude | Integer pitch/roll from the DMP quaternion, keeping the legacy pitch reflection. The DMP is dropped in P5. | 3f |
+| Fall | 75° on 6 consecutive samples (120 ms) trips it: epoch bump, REFLEX holds, `FELL`; once still, the legacy `rc` (PROGMEM, mirrored by roll sign), up to 3 tries, then STAND and `RECOVERED`, or REST, `RECOVERY_FAILED` and LIMP. Implemented in P1. | 3g |
+| Head | `SET_HEAD` holds pan/tilt/tail slew-limited over IDLE/GAIT, without balance corrections; released by mode 0, 2 s without a refresh or an epoch bump. Implemented in P1. | 3c |
 | Watchdog | Armed by the first valid frame from the Pi. Two stages: stop motion at 0.5 s, REST at 1.5 s, LIMP 10 s later. | 3g |
 | Protocol | COBS + CRC-16/CCITT-FALSE at 250000 baud. Goals unacked and refreshed at 5 Hz; queries answered by their data reply; other commands acked and de-duplicated. | 4 |
 | IR remote | **Dropped.** | |
@@ -396,6 +398,24 @@ Layers on top of the base pose:
      tail wag.
    - The hold is released by `mode=0`, by `HEAD_HOLD_MS` (2 s) without a
      refresh, or by any epoch bump.
+   - As implemented in P1 (`core/arbiter.cpp`, `body_goal_head`): a held
+     joint steps from its last output toward the target by at most
+     `max_speed_dps` (as a16 per tick, rounded up; 0 or > 2500 °/s = only
+     the safety slew), and the safety stage then clamps the target to the
+     joint limits. A target of −32768 leaves that joint to its owner (the
+     mind's `look()` sends it for the tail unless asked). Held joints take
+     **no balance correction**: the Pi is pointing them (a camera), and a
+     correction would fight it; unheld head joints keep theirs. A held joint
+     is recorded as owner `PI_HOLD` (TELEMETRY head nibble 4, flags bit 5
+     `HEAD_HELD`), so taking and releasing the hold are hand-overs: the
+     release crossfades back to the owner's angle over `XFADE_TICKS`.
+     Precedence: a trick that owns a head joint wins over the hold (and the
+     hold resumes from the trick's output when it ends, if still refreshed);
+     a trick that does not own the head leaves it to the hold; REFLEX wins
+     over everything and its epoch bump drops the hold. `SET_HEAD`: BAD_ARG
+     for mode > 1; mode 0 is never stale; mode 1 is refused STALE, FALLEN,
+     LOW_BATT in that order. The hold lasts `HEAD_HOLD_MS / 20` = 100 ticks
+     from the last refresh (the 5 Hz goal refresh keeps it).
 2. **Balance layer** (3f, `core/balance.*`):
    - For GAIT and STANCE, corrections enter the IK as body pitch/roll (P2).
    - For joint-space owners (built-in postures, tricks with `BALANCE`), they
@@ -574,7 +594,8 @@ sets; the importer never does.)
 **Header (`TRICK_BEGIN`, 11 B):**
 - `trick_id`: a Pi tag used for caching (the mind derives it from the
   header and frames, 1..254).
-- `n_frames` 1..32 (more is `BAD_ARG`: the store holds 32).
+- `n_frames` 1..24 (more is `BAD_ARG`: the store holds `trick_capacity` =
+  24 frames since the P1 RAM shrink, 3h; HELLO reports it).
 - `loop_start` ≤ `loop_end` < `n_frames`, `repeats`: total plays of
   `loop_start..loop_end`; 0 and 1 = once, 255 = until stopped (legacy
   `loopCycle[2]`, §5).
@@ -588,12 +609,13 @@ sets; the importer never does.)
 - `exp_roll`, `exp_pitch` i8 degrees: the balance reference for balanced
   frames (legacy header bytes; `sit` −30, `str` +15).
 
-**RAM:** 32 × 14 = 448 B for the store, plus 24 B of header, upload and
+**RAM:** 24 × 14 = 336 B for the store (448 B with 32 frames before the
+P1 shrink), plus 24 B of header, upload and
 player state. There is no `from[11]` array: a segment's start is the
 previous frame's (resolved) target, read from the store, and frame 0's is
 the arbiter's crossfade snapshot (the output when TRICK took the joint). The
-largest Nybble behaviour (`cmh`) has 22 frames; the first-version library's
-largest has 6.
+largest Nybble behaviour (`cmh`) has 22 frames, so 24 still holds every
+legacy behaviour; the first-version library's largest has 6.
 
 **Timing.**
 - Each frame is a MOVE of `dur` ticks, then a HOLD of `hold` ticks at its
@@ -647,13 +669,18 @@ largest has 6.
   posture replaces them when it ends.
 - A reflex taking the joints, or any epoch bump (watchdog stage 1, low
   battery), ends it with `TRICK_DONE(PREEMPTED)` carrying the new epoch; the
-  fall reflex will call `body_epoch_bump(b, KF_END_FELL)` for
-  `TRICK_DONE(FELL)`.
+  fall reflex calls `body_epoch_bump(b, KF_END_FELL)` for
+  `TRICK_DONE(FELL)` (implemented in P1, 3g), unless the trick has
+  `FALL_OK`, which keeps fall detection off while it plays.
 - TELEMETRY while it plays: mode TRICK (4), flags bit 4, `trick_frame` = the
   frame playing, owner nibbles TRICK for owned joints.
 
 **Built-in sequences** (PROGMEM, ≈100 B): postures `rest`, `sit`, `up`
-(stand), `calib`/`zero`, and the recovery trick `rc`.
+(stand), `calib`/`zero`, and the recovery trick `rc`. As implemented in P1,
+`rc` is three PROGMEM rows in `core/posture.cpp` (39 B) that the REFLEX
+mover plays as internal pseudo-postures (`POSTURE_RC + i`, `|
+POSTURE_RC_MIRROR`), not through the keyframe store, so a fall never
+disturbs the uploaded trick (3g).
 
 ### 3f. Balance
 
@@ -844,6 +871,56 @@ Reflexes are pure state machines in `core/reflex.*`, with full host tests.
 Fall detection is disabled in CALIB and LIMP, under `IMU_FAULT`, and during
 `FALL_OK` tricks.
 
+As implemented in P1 (`core/reflex.{h,cpp}` for the detector,
+`fall_step()` in `core/body.cpp` for the state machine, `rc` in
+`core/posture.cpp`; host test `body/test/test_reflex.cpp`):
+
+- **Trip.** Every fresh IMU sample with |roll| or |pitch| > 75° counts; one
+  under it restarts the count; a tick without a fresh sample neither counts
+  nor resets. The 6th consecutive sample trips it, so a single bad or
+  handled sample never does (P0 finding 8). A pitch fall is one with the
+  long axis within 15° of vertical (75° < |pitch| < 105°, folding the
+  legacy pitch reflection); anything else over the threshold (a side, the
+  back) is a roll fall. `EVENT FELL` arg ±1 (roll, sign of roll) or ±2
+  (pitch, sign of pitch), after the epoch bump, so it carries the new epoch;
+  a playing trick ends first with `TRICK_DONE(FELL)`. A short chirp (note
+  20) as legacy beeped. REFLEX holds the current output (`POSTURE_HOLD`).
+- **Still.** Every body rate < 20°/s on 10 consecutive samples. Until then
+  it holds, however long it is handled.
+- **rc.** The legacy behaviour (`src/InstinctNybble.h` `rc`, 3 frames)
+  converted like the trick importer converts behaviours: dur 11, 5, 18
+  ticks (cosine), hold 30, 25, 0 ticks, 89 ticks (1.8 s) in all, played by
+  the REFLEX mover from the current output. Legacy `reaction.h` played it
+  on |roll| > 90° from a single sample, mirrored **at random**
+  (`loadFrame`: `random() % 2` for a name not ending in L/R). Kilo mirrors
+  it by the roll sign instead: unmirrored for roll < 0 (right side down;
+  the unmirrored frame 1 swings the right legs, which then push on the
+  ground), mirrored for roll > 0, and flipped on every other try in case
+  that guess is wrong or the body rolled over (**to be verified on Kilo**,
+  p1-hardware-test.md "Fall and head").
+- **Check, retry.** After rc's last frame REFLEX holds it for up to 1 s;
+  25 consecutive samples with |roll|, |pitch| < 20° are RECOVERED: IDLE
+  takes STAND (REST if the config is DEFAULTED, where STAND would be
+  refused), REFLEX hands back with the usual `XFADE_TICKS` crossfade,
+  `EVENT RECOVERED`, detection re-arms. Otherwise the next try (after the
+  still wait again, so tries are ≥ 1 s apart), at most 3.
+- **Failure.** A pitch fall once still, the third failed try, or an
+  `IMU_FAULT` after the trip: REST over 1 s, `EVENT RECOVERY_FAILED` at
+  once, LIMP 2 s after the REST move (the fall reflex's own timer), then
+  the reflex lets go (detection stays off in LIMP).
+- **Owner and goals.** The fall reflex ranks above the warm-boot hold and
+  below the watchdog and low-battery reflexes (`RH_FALL`): it does not
+  trip while they hold the joints, and if one takes them during a fall the
+  fall reflex ends silently (it re-arms when they let go). While it holds
+  the joints (TELEMETRY mode FALLEN, or RECOVERING during rc and the
+  check): goals from older epochs are refused STALE as usual; current
+  `SET_POSTURE` (REST included), `SET_HEAD` mode 1 are refused `FALLEN`,
+  `TRICK_PLAY` `REFUSED_FALLEN`; `SET_POSTURE LIMP` (the Pi's emergency
+  stop) ends the reflex and goes limp. After RECOVERED the mind's goals
+  with the new epoch work again.
+- **Cost.** 10 B of RAM (`Fall`); with the head layer, +1268 B of flash
+  including the 39 B `rc` table (3h).
+
 **Battery.** A7 reads through a ≈1:2 divider against a 5 V reference, and the
 legacy scale is 99 counts per volt, so `LOW_VOLTAGE 650` ≈ 6.57 V (3.28 V per
 cell). The scale goes into the EEPROM slot after one meter check. Samples are
@@ -934,11 +1011,29 @@ state, less the arbiter's 22 B `base[]`, gone because crossfades now start
 from the output). That leaves 15 B under the globals ceiling: the next RAM
 user (head layer, fall reflex) takes the first shrink step below.
 
+**Measured with the P1 fall reflex and head layer** (shrink step 1 taken:
+the store is 24 frames, `trick_capacity` 24 in HELLO): **22514 B flash**
+(+1268 B; 14 B under the 22528 B P1 ceiling), **1432 B globals** (−93 B:
+−112 B store, +10 B `Fall`, +9 B head hold; 108 B under the ceiling, so
+616 B for stack and margin, ≈93 B more than before). Flash is now the
+tight resource. Getting under the ceiling took: one `under()` helper for
+the attitude tests, the head targets copied as sent and clamped by the
+safety stage (the layer steps without subtracting the target), the head
+hold tagged as owner `PI_HOLD` so a release reuses the hand-over
+crossfade, and no saturation on counters that cannot overflow. If the next
+feature needs flash, the candidates, in the suggested order (each
+a decision for the owner, §8): `-mrelax -mcall-prologues` through
+`kilo flash` and `size_check.sh` (≈430 B, a build-flag change everywhere
+the body is compiled); raising the P1 flash ceiling toward the P2 one
+(24 KB; 32256 B is the hardware limit); dropping the ultrasonic or buzzer
+(≈0.4 KB each, features).
+
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
 use is reported through a painted canary (`stack_free_min` in STATS). RAM is
 the tight resource. If needed, shrink in this order:
 1. keyframe store 32 → 24 frames (−112 B; the first-version library's
-   largest trick has 6 frames, HELLO reports the capacity to the mind);
+   largest trick has 6 frames, HELLO reports the capacity to the mind).
+   **Done** with the fall reflex and head layer (above);
 2. RX ring 192 → 128 B;
 3. TX ring 96 → 64 B.
 
@@ -1792,10 +1887,10 @@ this table. Offsets are within the payload. `E` = epoch u8.
 | 0x04 SET_STREAM | `telem_div u8` (0 off, default 2 → 25 Hz), `joints_div u8`, `imu_raw_div u8` | 3 |
 | 0x10 SET_POSTURE | `E`, `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE, 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = param `POSTURE_TICKS`, 25), `flags u8` (bit 0 balance; BALANCE = STAND + this bit) | 4 |
 | 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance) | 11 |
-| 0x12 SET_HEAD | `E`, `mode u8` (0 release, 1 hold), `pan i16`, `tilt i16`, `tail i16` (a16), `max_speed_dps u16` | 10 |
+| 0x12 SET_HEAD | `E`, `mode u8` (0 release, 1 hold), `pan i16`, `tilt i16`, `tail i16` (a16; −32768 = not held), `max_speed_dps u16` (0 = safety slew only) | 10 |
 | 0x13 SET_BODY_POSE | `E`, `pitch i16`, `roll i16` (a16), `dheight_mm i8`, `xshift_mm i8` | 7 |
 | 0x14 SET_BALANCE | `enable u8`, `kp_q8 u8`, `kd_ms u8`, `deadband_deg u8`, `max_corr_deg u8` | 5 |
-| 0x20 TRICK_BEGIN | `trick_id u8`, `n_frames u8` (1..32), `loop_start u8`, `loop_end u8`, `repeats u8` (total plays; 0/1 once, 255 forever), `joint_mask u16`, `flags u8` (bit 0 balance, 1 fall_ok), `end_posture u8`, `exp_roll i8`, `exp_pitch i8` (deg, balance reference) | 11 |
+| 0x20 TRICK_BEGIN | `trick_id u8`, `n_frames u8` (1..24), `loop_start u8`, `loop_end u8`, `repeats u8` (total plays; 0/1 once, 255 forever), `joint_mask u16`, `flags u8` (bit 0 balance, 1 fall_ok), `end_posture u8`, `exp_roll i8`, `exp_pitch i8` (deg, balance reference) | 11 |
 | 0x21 TRICK_FRAMES | `first u8`, `count u8` (1..4), `count × 14 B` | 2+14n |
 | 0x22 TRICK_COMMIT | `trick_id u8`, `crc16 u16` | 3 |
 | 0x23 TRICK_PLAY | `E`, `trick_id u8`, `speed_q6 u8`, `flags u8` (bit 0 mirror) | 4 |
@@ -2006,7 +2101,7 @@ opens the port directly if the daemon is not running. As built
 | `kilo posture rest\|sit\|stand\|limp\|balance` | Postures (`balance` = STAND + flag) |
 | `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
 | `kilo walk --pattern trot --stride 30 --turn 0 --period 500 [--keys]`, `kilo stop` | Gait |
-| `kilo look PAN TILT [--tail T]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head, eyes, sound |
+| `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit), eyes, sound |
 | `kilo trick list\|show NAME\|upload NAME\|play NAME [--mirror] [--speed 1.5] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); `import-legacy FILE` and `edit NAME` (jogs joints live and captures frames) later |
 | `kilo cal`, `kilo cal imu` | Joint calibration; IMU offset iteration on the Pi from IMU_RAW (keeps `CalibrateAccel/Gyro`, ≈1 KB, off the body) |
 | `kilo param get\|set\|list [--persist]` | Live tuning (names or ids from the spec's param table) |
@@ -2029,9 +2124,9 @@ opens the port directly if the daemon is not running. As built
 | ik | Round trip on a 1 mm grid ≤ 0.25 mm; ≤ 0.25° vs double; reach clamp; legacy postures plausible |
 | gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change |
 | keyframe | Tick-exact dur/hold; easing endpoints; −128; loops; mirror (incl. roll ref); speed. P1: `body/test/test_keyframe.cpp` (also upload edge cases, crossfades, end posture, TRICK_DONE reasons, gating, per-frame balance, and all 13 library tricks within the joint limits with the JSON's timing) |
-| arbiter | Per-joint priority; crossfade length/monotonicity; head and balance gating; epoch refusal and LIMP/REST exemption |
+| arbiter | Per-joint priority; crossfade length/monotonicity; head and balance gating; epoch refusal and LIMP/REST exemption. P1 head layer in `body/test/test_reflex.cpp`: slew, timeout, release crossfade, epoch release, no balance on held joints, precedence with TRICK and REFLEX, TELEMETRY |
 | balance | Toy-plant closed loop converges; every sign flip diverges; dead band; saturation; slew. Gain table = legacy `adaptiveParameterArray` = Kilo's EEPROM; mapping vs legacy `adjust()` ≤ 0.07° (grid), controller vs legacy ≤ 1° (0.16°); physical direction vs the posture tables; gating by owner, posture, request, epoch bump, IMU_FAULT |
-| reflex | Fall 6-tick timing, hysteresis, retries, mirror by roll sign, per-reflex LIMP timers; battery sag spikes don't trip, hysteresis clears; watchdog 0.5 / 1.5 s stages; epoch bump on each |
+| reflex | Fall 6-tick timing, hysteresis, retries, mirror by roll sign, per-reflex LIMP timers; battery sag spikes don't trip, hysteresis clears; watchdog 0.5 / 1.5 s stages; epoch bump on each. P1 fall: `body/test/test_reflex.cpp` (6 consecutive samples, a dip restarts, single samples never trip, both sides, back, pitch falls, still wait, rc frames tick by tick and mirrored, 3 tries, RECOVERED/RECOVERY_FAILED, FALL_OK, gating, TRICK_DONE(FELL), STALE/FALLEN refusals, LIMP ends it, watchdog takes over) |
 | attitude | vs float reference incl. the gz<0 reflection (≤ 0.1°); A/B vs the legacy float32 `ypr` path within ±60° (≤ 1°; 0.038°); gyro rates = d/dt of pitch/roll (sign, ≤ 10%) |
 | codec | protocol/vectors both ways; 10⁶-iteration fuzz under ASan; resync on next 0x00; ACK de-dup |
 

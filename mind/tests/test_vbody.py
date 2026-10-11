@@ -293,7 +293,7 @@ def test_contract_d_goals():
     assert s.send("SET_POSTURE", epoch=9, posture=P.Posture.SIT) == []
     assert s.send("SET_POSTURE", epoch=9, posture=P.Posture.REST) == []  # REST is never stale
     assert s.vb.posture == "REST"
-    for name, kw in (("SET_GAIT", {}), ("SET_HEAD", {}), ("SET_BODY_POSE", {}), ("SET_EYES", {})):
+    for name, kw in (("SET_GAIT", {}), ("SET_BODY_POSE", {}), ("SET_EYES", {})):
         cls = P.MESSAGES[M[name]]
         assert events(s.raw(cls.ID, cls(**kw).pack())) == [refused(cls.ID, R.UNKNOWN_TYPE)], name
     assert s.send("BEEP", notes=[P.Note(note=12, dur_10ms=10)]) == []
@@ -311,6 +311,49 @@ def test_contract_d_goals():
     assert events(u.send("SET_POSTURE", epoch=0, posture=P.Posture.STAND, flags=1)) == [
         refused(M.SET_POSTURE, R.UNCALIBRATED)]
     assert u.send("SET_POSTURE", epoch=0, posture=P.Posture.SIT) == []
+
+
+def test_contract_d_head():
+    """SET_HEAD (P1, docs §3c layer 1) in the body's order: BAD_ARG, release
+    never stale, STALE, FALLEN, LOW_BATT; the hold lapses after HEAD_HOLD_MS
+    and on an epoch bump; TELEMETRY HEAD_HELD and the PI_HOLD head owner."""
+    s = Sync()
+    M = P.MsgId
+    s.send("SET_POSTURE", epoch=0, posture=P.Posture.STAND)
+    hold = dict(mode=P.HeadMode.HOLD, pan=30 * 16, tilt=-10 * 16, tail=-32768, max_speed_dps=120)
+    assert events(s.send("SET_HEAD", epoch=0, **{**hold, "mode": 2})) == [refused(M.SET_HEAD, R.BAD_ARG)]
+    s.now += 1.1
+    assert events(s.send("SET_HEAD", epoch=3, **hold)) == [refused(M.SET_HEAD, R.STALE)]
+    assert s.vb.head_until is None
+    assert s.send("SET_HEAD", epoch=0, **hold) == []
+    assert s.vb.head_until is not None
+    s.vb._send_telemetry(s.now)
+    tel = [P.decode_payload(t, p) for t, _, p in s.vb.take_sent() if t == M.TELEMETRY]
+    assert tel[-1].flags & P.TelemetryFlags.HEAD_HELD and tel[-1].owners >> 4 == P.Owner.PI_HOLD
+    assert s.send("SET_HEAD", epoch=9, mode=P.HeadMode.RELEASE) == []  # never stale
+    assert s.vb.head_until is None
+    # Lapses without a refresh (the watchdog kept out of the way).
+    s.vb.params[P.ParamId.WD_STOP_MS] = 5000
+    s.vb.params[P.ParamId.WD_REST_MS] = 10000
+    s.send("SET_HEAD", epoch=0, **hold)
+    s.vb._tick(s.now + P.HEAD_HOLD_MS / 1000.0 - 0.05)
+    assert s.vb.head_until is not None
+    s.vb._tick(s.now + P.HEAD_HOLD_MS / 1000.0 + 0.01)
+    assert s.vb.head_until is None
+    # An epoch bump (a fall) releases it; while fallen SET_HEAD and postures
+    # but LIMP are refused FALLEN, TRICK_PLAY REFUSED_FALLEN.
+    s.now += 1.1
+    s.send("SET_HEAD", epoch=0, **hold)
+    s.vb.trigger_fall(1)
+    s.vb.take_sent()
+    assert s.vb.head_until is None and s.vb.epoch == 1
+    assert events(s.send("SET_HEAD", epoch=1, **hold)) == [refused(M.SET_HEAD, R.FALLEN)]
+    assert events(s.send("SET_POSTURE", epoch=1, posture=P.Posture.REST)) == [refused(M.SET_POSTURE, R.FALLEN)]
+    assert s.send("SET_POSTURE", epoch=1, posture=P.Posture.LIMP) == []  # LIMP ends the reflex
+    assert not s.vb.fallen and s.vb.posture == "LIMP"
+    s.now += 1.1
+    s.vb.batt_level = P.BatteryLevel.LOW
+    assert events(s.send("SET_HEAD", epoch=1, **hold)) == [refused(M.SET_HEAD, R.LOW_BATT)]
 
 
 def test_contract_e_queries_reply_only_never_deduped():

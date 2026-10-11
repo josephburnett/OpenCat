@@ -48,8 +48,11 @@ on the charger. The second half ran at 20:20 with the pack at 8.43 V.
 7. `imu_stale` reached 3 over 153 s with DMP at 100 Hz. Watch in P1.
 8. **Attitude follows handling.** Kilo was held in hand and tilted during
    the step 8 watch; the pitch 15.6° / roll −70.5° sample at +7.1 s was real.
-   The owner reported the postures as correct. Still worth doing in P1: trip
-   the fall reflex only on several consecutive samples over the threshold.
+   The owner reported the postures as correct. P1 must trip the fall reflex
+   only on several consecutive samples over the threshold: **done** (P1 fall
+   reflex: 6 consecutive samples over 75°, i.e. 120 ms; a single sample
+   never trips it, host test `body/test/test_reflex.cpp`; docs/architecture.md
+   §3g).
 9. The watchdog cannot be observed with an active `kilo` command because the
    mind feeds it; `kilo monitor --passive` and `posture --then-watch` were
    added (239a89d). The body's mode stays LINK_LOST through all watchdog

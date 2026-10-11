@@ -42,6 +42,11 @@ BALANCE_DEADBAND = 2    # degrees
 BALANCE_CLAMP = 15      # degrees
 BALANCE_MAX_DEG = 30    # dead band and clamp limit
 
+# SET_HEAD (docs §3c layer 1): an i16 a16 of -32768 leaves that joint to its
+# owner; targets beyond the joint limits are clamped by the body.
+HEAD_NOT_HELD = -32768
+HEAD_MAX_DEG = 180
+HEAD_SPEED_DPS = 120    # default look() slew, °/s (0 = only the body's 500°/s safety slew)
 
 # Tricks: TRICK_PLAY speed_q6 range (0.25x .. 3.98x) and the play() timeout margin.
 SPEED_MIN, SPEED_MAX = 16 / 64, 255 / 64
@@ -197,6 +202,44 @@ class BodyClient:
     def release(self) -> None:
         """Stop asserting a posture (the body keeps what it is doing)."""
         self.link.clear_goal("SET_POSTURE")
+
+    # ---- head (goal; docs §3c layer 1) ---------------------------------------------
+    def look(self, pan_deg: float, tilt_deg: float, tail_deg: float | None = None,
+             speed_dps: float = HEAD_SPEED_DPS) -> dict[str, int]:
+        """Latch SET_HEAD mode=HOLD: point the head (pan, tilt, and the tail
+        unless None; degrees in the joint convention of the postures) and keep
+        it there while the head's owner is IDLE or GAIT (a trick that moves
+        the head, or a reflex, wins).
+
+        Refreshed at 5 Hz like every goal; the body drops the hold after
+        HEAD_HOLD_MS (2 s) without a refresh, on SET_HEAD mode=0
+        (``release_head``) and on any epoch bump (the link then clears the
+        goal too). ``speed_dps`` limits the slew (0 = only the body's safety
+        slew, 500°/s). Angles outside the joint limits are clamped by the
+        body. Returns the wire fields; ValueError outside the wire ranges.
+        """
+        def a16(deg: float) -> int:
+            v = int(round(deg * 16))
+            if not -HEAD_MAX_DEG * 16 <= v <= HEAD_MAX_DEG * 16:
+                raise ValueError(f"head angles must be within ±{HEAD_MAX_DEG}°")
+            return v
+
+        speed = int(round(speed_dps))
+        if not 0 <= speed <= 0xFFFF:
+            raise ValueError("speed must be 0..65535 °/s")
+        fields = {"mode": int(P.HeadMode.HOLD), "pan": a16(pan_deg), "tilt": a16(tilt_deg),
+                  "tail": HEAD_NOT_HELD if tail_deg is None else a16(tail_deg), "max_speed_dps": speed}
+        self._check_drivable()
+        self.link.set_goal("SET_HEAD", **fields)
+        return fields
+
+    def release_head(self) -> None:
+        """Stop holding the head: clear the SET_HEAD goal and send SET_HEAD
+        mode=RELEASE once (never stale), so the head crossfades back to its
+        posture now rather than after HEAD_HOLD_MS."""
+        self.link.clear_goal("SET_HEAD")
+        self.link.send("SET_HEAD", epoch=self.state.epoch or 0, mode=int(P.HeadMode.RELEASE), pan=0, tilt=0,
+                       tail=0, max_speed_dps=0)
 
     # ---- calibration (commands) ------------------------------------------------
     def cal_get(self) -> list[int]:
