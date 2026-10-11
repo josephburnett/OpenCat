@@ -59,10 +59,13 @@ static int count_events(uint8_t code) {
 }
 
 // SET_GAIT payload. 0 for period, duty, step, body = the pattern's default.
+// step -1 = §3d's default for the pattern (15 / 12 / 18 mm; 0 is a shuffle).
 static std::vector<uint8_t> gp(uint8_t run, uint8_t pat, uint16_t per = 0, uint8_t duty = 0, int8_t stride = 30,
-                               int8_t turn = 0, uint8_t step = 0, uint8_t body = 0, uint8_t flags = 7) {
+                               int8_t turn = 0, int step = -1, uint8_t body = 0, uint8_t flags = 7) {
+  static const uint8_t STEP[3] = {15, 12, 18};
+  if (step < 0) step = pat < 3 ? STEP[pat] : 0;
   return {b.epoch, run, pat, (uint8_t)per, (uint8_t)(per >> 8), duty, (uint8_t)stride, (uint8_t)turn,
-          step, body, flags};
+          (uint8_t)step, body, flags};
 }
 static GoalResult gait(const std::vector<uint8_t>& p) { return body_goal_gait(b, p.data()); }
 static GoalResult pose(int16_t pitch_a16, int16_t roll_a16, int8_t dh, int8_t xs) {
@@ -414,7 +417,7 @@ static void test_period_change() {
 // ---- Head bob and tail wag --------------------------------------------------
 static void test_bob_wag() {
   for (int flags = 0; flags < 4; flags++) {
-    start(gp(1, KILO_GAIT_PATTERN_WALK, 2000, 0, 30, 0, 0, 0, (uint8_t)(flags | KILO_GAIT_FLAGS_BALANCE)));
+    start(gp(1, KILO_GAIT_PATTERN_WALK, 2000, 0, 30, 0, -1, 0, (uint8_t)(flags | KILO_GAIT_FLAGS_BALANCE)));
     int T = period_ticks();
     tick(2 * T);
     double tilt_max = -99, tilt_min = 99, tail_max = -99, tail_min = 99;
@@ -470,7 +473,9 @@ static void test_refusals() {
   CHECK(gait(gp(1, 0, 0, 0, 61)) == GOAL_BAD_ARG && gait(gp(1, 0, 0, 0, -61)) == GOAL_BAD_ARG);
   CHECK(gait(gp(1, 0, 0, 0, 0, 41)) == GOAL_BAD_ARG && gait(gp(1, 0, 0, 0, 0, -41)) == GOAL_BAD_ARG);
   CHECK(gait(gp(1, 0, 0, 0, 0, 0, 41)) == GOAL_BAD_ARG);
-  CHECK(gait(gp(1, 0, 0, 0, 0, 0, 0, 0, 8)) == GOAL_BAD_ARG);
+  CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 255)) == GOAL_OK);  // body height: never refused (the IK clamps it)
+  CHECK(gait(gp(0, 0)) == GOAL_OK);
+  CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 0, 8)) == GOAL_BAD_ARG);
   CHECK(!b.gait.run);
   // STALE; a stop is never stale.
   std::vector<uint8_t> p = gp(1, 1);
@@ -524,22 +529,41 @@ static void test_pending() {
   CHECK(gait(gp(1, KILO_GAIT_PATTERN_WALK)) == GOAL_OK);
   tick(40);
   CHECK(body_gait_running(b));
-  // SET_POSTURE STANCE while walking changes nothing; another posture
-  // stops the gait (ramp) and IDLE moves there.
+  // SET_POSTURE while walking only changes IDLE underneath (the head
+  // follows it); the stop hands the legs to STANCE, and the (refreshed)
+  // posture goal moves on from there.
   CHECK(body_goal_posture(b, b.epoch, POSTURE_STANCE, 0, 0) == GOAL_OK);
   tick();
   CHECK(b.gait.state == GS_RUN);
+  int16_t h0 = b.gait.h;
   CHECK(body_goal_posture(b, b.epoch, POSTURE_SIT, 0, 0) == GOAL_OK);
-  tick();
-  CHECK(b.gait.state == GS_STOP && !b.gait.run);
+  tick(40);
+  CHECK(b.gait.state == GS_RUN && b.gait.run && b.arb.owner[3] == OWN_GAIT && arbiter_idle_posture(b.arb) == POSTURE_SIT);
+  CHECK(b.arb.out[0] == 10 * 16);  // sit's pan (no bob or wag on pan)
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_STANCE, 0, 0) == GOAL_OK);  // under the gait: keeps its height
+  CHECK(b.gait.h == h0);
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_SIT, 0, 0) == GOAL_OK);
+  evlog.clear();
+  CHECK(gait(gp(0, 0)) == GOAL_OK);
   t = 0;
   while (body_gait_running(b) && t++ < 200) tick();
-  CHECK(count_events(EV_GAIT_STOPPED) == 1);
-  tick(PARAM(XFADE_TICKS) + 10);
+  CHECK(count_events(EV_GAIT_STOPPED) == 1 && arbiter_idle_posture(b.arb) == POSTURE_STANCE);
+  tick(5);
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_SIT, 0, 0) == GOAL_OK);  // the 5 Hz refresh
+  tick(PARAM(POSTURE_TICKS) + 10);
   bool sit = true;
   for (int k = 0; k < DRIVEN_COUNT; k++)
     sit = sit && b.arb.out[k] == joint_clamp(joint_id((uint8_t)k), posture_angle(POSTURE_SIT, (uint8_t)k));
   CHECK(sit);
+  // A stop before the gait started (IDLE still moving to STANCE) ends it at
+  // once, with GAIT_STOPPED.
+  CHECK(gait(gp(1, KILO_GAIT_PATTERN_WALK)) == GOAL_OK);
+  tick(3);
+  CHECK(!body_gait_running(b) && body_mode(b) == KILO_MODE_GAIT);
+  evlog.clear();
+  CHECK(gait(gp(0, 0)) == GOAL_OK);
+  tick();
+  CHECK(count_events(EV_GAIT_STOPPED) == 1 && body_mode(b) == KILO_MODE_IDLE && !b.gait.run);
   // LIMP stops it at once.
   CHECK(body_goal_posture(b, b.epoch, POSTURE_STAND, 0, 0) == GOAL_OK);
   CHECK(gait(gp(1, KILO_GAIT_PATTERN_WALK)) == GOAL_OK);
@@ -572,24 +596,41 @@ static uint8_t upload_trick(uint16_t mask) {
 }
 
 static void test_preempt() {
-  // A trick that owns a leg takes the legs at once; when it ends, IDLE has
-  // its end posture (STAND), moves back to STANCE and the gait restarts.
+  // A trick that owns a leg takes the legs at once and pauses the gait:
+  // the phase runs on, the stride and the lifting start again from nothing,
+  // so the crossfade back after the trick lands on STANCE's pose and the
+  // stride ramps in again. No GAIT_STOPPED.
   start(gp(1, KILO_GAIT_PATTERN_TROT));
   tick(60);
   CHECK(upload_trick(0x0100) == KILO_ACK_STATUS_OK);  // LF shoulder only
   uint8_t pl[4] = {b.epoch, 9, 64, 0};
   CHECK(body_trick_play(b, pl) == GOAL_OK);
   evlog.clear();
+  uint16_t phi0 = b.gait.phi;
   tick();
-  CHECK(!body_gait_running(b) && b.gait.run && count_events(EV_GAIT_STOPPED) == 1);
-  CHECK(b.arb.owner[3] == OWN_TRICK && b.arb.owner[4] == OWN_IDLE);
+  CHECK(body_gait_running(b) && b.gait.run && b.gait.amp == 0 && b.gait.armed == 0);
+  CHECK((uint16_t)(b.gait.phi - phi0) == b.gait.dphi);
+  CHECK(b.arb.owner[3] == OWN_TRICK && b.arb.owner[4] == OWN_GAIT);  // the other legs keep walking (in place)
   CHECK(body_mode(b) == KILO_MODE_TRICK);
   int t = 0;
   while (b.kf.run && t++ < 100) tick();
   CHECK(count_events(EV_TRICK_DONE) == 1);
-  t = 0;
-  while (!body_gait_running(b) && t++ < 100) tick();
-  CHECK(body_gait_running(b) && b.gait.phi == 0 && count_events(EV_GAIT_STOPPED) == 1);
+  // The gait's feet as the trick lets go: all down, under the shoulders
+  // (one tick of ramp: within ~1.5 mm).
+  for (int l = 0; l < 4; l++) {
+    double x, z;
+    foot(l, &x, &z);
+    CHECKF(std::fabs(x) < 1.5 && std::fabs(z - ground()) < 0.2, "leg %d at the trick's end: (%.2f, %.2f)", l, x, z);
+  }
+  int16_t prev[DRIVEN_COUNT];
+  double worst = 0;
+  for (int i = 0; i < 30; i++) {
+    memcpy(prev, b.arb.out, sizeof prev);
+    tick();
+    worst = std::fmax(worst, max_step(prev));
+  }
+  CHECK(body_gait_running(b) && b.arb.owner[3] == OWN_GAIT && b.gait.amp > 0 && count_events(EV_GAIT_STOPPED) == 0);
+  CHECKF(worst < PARAM(SLEW_MAX_A16) / 16.0, "after the trick: max leg step %.2f deg/tick", worst);
   // A head-only trick leaves the gait alone.
   tick(30);
   CHECK(upload_trick(0x0001) == KILO_ACK_STATUS_OK);
@@ -689,7 +730,7 @@ static void test_stance_pose() {
   }
   // The gait starts from STANCE with the pose kept, and hands back at the
   // same height.
-  CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 0, 0, 70)) == GOAL_OK);
+  CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 0, -1, 70)) == GOAL_OK);
   tick(200);
   CHECK(b.gait.h == 280);
   CHECK(gait(gp(0, 0)) == GOAL_OK);
@@ -773,18 +814,19 @@ static void test_geometric_balance() {
   CHECKF(std::fabs(p - 6) < 0.3 && b.bal.ax[BAL_PITCH].corr == 0, "pose pitch: %.2f, corr %d pose %d", p,
          b.bal.ax[BAL_PITCH].corr, b.gait.pose[0]);
   // While walking the gait's BALANCE flag gates it.
-  start(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 0, 0, 0, KILO_GAIT_FLAGS_BALANCE));
+  start(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 0, -1, 0, KILO_GAIT_FLAGS_BALANCE));
   CHECK(body_goal_balance(b, (const uint8_t[]){1, 255, 30, 2, 15}) == GOAL_OK);
   tick(60);
   p = run_plant(8, 0, 1.0, 100, false, &r);
   CHECKF(b.bal.active && std::fabs(p) <= 3, "walking: active %d pitch %.2f corr %d geo %d", b.bal.active, p, b.bal.ax[BAL_PITCH].corr, b.gait.geo);
-  CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 0, 0, 0, 0)) == GOAL_OK);
+  CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 0, -1, 0, 0)) == GOAL_OK);
   tick();
   CHECK(!b.bal.active);
   // Leaving the geometric balance for a joint-space posture zeroes it.
-  CHECK(body_goal_posture(b, b.epoch, POSTURE_STAND, 0, 0) == GOAL_OK);
+  CHECK(gait(gp(0, 0)) == GOAL_OK);
   int t = 0;
   while (body_gait_running(b) && t++ < 200) tick();
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_STAND, 0, 0) == GOAL_OK);
   tick();
   CHECK(!b.gait.geo && b.bal.ax[BAL_PITCH].corr == 0);
   in.att.pitch = in.att.roll = 0;
@@ -814,15 +856,20 @@ static void test_telemetry() {
       if (f.type != KILO_MSG_TELEMETRY) continue;
       kilo_telemetry_t m;
       memcpy(&m, f.payload.data(), sizeof m);
-      if (m.mode == KILO_MODE_GAIT && !(m.flags & KILO_TELEMETRY_FLAGS_GAIT)) seen_pending = true;
-      if (m.flags & KILO_TELEMETRY_FLAGS_GAIT) {
+      if (m.mode != KILO_MODE_GAIT) {
+        CHECK(!(m.flags & KILO_TELEMETRY_FLAGS_GAIT) && m.gait_phase == 0);
+        continue;
+      }
+      // From the goal on (also while IDLE moves to STANCE): flag GAIT, the
+      // leg nibble GAIT, the head nibble GAIT (bob and wag are on).
+      CHECK((m.flags & KILO_TELEMETRY_FLAGS_GAIT) && m.owners == (KILO_OWNER_GAIT | (KILO_OWNER_GAIT << 4)));
+      if (!body_gait_running(b)) {
+        seen_pending = true;
+        CHECK(b.arb.owner[3] == OWN_IDLE && m.gait_phase == 0);
+      } else {
         seen_gait = true;
         n++;
-        CHECK(m.mode == KILO_MODE_GAIT);
-        CHECK((m.owners & 0x0F) == KILO_OWNER_GAIT && (m.owners >> 4) == KILO_OWNER_IDLE);
         CHECK(m.gait_phase == (uint8_t)(b.gait.phi >> 8));
-      } else {
-        CHECK(m.gait_phase == 0);
       }
     }
   }

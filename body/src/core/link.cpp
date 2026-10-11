@@ -418,7 +418,15 @@ static void telemetry(const Body& b) {
   m.dist_mm = s.dist_mm;
   m.batt_mv = battery_mv(b.batt);
   m.mode = body_mode(b);
-  m.owners = (uint8_t)(b.arb.owner[3] | (b.arb.owner[0] << 4));  // a leg, the head (PI_HOLD when held)
+  // A leg, the head (PI_HOLD when held). The gait reports itself from the
+  // moment its goal is accepted (IDLE still moves the legs to STANCE
+  // first), and on the head while it bobs or wags IDLE's head.
+  uint8_t leg = b.arb.owner[3], head = b.arb.owner[0];
+  if (body_gait_active(b)) {
+    if (leg == OWN_IDLE) leg = OWN_GAIT;
+    if (head == OWN_IDLE && (b.gait.flags & (KILO_GAIT_FLAGS_BOB | KILO_GAIT_FLAGS_WAG))) head = OWN_GAIT;
+  }
+  m.owners = (uint8_t)(leg | (head << 4));
   uint16_t fl = 0;
   for (uint8_t k = 0; k < DRIVEN_COUNT; k++)
     if (b.arb.out[k] != JOINT_OFF) fl = KILO_TELEMETRY_FLAGS_SERVOS_POWERED;
@@ -431,7 +439,7 @@ static void telemetry(const Body& b) {
   if (config_busy(*b.cfg)) fl |= KILO_TELEMETRY_FLAGS_EEPROM_PENDING;
   if (s.dist_fresh) fl |= KILO_TELEMETRY_FLAGS_DIST_FRESH;
   if (b.kf.run) fl |= KILO_TELEMETRY_FLAGS_TRICK;
-  if (body_gait_running(b)) fl |= KILO_TELEMETRY_FLAGS_GAIT;
+  if (body_gait_active(b)) fl |= KILO_TELEMETRY_FLAGS_GAIT;
   if (arbiter_head_held(b.arb)) fl |= KILO_TELEMETRY_FLAGS_HEAD_HELD;
   m.flags = fl;
   m.last_rx_seq = L.last_rx_seq;

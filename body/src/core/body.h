@@ -97,9 +97,10 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]);
 // ---- Integration points for the link layer (protocol round) ----
 // Call on every CRC-valid frame from the Pi: feeds the link watchdog.
 void body_link_frame(Body& b);
-// SET_POSTURE goal. Any posture but STANCE also stops the gait (LIMP at
-// once, the others with the usual ramp; IDLE moves meanwhile, and the legs
-// crossfade to it when the gait hands them back).
+// SET_POSTURE goal. While the gait runs (or waits to start) it only changes
+// the IDLE posture underneath (head and tail follow it); the gait's stop
+// hands the legs to STANCE, and a refreshed posture goal moves on from
+// there. LIMP ends the gait at once (GAIT_STOPPED).
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags);
 // SET_HEAD goal (payload: epoch, mode, pan, tilt, tail, max_speed_dps; doc
 // §3c layer 1). mode 0 releases (never stale); mode 1 holds: STALE, FALLEN,
@@ -108,21 +109,30 @@ GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ti
 GoalResult body_goal_head(Body& b, const uint8_t* p);
 // SET_GAIT goal (payload: epoch, run, pattern, period_ms, duty, stride_mm,
 // turn_mm, step_h_mm, body_h_mm, flags; doc §3d). BAD_ARG for a field out
-// of the spec's range (0 = the pattern's default for period, duty, step and
-// body height; unknown flags). run 0 stops the gait (ramp, then STANCE,
-// EVENT GAIT_STOPPED) and is never stale. run 1: STALE, FALLEN, LOW_BATT,
+// of the spec's range (0 = the pattern's default for period, duty and body
+// height; unknown flags; body height is never refused, the IK clamps it).
+// run 0 is never stale: it stops the gait (stride ramp over a period, the
+// feet land, IDLE STANCE, EVENT GAIT_STOPPED once), or at once (with
+// GAIT_STOPPED) if it has not started yet. run 1: STALE, FALLEN, LOW_BATT,
 // UNCALIBRATED (as STAND); then latched: IDLE moves to STANCE first if it is
 // elsewhere, and the gait starts once STANCE has settled and no trick or
-// reflex holds the legs (and restarts after one, while the goal stands).
-// Re-sending the running goal only updates its parameters (slewed); a new
-// pattern is a stop then a start.
+// reflex holds the legs. Re-sending the running goal only updates its
+// parameters (slewed); a new pattern is a stop then a start (no
+// GAIT_STOPPED); run 1 during a ramp-down resumes. A trick that owns a leg
+// pauses it (the phase runs on, the stride restarts from 0 and no foot
+// lifts until it has been in stance, so the crossfade back is clean); a
+// reflex ends it at once (GAIT_STOPPED).
 GoalResult body_goal_gait(Body& b, const uint8_t* p);
 // SET_BODY_POSE goal (payload: epoch, pitch, roll (a16), dheight_mm,
 // xshift_mm): STALE, FALLEN, LOW_BATT. Applies to the gait and to IDLE
 // STANCE (slewed; pitch and roll clamped to +-30 deg); zeroed by an epoch bump.
 GoalResult body_goal_pose(Body& b, const uint8_t* p);
-// The gait owns the legs (running or stopping): TELEMETRY flags GAIT.
+// The gait owns the legs (running or stopping).
 inline bool body_gait_running(const Body& b) { return b.gait.state != GS_OFF; }
+// The gait goal is on: running, stopping, or waiting for STANCE. TELEMETRY
+// mode GAIT, flags GAIT, leg owner nibble GAIT (unless a trick or reflex
+// holds the legs).
+inline bool body_gait_active(const Body& b) { return b.gait.state != GS_OFF || b.gait.run; }
 // The fall reflex holds the joints (FALLEN, RECOVERING or FAILED).
 inline bool body_fallen(const Body& b) { return b.fall.state != FS_UPRIGHT; }
 // SET_BALANCE goal: enable, Kp (Q8), Kd (ms), dead band and clamp (deg).

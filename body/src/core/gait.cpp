@@ -6,21 +6,21 @@
 #include "pgm.h"
 
 // Per pattern (doc §3d, all (est.), to be tuned): defaults for the fields a
-// SET_GAIT may leave 0, and the leg phase offsets in 1/256 cycle (LF, RF,
-// RB, LB). A leg swings when phi + offset crosses duty, so a larger offset
+// SET_GAIT may leave 0 (outside their spec range: period, duty, body
+// height), and the leg phase offsets in 1/256 cycle (LF, RF, RB, LB). A leg swings when phi + offset crosses duty, so a larger offset
 // swings earlier: WALK/CRAWL give LB -> LF -> RB -> RF (the lateral
 // sequence), TROT the diagonal pairs LF+RB, RF+LB. (The stride default of
 // §3d, 30 / 35 / 25 mm, is the mind's: stride 0 is a real value, turning
-// in place.)
+// in place; likewise step 0, a shuffle: the mind sends §3d's 15 / 12 / 18.)
 struct PatRow {
   uint16_t period_ms;
-  uint8_t duty, step_mm, h_256;  // h_256: body height / (L1 + L2), /256
+  uint8_t duty, h_256;  // h_256: body height / (L1 + L2), /256
   uint8_t off[4];
 };
 static const PatRow PAT[3] PROGMEM = {
-    {800, 192, 15, 205, {128, 0, 64, 192}},   // WALK
-    {500, 140, 12, 205, {0, 128, 0, 128}},    // TROT
-    {1200, 218, 18, 179, {128, 0, 64, 192}},  // CRAWL
+    {800, 192, 205, {128, 0, 64, 192}},   // WALK
+    {500, 140, 205, {0, 128, 0, 128}},    // TROT
+    {1200, 218, 179, {128, 0, 64, 192}},  // CRAWL
 };
 #define PAT_U8(pat, field) PGM_U8(&PAT[pat].field)
 
@@ -79,7 +79,7 @@ void gait_pose_goal(Gait& g, const uint8_t* p) {
 
 // The goal's value of a "0 = default" field.
 static uint8_t duty_goal(const Gait& g) { return g.duty_g ? g.duty_g : PAT_U8(g.pattern, duty); }
-static int16_t step_goal(const Gait& g) { return (int16_t)((g.step_g ? g.step_g : PAT_U8(g.pattern, step_mm)) * 4); }
+static int16_t step_goal(const Gait& g) { return (int16_t)(g.step_g * 4); }
 
 void gait_start(Gait& g) {
   g.state = GS_RUN;

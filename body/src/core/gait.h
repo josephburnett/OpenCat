@@ -48,7 +48,7 @@ enum GaitState : uint8_t { GS_OFF = 0, GS_RUN = 1, GS_STOP = 2, GS_LAND = 3 };
 
 struct Gait {
   // SET_GAIT goal as received (0 = the pattern's default for period,
-  // duty, step height and body height).
+  // duty and body height, which the spec's ranges leave free).
   uint8_t run, pattern, flags, duty_g, step_g, body_g;
   int8_t stride_g, turn_g;
   // SET_BODY_POSE goal and its slewed value (pitch, roll a16; mm).
@@ -67,8 +67,9 @@ struct Gait {
 
 void gait_init(Gait& g);
 
-// SET_GAIT field checks (spec ranges; 0 is also accepted for period, duty,
-// step and body height: the pattern's default). p = the payload. Returns a
+// SET_GAIT field checks (spec ranges, pattern < 3, known flag bits; 0 is
+// also accepted for period and duty: the pattern's default). body_h_mm has
+// no range: any value is clamped by the IK workspace (0 = the default). p = the payload. Returns a
 // GoalResult (OK or BAD_ARG).
 uint8_t gait_check(const uint8_t* p);
 // Latch a checked SET_GAIT run=1 goal (does not start anything).
