@@ -36,7 +36,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from kilo.body.client import (BALANCE_CLAMP, BALANCE_DEADBAND, BALANCE_KD_S, BALANCE_KP, BodyClient,
-                              ProtocolMismatch)
+                              ProtocolMismatch, TrickError)
 from kilo.link.serial_link import CommandError, LinkError, LinkTimeout, NotConnected
 
 DEFAULT_CALL_TIMEOUT_S = 60.0
@@ -53,7 +53,8 @@ def socket_candidates(explicit: str | os.PathLike | None = None, *, env: dict[st
     """Every place a daemon may listen, most specific first, as (path, why).
 
     ``explicit`` (``--socket``) or ``$KILO_SOCKET`` alone when given;
-    ``/run/kilo/kilo.sock`` for root; else ``$XDG_RUNTIME_DIR/kilo/kilo.sock``,
+    ``/run/kilo/kilo.sock`` for root, then (``sudo kilo ...``) the invoking
+    user's ``/run/user/$SUDO_UID/kilo/kilo.sock``; else ``$XDG_RUNTIME_DIR/kilo/kilo.sock``,
     then ``/run/user/<uid>/kilo/kilo.sock`` when ``/run/user/<uid>`` exists
     (a non-login SSH shell has no ``$XDG_RUNTIME_DIR``, but the systemd user
     service listens there), then ``~/.kilo/kilo.sock``."""
@@ -65,7 +66,13 @@ def socket_candidates(explicit: str | os.PathLike | None = None, *, env: dict[st
     if euid is None:
         euid = os.geteuid() if hasattr(os, "geteuid") else -1
     if euid == 0:
-        return [(Path("/run/kilo/kilo.sock"), "root")]
+        out0 = [(Path("/run/kilo/kilo.sock"), "root")]
+        sudo_uid = env.get("SUDO_UID", "")
+        if sudo_uid.isdigit() and int(sudo_uid) != 0:
+            # `sudo kilo flash`: the invoking user's daemon (systemd user service)
+            out0.append((Path(f"{RUN_USER_ROOT}/{sudo_uid}") / "kilo" / "kilo.sock",
+                         f"{RUN_USER_ROOT}/{sudo_uid} ($SUDO_UID's runtime dir)"))
+        return out0
     out: list[tuple[Path, str]] = []
     if env.get("XDG_RUNTIME_DIR"):
         out.append((Path(env["XDG_RUNTIME_DIR"]) / "kilo" / "kilo.sock", "$XDG_RUNTIME_DIR"))
@@ -116,7 +123,7 @@ def dumps(obj: Any) -> bytes:
 ERROR_TYPES: dict[str, type[BaseException]] = {
     "LinkError": LinkError, "LinkTimeout": LinkTimeout, "NotConnected": NotConnected,
     "ProtocolMismatch": ProtocolMismatch, "ValueError": ValueError, "KeyError": KeyError,
-    "TypeError": TypeError, "RuntimeError": RuntimeError,
+    "TypeError": TypeError, "RuntimeError": RuntimeError, "TrickError": TrickError,
 }
 
 
@@ -364,10 +371,13 @@ class RemoteBody:
     param_info = staticmethod(BodyClient.param_info)
     param_id = staticmethod(BodyClient.param_id)
 
-    def __init__(self, conn: DaemonConnection):
+    def __init__(self, conn: DaemonConnection, override: bool = False):
         self.conn = conn
         self.state = RemoteState(conn)
         self.link = RemoteLink(conn)
+        # `kilo --override`: goals and tricks pause the daemon's behaviour
+        # runner for this session's hold instead of being refused.
+        self.override = override
 
     def close(self) -> None:
         self.conn.close()
@@ -390,7 +400,8 @@ class RemoteBody:
 
     # goals
     def posture(self, name: str, transition_ticks: int = 0, balance: bool | None = None) -> None:
-        self.conn.call("posture", name=name, transition_ticks=transition_ticks, balance=balance)
+        self.conn.call("posture", name=name, transition_ticks=transition_ticks, balance=balance,
+                       override=self.override)
 
     def limp(self) -> None:
         self.posture("limp")
@@ -410,10 +421,44 @@ class RemoteBody:
     def set_balance(self, enable: bool, kp: float = BALANCE_KP, kd_s: float = BALANCE_KD_S,
                     deadband_deg: float = BALANCE_DEADBAND, clamp_deg: float = BALANCE_CLAMP) -> dict[str, int]:
         return self.conn.call("set_balance", enable=enable, kp=kp, kd_s=kd_s, deadband_deg=deadband_deg,
-                              clamp_deg=clamp_deg)
+                              clamp_deg=clamp_deg, override=self.override)
 
     def release(self) -> None:
         self.conn.call("release")
+
+    # tricks (daemon ops: uploaded, played and owned by the daemon's session)
+    def trick_upload(self, name: str | None = None, trick: Any = None, force: bool = False) -> dict[str, Any]:
+        """``trick_upload``: a library name or a Trick; returns {name, trick_id, uploaded, crc16, frames}."""
+        return self.conn.call("trick_upload", name=name, trick=None if trick is None else trick.to_dict(),
+                              force=force, override=self.override)
+
+    def upload_trick(self, trick: Any, force: bool = False) -> tuple[int, bool]:
+        """BodyClient.upload_trick() over the daemon (the Trick travels as its dict)."""
+        r = self.trick_upload(trick=trick, force=force)
+        return r["trick_id"], r["uploaded"]
+
+    def trick_play(self, name: str | None = None, trick: Any = None, mirror: bool = False, speed: float = 1.0,
+                   repeats: int | None = None, posture: str | None = None, hold_s: float | None = None,
+                   timeout_s: float | None = None) -> dict[str, Any]:
+        """``trick_play``: blocks until TRICK_DONE (the daemon plays it on its
+        loop; closing this connection stops it). Returns {reason, trick_id,
+        elapsed_s, expected_ticks, epoch, stopped_by_us, name}."""
+        return self.conn.call("trick_play", timeout=None, name=name,
+                              trick=None if trick is None else trick.to_dict(), mirror=mirror, speed=speed,
+                              repeats=repeats, posture=posture, hold_s=hold_s, timeout_s=timeout_s,
+                              override=self.override)
+
+    async def play(self, trick: Any, mirror: bool = False, speed: float = 1.0, timeout: float | None = None) -> Any:
+        """BodyClient.play() over the daemon: a TrickResult-shaped namespace."""
+        import asyncio
+
+        kw = {"name": trick} if isinstance(trick, str) else {"trick": trick}
+        r = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: self.trick_play(mirror=mirror, speed=speed, timeout_s=timeout, **kw))
+        return SimpleNamespace(**r)
+
+    def stop_trick(self, transition_ticks: int = 0) -> None:
+        self.conn.call("trick_stop", transition_ticks=transition_ticks)
 
     # commands
     def cal_get(self) -> list[int]:

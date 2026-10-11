@@ -4,8 +4,12 @@ Each tick:
 
 1. ``body.on_tick()`` (if present: stamps the link's liveness) and
    ``body.snapshot()`` (a BodyState.snapshot()-shaped dict);
-2. on an epoch change the cached posture/balance goals are forgotten (the
-   body dropped them), so behaviours re-assert them;
+2. on an epoch change, a body reboot (``reboots``) or a connection change
+   (``connected``) the cached posture/balance goals are forgotten (the body
+   or the link dropped them), so behaviours re-assert them. While
+   ``paused()`` is true (the daemon's ``--override``: a CLI hold owns the
+   body) only steps 1-2 run: the running behaviour is halted (a trick is
+   stopped), nothing is ticked, and the cache is forgotten again on resume;
 3. body events: ``BodyEvents`` turns the snapshot's epoch, EVENTs and link
    flags into ``body_event`` log records and the ``on_body_event`` callback
    (epoch change, FELL, WATCHDOG, LOW_BATTERY, connection...);
@@ -76,7 +80,8 @@ class Runner:
                  log_path: str | Path | None = None, log: bool = True, logger: Any = None,
                  log_every_s: float = 1.0, history: int = 0,
                  on_poweroff: Callable[[], Any] | None = None,
-                 on_body_event: Callable[[dict[str, Any]], Any] | None = None):
+                 on_body_event: Callable[[dict[str, Any]], Any] | None = None,
+                 paused: Callable[[], bool] | None = None):
         self.cfg = personality if personality is not None else load_personality()
         self.body = body
         self.percept_source = percepts
@@ -110,6 +115,9 @@ class Runner:
         self._stop = False
         self._last_now: float | None = None
         self._last_epoch: Any = None
+        self._last_body_key: Any = None
+        self.paused = paused
+        self._was_paused = False
         self._was_fallen = False
         self._last_logged: tuple[float, Any] | None = None
         self._poweroff_done = False
@@ -176,11 +184,24 @@ class Runner:
     def step(self) -> dict[str, Any]:
         ctx = self.ctx
         snap = self._snapshot()
-        epoch = snap.get("epoch")
-        if epoch != self._last_epoch:
+        key = (snap.get("epoch"), snap.get("reboots"), snap.get("connected"))
+        if key != self._last_body_key:
             ctx.data.pop("posture", None)
             ctx.data.pop("balance", None)
-            self._last_epoch = epoch
+            self._last_body_key = key
+            self._last_epoch = key[0]
+        paused = bool(self.paused is not None and self.paused())
+        if paused != self._was_paused:
+            self._was_paused = paused
+            self.root.halt()  # pause: stop what runs; resume: start afresh
+            ctx.data.pop("posture", None)
+            ctx.data.pop("balance", None)
+            if self.logger is not None:
+                self.logger.log("paused" if paused else "resumed", t=round(self.clock(), 3))
+        if paused:
+            ctx.state = snap
+            self.ticks += 1
+            return {"t": round(self.clock(), 3), "tick": self.ticks, "paused": True}
         ctx.state = snap
         ctx.percepts = self._percepts(snap)
         ctx.begin_tick()
@@ -313,7 +334,7 @@ class PerceptFeed:
 
 def run_behaviour(client: Any, state: Any, stop_event: Any, log_dir: str | Path, *,
                   percepts: Any = None, personality: str | Path | None = None, seed: int | None = None,
-                  hz: float = 10.0) -> str:
+                  hz: float = 10.0, paused: Any = None) -> str:
     """Run the behaviour layer until ``stop_event`` is set (the daemon's
     ``kilo run --behaviour`` calls this in its own thread).
 
@@ -321,7 +342,8 @@ def run_behaviour(client: Any, state: Any, stop_event: Any, log_dir: str | Path,
     threading.Event, ``log_dir`` where ``behaviour-<time>.jsonl`` goes.
     ``percepts`` (the daemon's SharedPercepts) is used instead of a private
     one when given; ``personality`` (else ``$KILO_PERSONALITY``) picks the
-    YAML. Returns why it stopped (``stop``, ``poweroff``...)."""
+    YAML; ``paused`` (a threading.Event, the daemon's ``--override``) pauses
+    the behaviours while set. Returns why it stopped (``stop``, ``poweroff``...)."""
     import logging
     import os
 
@@ -333,7 +355,8 @@ def run_behaviour(client: Any, state: Any, stop_event: Any, log_dir: str | Path,
     body = BodyAdapter(client, percepts=feed.percepts)
     log_path = Path(log_dir) / time.strftime("behaviour-%Y%m%d-%H%M%S.jsonl")
     runner = Runner(body, cfg, percepts=feed, seed=seed, hz=hz, log_path=log_path,
-                    on_body_event=lambda ev: log.info("body event %s", ev))
+                    on_body_event=lambda ev: log.info("body event %s", ev),
+                    paused=paused.is_set if paused is not None else None)
     log.info("behaviour runner: log %s, seed %s, personality %s", log_path, runner.seed, cfg.get("name"))
 
     async def main() -> str:

@@ -10,7 +10,10 @@ Sequence:
 2. Stop the serial link: the in-process ``SerialLink``, or the daemon's (the
    ``link`` argument is then a port lease on the daemon socket, see
    kilo.cli). pyserial's ``exclusive=True`` (flock) makes any other kilo
-   process fail to open the port rather than share it.
+   process fail to open the port rather than share it, and ``kilo flash``
+   checks that lock itself (``port_busy``, the ``precheck``) right before
+   avrdude: a daemon it could not reach (``--direct``, another user's, root's)
+   still holds it, so the flash is refused unless ``--force``.
 3. Reset into optiboot:
    - ``dtr``: USB adapter (CH340/CH343). ``avrdude -c arduino`` pulses DTR itself.
    - ``gpio``: Pi header. GPIO4 is pulsed low (emulated open-drain, see
@@ -26,7 +29,7 @@ Sequence:
    open and every later ``kilo`` command find the line unchanged and do not
    reset the body.
 6. Restart the link and, for new firmware, expect a HELLO after the flash
-   within ``verify_timeout`` (8 s: reset, optiboot's wait, DMP init and the
+   (verified twice before giving up) within ``verify_timeout`` (8 s: reset, optiboot's wait, DMP init and the
    first HELLO take ≈2.2 s on Kilo, plus the link restart) with reset cause
    FLASHED (any cause over a USB adapter, where the settle reset makes it
    WARM_UNEXPECTED), and (when this run built the firmware) HELLO.fw_build
@@ -140,9 +143,37 @@ def avrdude_cmd(port: str, hex_path: Path, avrdude: str = "avrdude", conf: str |
                   "-U", f"flash:w:{hex_path}:i"]
 
 
-def is_usb_port(port: str) -> bool:
-    """A USB adapter (DTR wired to RESET), as opposed to the Pi header UART."""
-    return not port.startswith(PI_UART_PREFIXES)
+def is_usb_port(port: str | None) -> bool:
+    """A USB adapter (DTR wired to RESET), as opposed to the Pi header UART.
+    No port (a daemon that has not found one yet) counts as USB."""
+    return not (port or "").startswith(PI_UART_PREFIXES)
+
+
+def port_busy(port: str) -> str | None:
+    """Why ``port`` is in use, or None. Takes (and drops) the same flock that
+    pyserial's ``exclusive=True`` takes, so a ``kilo run`` daemon or another
+    kilo command holding the port shows up whoever runs it. A port that does
+    not exist is not busy (avrdude reports it)."""
+    import errno
+    import fcntl
+
+    try:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"cannot open it: {e}" if e.errno == errno.EBUSY else None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            return "another process holds its exclusive lock"
+        return None
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    return None
 
 
 def reset_method(port: str, requested: str = "auto") -> str:
@@ -160,6 +191,7 @@ def flash(
     verify: Callable[[float, int | None, float], Any] | None = None,
     say: Callable[[str], None] = print,
     settle: Callable[[str], Any] | None = None,
+    precheck: Callable[[], None] | None = None,
 ) -> FlashResult:
     """Run the flash sequence. ``link`` (a SerialLink, or anything with
     ``running``/``stop()``/``start()``) is stopped and restarted.
@@ -167,10 +199,15 @@ def flash(
     ``settle(port)`` runs after avrdude, before the link restarts (default
     ``settle_port`` with ``opts.settle_cycles`` and ``opts.baud``).
 
+    ``precheck()`` runs after the link is stopped, right before the first
+    avrdude (a FlashError from it aborts, the link is restarted).
+
     ``verify(since, expected_build, timeout)`` is called after the link
     restarts for new firmware; it returns a ``VerifyResult`` (or a bool),
     true once a HELLO with the right cause (and fw_build == expected_build,
-    unless None) arrived after ``since`` (see ``verify_hello``).
+    unless None) arrived after ``since`` (see ``verify_hello``). A failed
+    verify is retried once; ``res.verified`` is then False (the caller exits
+    non-zero) and ``res.hello`` the last HELLO seen.
     """
     if settle is None:
         def settle(port: str) -> Any:
@@ -230,6 +267,14 @@ def flash(
     if was_running:
         say("stopping serial link")
         link.stop()
+    if precheck is not None and not opts.dry_run:
+        try:
+            precheck()
+        except FlashError:
+            if was_running:  # nothing was flashed: no settle, just give the port back
+                say("restarting serial link")
+                link.start()
+            raise
     t_flash = time.monotonic()
     try:
         last: FlashError | None = None
@@ -260,16 +305,22 @@ def flash(
             say("restarting serial link")
             link.start()
     if opts.verify and not opts.legacy and not opts.dry_run and verify is not None:
-        r = verify(t_flash, res.expected_build, opts.verify_timeout)
-        res.verified = bool(r)
-        res.hello = getattr(r, "hello", None)
         cause = "any reset cause" if is_usb_port(opts.port) else "reset_cause=FLASHED"
         want = cause + ("" if res.expected_build is None else f" fw_build={res.expected_build:08x}")
+        r = verify(t_flash, res.expected_build, opts.verify_timeout)
+        res.hello = getattr(r, "hello", None)
+        if not r:
+            seen = describe_hello(res.hello)
+            say(f"no HELLO with {want} within {opts.verify_timeout:g} s"
+                + (f" (last HELLO seen: {seen})" if seen else "") + "; verifying once more")
+            r = verify(t_flash, res.expected_build, opts.verify_timeout)
+            res.hello = getattr(r, "hello", None) or res.hello
+        res.verified = bool(r)
         seen = describe_hello(res.hello)
         if res.verified:
             say(f"verified: HELLO {want}" + (f" ({seen})" if seen else ""))
         else:
-            say(f"warning: no HELLO with {want} within {opts.verify_timeout:g} s; "
+            say(f"verify FAILED: no HELLO with {want} within 2 x {opts.verify_timeout:g} s; "
                 + (f"last HELLO seen: {seen}" if seen else "no HELLO seen at all"))
     return res
 
@@ -307,7 +358,7 @@ class VerifyResult:
 
 
 def verify_hello(link: Any, since: float, expected_build: int | None = None,
-                 timeout: float = 8.0, any_cause: bool = False) -> VerifyResult:
+                 timeout: float = 8.0, any_cause: bool = False, stamp: bool = False) -> VerifyResult:
     """Wait up to ``timeout`` for a HELLO received after ``since`` with reset
     cause FLASHED (and fw_build == ``expected_build`` unless that is None).
 
@@ -315,7 +366,9 @@ def verify_hello(link: Any, since: float, expected_build: int | None = None,
     the verify open) pulses DTR and resets the body once more, so the HELLO
     says WARM_UNEXPECTED rather than FLASHED; the build hash still proves
     what is running. Whatever happens, the result carries the last HELLO
-    seen after ``since`` so a failure can say what the body did report."""
+    seen after ``since`` so a failure can say what the body did report.
+    ``stamp``: the caller is the mind's main loop (the CLI's own link), so
+    waiting stamps the link's liveness; the daemon's pool thread does not."""
     from kilo.link.messages import fields_of
     from kilo.protocol.kilo_protocol import ResetCause
 
@@ -336,7 +389,7 @@ def verify_hello(link: Any, since: float, expected_build: int | None = None,
         left = deadline - time.monotonic()
         if left <= 0:
             break
-        if link.wait_until(ok, min(1.0, left)):
+        if link.wait_until(ok, min(1.0, left), alive=stamp):
             good = True
             break
         if fresh() is None and getattr(link.state, "alive", False) and hasattr(link, "request"):

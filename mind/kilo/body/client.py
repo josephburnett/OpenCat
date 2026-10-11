@@ -72,6 +72,12 @@ def trick_id_for(trick: Any) -> int:
 
 
 class BodyClient:
+    # True when the thread that waits in this client (wait_ready, cal_save,
+    # play) is the mind's main loop, so waiting may stamp the link's liveness
+    # (the CLI). The daemon sets False: its pool threads and the behaviour
+    # runner's trick waits must not keep a stalled loop looking alive.
+    stamp_liveness = True
+
     def __init__(self, link: SerialLink):
         self.link = link
         # The trick the body holds, as far as this client knows: (trick_id,
@@ -80,6 +86,7 @@ class BodyClient:
         self._trick_cached: tuple[int, int, int] | None = None
         self._trick_lock = threading.Lock()
         self._trick_done: list[tuple[float, Any]] = []
+        self._upload_lock = threading.RLock()  # one upload sequence on the wire at a time
         link.subscribe("event", self._on_event)
 
     @property
@@ -109,10 +116,12 @@ class BodyClient:
         its protocol major differs (the mind then refuses to drive; §4).
         """
         link = self.link
+        a = self.stamp_liveness
         deadline = time.monotonic() + timeout
-        if not link.wait_until(lambda: link.state.connected, timeout):
+        if not link.wait_until(lambda: link.state.connected, timeout, alive=a):
             raise LinkTimeout(f"port {link.state.port} did not open")
-        if not link.wait_until(lambda: link.state.hello is not None, max(0.0, min(0.5, deadline - time.monotonic()))):
+        if not link.wait_until(lambda: link.state.hello is not None, max(0.0, min(0.5, deadline - time.monotonic())),
+                               alive=a):
             while link.state.hello is None:
                 if time.monotonic() >= deadline:
                     raise LinkTimeout("no HELLO from the body")
@@ -121,10 +130,10 @@ class BodyClient:
                 except LinkTimeout:
                     pass
                 except LinkError:
-                    link.wait_until(lambda: link.state.connected, 0.2)
+                    link.wait_until(lambda: link.state.connected, 0.2, alive=a)
         if require_telemetry:
             left = max(0.0, deadline - time.monotonic())
-            if not link.wait_until(lambda: link.state.alive, left):
+            if not link.wait_until(lambda: link.state.alive, left, alive=a):
                 raise LinkTimeout("HELLO received but no telemetry")
         if link.state.proto_ok is False:
             raise ProtocolMismatch(
@@ -221,7 +230,8 @@ class BodyClient:
         self.link.request("CAL_SAVE")
         if wait_saved is None:
             return True
-        return self.link.wait_until(lambda: self._count_events("EEPROM_SAVED") > n_before, wait_saved)
+        return self.link.wait_until(lambda: self._count_events("EEPROM_SAVED") > n_before, wait_saved,
+                                    alive=self.stamp_liveness)
 
     def cal_revert(self) -> None:
         self.link.request("CAL_REVERT")
@@ -321,6 +331,10 @@ class BodyClient:
         """
         self._check_drivable()
         trick.validate()
+        with self._upload_lock:
+            return self._upload_locked(trick, force)
+
+    def _upload_locked(self, trick: Any, force: bool) -> tuple[int, bool]:
         tid, crc = trick_id_for(trick), trick.crc16()
         reboots = self.state.reboots
         if not force and self._trick_cached == (tid, crc, reboots):
@@ -396,8 +410,12 @@ class BodyClient:
 
         Timeout: the expected duration at ``speed`` plus TRICK_DONE_MARGIN_S
         (none for a trick that loops until stopped, unless ``timeout`` is
-        given); on timeout the trick is stopped and TrickError raised. The
-        coroutine keeps the link's liveness stamp fresh while it waits.
+        given); on timeout the trick is stopped and TrickError raised. If the
+        coroutine is cancelled (a behaviour preempted, Ctrl-C) before
+        TRICK_DONE, the trick is stopped on the body too. It stamps the link's
+        liveness while it waits only when ``stamp_liveness`` (the CLI, whose
+        loop this is); under the daemon the runner's tick or the daemon's pump
+        is the liveness source.
         """
         if isinstance(trick, str):
             from kilo.tricks import library
@@ -408,19 +426,28 @@ class BodyClient:
             timeout = (ticks + 1) * P.TICK_MS / 1000.0 + TRICK_DONE_MARGIN_S
         tid, n = self.start_trick(trick, mirror, speed)
         t0 = self.link.clock()
-        while True:
-            self.link.mark_alive()
-            m = self.trick_done_since(n, tid)
-            if m is not None:
-                reason = P.TrickDoneReason((m.arg & 0xFFFF) >> 8).name
-                return TrickResult(reason, tid, self.link.clock() - t0, ticks, m.epoch)
-            if timeout is not None and self.link.clock() - t0 > timeout:
-                try:
-                    self.stop_trick()
-                except LinkError:
-                    pass
-                raise TrickError(f"no TRICK_DONE within {timeout:.2f} s")
-            await asyncio.sleep(0.02)
+        try:
+            while True:
+                if self.stamp_liveness:
+                    self.link.mark_alive()
+                m = self.trick_done_since(n, tid)
+                if m is not None:
+                    reason = P.TrickDoneReason((m.arg & 0xFFFF) >> 8).name
+                    return TrickResult(reason, tid, self.link.clock() - t0, ticks, m.epoch)
+                if timeout is not None and self.link.clock() - t0 > timeout:
+                    self._stop_quietly()
+                    raise TrickError(f"no TRICK_DONE within {timeout:.2f} s")
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            if self.trick_done_since(n, tid) is None:
+                self._stop_quietly()  # preempted: do not leave the trick playing
+            raise
+
+    def _stop_quietly(self) -> None:
+        try:
+            self.stop_trick()
+        except LinkError:
+            pass
 
     def stop_trick(self, transition_ticks: int = 0) -> None:
         """TRICK_STOP: crossfade to the end posture (0 = XFADE_TICKS)."""

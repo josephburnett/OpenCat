@@ -88,6 +88,55 @@ class JsonlLogger:
         self._f.close()
 
 
+# ---- the log directory's size --------------------------------------------------------
+LOG_DIR_MAX_BYTES = 500 << 20   # ~/kilo-logs is pruned to this (oldest files first)
+PRUNE_PREFIXES = ("kilo-", "behaviour-", "daemon.log.")
+PRUNE_MIN_AGE_S = 600.0          # never a file written in the last 10 minutes
+
+
+def prune_logs(log_dir: str | os.PathLike, max_bytes: int = LOG_DIR_MAX_BYTES,
+               keep: "set[Path] | frozenset[Path]" = frozenset(), now: float | None = None) -> list[Path]:
+    """Delete the oldest log files in ``log_dir`` (not recursive) until the
+    total is at most ``max_bytes``. Only kilo's own logs (``kilo-*``,
+    ``behaviour-*``, rotated ``daemon.log.N``) are candidates; the files in
+    ``keep`` (open logs) and anything modified in the last ``PRUNE_MIN_AGE_S``
+    are never touched (they still count towards the total). Returns the
+    deleted paths."""
+    d = Path(log_dir)
+    now = time.time() if now is None else now
+    keep = {Path(p).resolve() for p in keep}
+    files: list[tuple[float, int, Path, bool]] = []
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return []
+    total = 0
+    for p in entries:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if not p.is_file():
+            continue
+        total += st.st_size
+        ok = (p.name.startswith(PRUNE_PREFIXES) and p.resolve() not in keep
+              and now - st.st_mtime >= PRUNE_MIN_AGE_S)
+        files.append((st.st_mtime, st.st_size, p, ok))
+    deleted: list[Path] = []
+    for _mtime, size, p, ok in sorted(files):
+        if total <= max_bytes:
+            break
+        if not ok:
+            continue
+        try:
+            p.unlink()
+        except OSError:
+            continue
+        total -= size
+        deleted.append(p)
+    return deleted
+
+
 def _default(o: Any) -> Any:
     if isinstance(o, (bytes, bytearray)):
         return o.hex()

@@ -133,7 +133,9 @@ kilo --kilolog status        # any command: raw wire frames to ~/kilo-logs/kilo-
 Global options: `--port`, `--baud`, `--log` / `--log-file FILE` (JSON-lines
 log of every frame and event, written by a background thread),
 `--kilolog [FILE]` (the raw wire frames, see Logs), `--timeout`,
-`-v`/`-vv`, `--socket PATH`, `--direct`.
+`-v`/`-vv`, `--socket PATH`, `--direct`, `--override` (through a daemon
+running the behaviour runner: pause it while this command holds the body,
+see "Behaviour runner and CLI holds").
 
 Every command first tries the daemon's socket and, when no daemon listens,
 opens the port itself (the "direct" path, which the hardware-test docs use with
@@ -185,7 +187,17 @@ Ops: `daemon` (pid, port, clients, holds, behaviour), `ping`, `alive`,
 queries and commands, not goals), `call` (any other public BodyClient method
 with JSON-able arguments), `subscribe {rate_hz, kinds}` / `unsubscribe`,
 `release_port {lease_s}` / `reacquire_port`, `verify_hello` (for `kilo
-flash`), `percepts` (flags, distance, recent percept events), `shutdown`.
+flash`), `percepts` (flags, distance, recent percept events), `shutdown`,
+and the trick ops `trick_upload {name | trick}` (a library name or
+`Trick.to_dict()`; cached), `trick_play {name | trick, mirror, speed,
+repeats, posture, hold_s}` (replies on TRICK_DONE: `{reason, trick_id,
+elapsed_s, expected_ticks, epoch, stopped_by_us}`) and `trick_stop
+{transition_ticks}`. `posture`, `set_balance`, `trick_upload` and
+`trick_play` take `override` (see below). `call` refuses the goal and trick
+methods (they need the ops' ownership and checks) and coroutines. Ops run in
+order per client, except `trick_play`, which runs as a task of the session
+so pings, a `trick_stop` and the client's own disconnect are still seen
+while the trick plays.
 After `subscribe`, the daemon streams `{"stream": kind, "t": ..., "data":
 ...}` lines without an id: `snapshot` (BodyState.snapshot() at `rate_hz`),
 `telemetry` (decimated to `rate_hz`), `event`, `hello`, `reboot`,
@@ -202,7 +214,29 @@ something at least every 3 s (`RemoteBody` pings while `kilo posture` or
 ends the way `kilo posture --for` ends without a daemon, minus the 0.5 s stop
 stage: the daemon latches REST at once and LIMP 10 s later (`kilo run
 --idle-posture rest|limp|none`, `--idle-limp S`), and switches a balance
-enable off. With a behaviour runner, the daemon only drops the goal.
+enable off. With a behaviour runner, the daemon only drops the goal. The idle
+REST is latched whenever a hold that owned the posture (or a trick) ends and
+nobody else owns one, even if another client still holds `set_balance`; a
+balance-only hold that ends switches balance off and leaves the posture
+timeline alone.
+
+**Tricks through the daemon.** `kilo trick upload|play|stop` use the trick
+ops: the daemon uploads (cached), takes `--posture` first, plays the trick on
+its loop and replies on TRICK_DONE. The session owns the trick (`TRICK` in
+`kilo daemon`'s holds) and the end posture it leaves: when the `kilo trick
+play` process exits or is killed, even mid `--repeats 255`, the daemon stops
+the trick and runs the idle REST/LIMP timeline. A second client cannot start
+a trick over a playing one (`kilo trick stop` first). `kilo trick play
+--then-watch` needs the port to itself and is refused through the daemon.
+
+**Behaviour runner and CLI holds.** While `kilo run --behaviour` runs the
+behaviour runner, `kilo posture`, `kilo balance` and `kilo trick
+upload|play` through the daemon are refused ("behaviour runner active; stop
+it with `kilo daemon stop` ... or pass --override"), since both would write
+SET_POSTURE. `kilo --override posture stand` pauses the runner (its running
+behaviour is halted, a trick it plays stopped, nothing is ticked) for as
+long as that command's hold lasts; when the hold ends the runner resumes and
+re-asserts its own goals. `kilo trick stop` is always allowed.
 
 **Silent modes.** `kilo monitor --passive` and `kilo posture --then-watch`
 must send nothing and therefore need the port to themselves; with a daemon on
@@ -210,9 +244,17 @@ that port they refuse and say so. Stop the daemon first (`kilo daemon stop`,
 or `systemctl --user stop kilo`).
 
 **Flashing with a daemon.** `kilo flash` builds first, then asks the daemon
-to release the port (`release_port`, 300 s lease; the daemon also takes the
-port back if the flashing client disconnects), runs avrdude, settles the port,
-asks the daemon to reacquire it and verifies the HELLO on the daemon's link.
+to release the port (`release_port`, 300 s lease), runs avrdude, settles the
+port, asks the daemon to reacquire it and verifies the HELLO on the daemon's
+link. If the flashing client dies (avrdude may still be writing), the daemon
+keeps the port released until the lease ends (or `reacquire_port`); every
+reopen after a release settles the port first. A daemon without a port yet
+(nothing plugged in when it started) is still asked to release, so it does
+not grab the port mid-flash. Without a reachable daemon (`--direct`, a
+daemon of another user, `sudo kilo flash` while the user service runs) the
+port's exclusive lock is checked right before avrdude and a held port is
+refused (`--force` flashes anyway, with a warning). As root, `kilo` also
+looks for the invoking user's daemon at `/run/user/$SUDO_UID/kilo/kilo.sock`.
 
 **Shutdown.** SIGTERM or SIGINT (or `kilo daemon stop`): stop the behaviour
 runner, close clients, drop every goal and go silent so the body's watchdog
@@ -226,9 +268,16 @@ takes over (stop, REST, LIMP), close the port, remove the socket.
 `pathlib.Path` (`--log-dir`, default `~/kilo-logs`). An `async def` runner is
 awaited on the daemon's loop instead (same arguments). When the function
 also takes a `percepts` keyword, the daemon passes its own `SharedPercepts`,
-so the runner and `kilo monitor --percepts` see the same percepts. The
-daemon stamps the link's liveness itself; the runner only sets goals. If the
-import fails the daemon logs it and runs without. The packaged runner writes
+so the runner and `kilo monitor --percepts` see the same percepts; a
+`paused` keyword gets the `threading.Event` that `--override` sets. The
+runner stamps the link's liveness on every tick (`BodyAdapter.on_tick`, as
+source "mind"); the daemon's pump stamps too, but with a runner only while
+the runner has ticked within the last 1 s (10 s of grace for its first
+tick), so a hung runner trips the body's watchdog (logged once: "behaviour
+runner has not ticked ..."). Threads that merely wait on the body (the
+daemon's pool, `wait_ready`, `cal_save`, the flash verify, a trick's
+`play()`) never stamp. If the import fails the daemon logs it and runs
+without. The packaged runner writes
 `<log-dir>/behaviour-<time>.jsonl` (see Behaviour) and stops within 0.1 s of
 SIGTERM; `$KILO_PERSONALITY` (in `~/.config/kilo/env`) picks another
 personality file.
@@ -236,10 +285,16 @@ personality file.
 **Logs of the daemon.** `kilo run` writes its own log to
 `<log-dir>/daemon.log` (`~/kilo-logs/daemon.log`, rotating at 1 MB, 3 old
 files kept; `--daemon-log FILE|none`) as well as to stderr, which systemd
-sends to the journal. `--log` adds the JSON-lines frame log and `--kilolog`
-the raw `.kilolog.gz` (both in the log dir).
+sends to the journal; the file is written by a `QueueListener` thread, so a
+slow SD card never stalls the link's reader thread, which logs too. `--log`
+adds the JSON-lines frame log (64 MB x 6 per start, so it is off unless
+asked for: `KILO_RUN_ARGS=--log`) and `--kilolog` the raw `.kilolog.gz`
+(both in the log dir). The log dir is kept under 500 MB: at start and hourly
+the daemon deletes the oldest kilo logs (`kilo-*`, `behaviour-*`, rotated
+`daemon.log.N`) beyond that, never an open file or one written in the last
+10 minutes.
 
-**systemd: a user service.** `mind/systemd/kilo.service` runs `kilo run --log`
+**systemd: a user service.** `mind/systemd/kilo.service` runs `kilo run`
 as joe's *user* service, with lingering so it starts at boot without a login.
 Why a user service rather than a system unit with `User=joe`: it is installed
 and managed without sudo (`systemctl --user`), it runs with joe's groups
@@ -361,7 +416,13 @@ starts the LIMP timer at the REST trip (11.5 s).
    build hash. On Kilo reset, optiboot's wait, DMP init and the first HELLO
    take about 2.2 s, plus the link restart; if the boot HELLO went out before
    the port was open it asks with HELLO_REQ. Either way it prints the HELLO it
-   saw (build and reset cause), and on failure the last one, if any.
+   saw (build and reset cause), and on failure the last one, if any. A failed
+   verify is retried once (`verifying once more`); if it fails again `kilo
+   flash` prints `verify FAILED: ...` and exits 1.
+
+Exit codes: 0 flashed (and verified, unless `--no-verify`/`--legacy`), 1 a
+build, avrdude or port error, a busy port (without `--force`) or a failed
+verify, 2 usage.
 
 `--dry-run` prints the commands without running them.
 
@@ -589,7 +650,11 @@ written transparently). `kilo --kilolog [FILE] COMMAND` (direct) and `kilo run
 --kilolog [FILE]` (the daemon; flushed every 5 s, so a killed daemon leaves a
 readable file) hand a `KilologWriter` to the link, which calls `write_wire()`
 for every frame it writes and every frame its decoder completes (the
-decoder's `feed_wire()` returns each frame with its wire bytes). The default
+decoder's `feed_wire()` returns each frame with its wire bytes).
+`write_wire()` only queues the record (bounded; when full, records are
+dropped and counted in `dropped`): a `kilo-kilolog` thread does the writes,
+the gzip flushes and the close, so the link's reader and writer threads (the
+writer holds its TX lock) never wait for the disk. The default
 file is `~/kilo-logs/kilo-<time>.kilolog.gz` (the daemon: in `--log-dir`).
 Through a daemon, `kilo --kilolog CMD` notes that the daemon does the logging.
 
@@ -761,7 +826,14 @@ back), the real behaviour runner under the daemon (behaviour log, posture
 goals, body events, clean stop), `kilo run --behaviour --kilolog` end to end
 with `kilo monitor --percepts` through it and `kilo log summary|replay` on
 the result, a direct `--kilolog` round trip, and wire-byte capture in the
-codec and link. The suite takes about a minute and a half.
+codec and link. `test_hardening.py` holds the regression tests of the second
+review: tricks through the daemon (ops, CLI, a killed looping `kilo trick
+play`), no motion goal into a rebooting body (the vbody's `boot_delay`
+buffers what it hears while it boots), a busy port and a failed verify in
+`kilo flash`, a hung runner tripping the watchdog, `--override`, the logs off
+the control threads, a cancelled `play()`, the port lease, split-owner idle
+latching, the LinkStats race, log pruning. The suite takes about two
+minutes.
 
 ## Layout
 

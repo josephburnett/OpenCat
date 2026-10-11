@@ -16,9 +16,9 @@ Documentation=file:%h/OpenCat/mind/README.md
 Type=simple
 EnvironmentFile=-%h/.config/kilo/env
 Environment=PYTHONUNBUFFERED=1
-# --log: JSON-lines frame log in ~/kilo-logs; stderr (the daemon's own log) goes to the journal
+# No --log by default (add it to KILO_RUN_ARGS for the JSON-lines frame log); stderr (the daemon's own log) goes to the journal
 # and to ~/kilo-logs/daemon.log.
-ExecStart=%h/OpenCat/.venv/bin/kilo run --log $KILO_RUN_ARGS
+ExecStart=%h/OpenCat/.venv/bin/kilo run $KILO_RUN_ARGS
 # SIGTERM: drop goals, go silent (the body's watchdog takes over), close the port.
 KillSignal=SIGTERM
 TimeoutStopSec=15

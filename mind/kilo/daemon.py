@@ -15,8 +15,16 @@ Threads and the loop:
   ``REPLY_BUFFER_MAX`` is disconnected.
 - A pump task stamps the link's liveness every 0.2 s (§5: the writer thread's
   heartbeats, goal refresh and HELLO polls only go out while the loop proves
-  alive), so a stalled daemon trips the body's watchdog. The same task checks
-  hold leases, the idle timeline and the port-release lease.
+  alive), so a stalled daemon trips the body's watchdog. With ``--behaviour``
+  it stamps only while the runner has ticked within ``runner_stall_s`` (1 s;
+  10 s of grace for its first tick), so a hung runner trips the watchdog too
+  (logged once). Pool threads never stamp (``BodyClient.stamp_liveness`` is
+  off). The same task checks hold leases, the idle timeline, the
+  port-release lease and, hourly, the log directory's size (``prune_logs``:
+  oldest kilo logs beyond 500 MB go).
+- Ops run one at a time per client, in order, except ``trick_play``, which
+  runs as a task of its session so the session still reads (pings, a
+  ``trick_stop``, its own disconnect) while the trick plays.
 
 Holds. Goals a client sets (``posture``, ``set_balance``) belong to that
 client's session and are kept alive by the daemon while the session lives and
@@ -26,7 +34,28 @@ it holds). When the session closes or its lease lapses, the hold ends like
 latches REST at once and LIMP after ``idle_limp_s`` (the watchdog's REST/LIMP
 timeline, without the 0.5 s stop stage), and a balance enable is switched
 off. With a behaviour runner active the daemon only drops the goal and leaves
-the body to the runner.
+the body to the runner. The idle REST is latched whenever a hold that owned
+the posture (or a trick) ends and nobody else owns one, even if another
+client still holds SET_BALANCE.
+
+Tricks. ``trick_upload {name | trick}`` (a library name or ``Trick.to_dict()``),
+``trick_play {name | trick, mirror, speed, repeats, posture, hold_s}`` and
+``trick_stop {transition_ticks}``. ``trick_play`` uploads (cached), takes
+the optional posture first (held by the session), sends TRICK_PLAY and
+replies on EVENT TRICK_DONE (``{reason, trick_id, elapsed_s, expected_ticks,
+epoch, stopped_by_us}``); ``hold_s`` stops it after that long. The session
+owns the trick (``TRICK`` in ``held_goals``) and, like a posture, the body's
+end posture: when the session closes (or releases, or its lease lapses) a
+playing trick is stopped and the idle REST/LIMP timeline runs. A second
+client cannot start a trick over a playing one (``trick_stop`` first).
+
+Behaviour runner and CLI holds. While the runner is active, ``posture``,
+``set_balance``, ``trick_upload`` and ``trick_play`` from clients are refused
+("behaviour runner active ...") unless the request carries ``override``
+(``kilo --override ...``): the runner is then paused (its behaviours halted,
+nothing ticked) until that client's hold ends, and resumes re-asserting its
+own goals. ``trick_stop`` and ``release`` are always allowed. The generic
+``call`` op refuses the goal and trick methods.
 
 Port hot-plug. The daemon starts whether or not the port exists (robot
 unplugged, adapter not enumerated yet) and the link's reader keeps trying to
@@ -45,14 +74,22 @@ when its signature takes it), so its ``notify_self_motion()`` calls quiet
 the IMU detectors for everyone.
 
 Logs. ``--kilolog [FILE]`` hands a ``KilologWriter`` to the link (raw wire
-frames both ways, flushed every 5 s); ``run_daemon`` also writes the
-daemon's own log to ``<log-dir>/daemon.log`` (1 MB x 3, rotating), because
-the user journal is not always readable or persistent on the Pi.
+frames both ways; its own thread writes them, flushed every 5 s);
+``run_daemon`` also writes the daemon's own log to ``<log-dir>/daemon.log``
+(1 MB x 3, rotating; through a QueueHandler, so a slow disk never stalls the
+link's reader thread that logs), because the user journal is not always
+readable or persistent on the Pi. ``--log`` (the JSON-lines frame log) is
+off unless asked for; the log directory is pruned to 500 MB at start and
+hourly (oldest kilo logs first, never an open one).
 
 Port release (Appendix F). ``release_port {lease_s}`` stops the link and
-closes the port so ``kilo flash`` can run avrdude; ``reacquire_port`` (or the
-lease running out, or the releasing client disconnecting) reopens it. While
-released, ops that need the body fail with NotConnected.
+closes the port so ``kilo flash`` can run avrdude; ``reacquire_port`` or the
+lease running out reopens it. The lease is honoured even when the releasing
+client goes away (a CLI killed mid-flash leaves avrdude running): the port
+stays released until the lease ends. Every reopen first settles the port
+(``settle_port``: DTR/HUPCL/baud, so avrdude's exit state does not reset the
+body on the reopen). While released, ops that need the body fail with
+NotConnected.
 
 Shutdown (SIGTERM/SIGINT or the ``shutdown`` op): stop accepting, stop the
 behaviour runner, close clients, drop every goal and go silent (the body's
@@ -63,9 +100,10 @@ daemon calls ``run_behaviour(client, state, stop_event, log_dir)`` in its own
 thread (an ``async def`` is awaited on the loop instead): ``client`` is the
 daemon's BodyClient, ``state`` its BodyState, ``stop_event`` a
 threading.Event set at shutdown (return promptly once it is set), ``log_dir``
-a pathlib.Path for the runner's own logs. The daemon keeps the link alive; the
-runner only sets goals. An import failure or an exception is logged and the
-daemon carries on without it.
+a pathlib.Path for the runner's own logs; a ``paused`` keyword, if it takes
+one, gets the ``--override`` Event. The runner stamps the link's liveness
+each tick (the pump follows it, above). An import failure or an exception
+is logged and the daemon carries on without it.
 """
 
 from __future__ import annotations
@@ -74,6 +112,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import logging
+import logging.handlers
 import os
 import signal
 import threading
@@ -82,10 +121,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kilo import __version__
-from kilo.body.client import BodyClient
+from kilo.body.client import TRICK_DONE_MARGIN_S, BodyClient, TrickError
 from kilo.link import consts
 from kilo.link.serial_link import LinkConfig, LinkError, NotConnected, SerialLink
-from kilo.link.transport import DEFAULT_BAUD, open_port
+from kilo.link.transport import DEFAULT_BAUD, open_port, settle_port
+from kilo.log import LOG_DIR_MAX_BYTES, prune_logs
 from kilo.perception.shared import SharedPercepts
 from kilo.remote import dumps, encode_error, jsonable, socket_candidates
 
@@ -102,6 +142,22 @@ DAEMON_LINK = dict(reconnect_min_s=2.0, reconnect_max_s=10.0)
 DAEMON_LOG_BYTES = 1 << 20
 DAEMON_LOG_BACKUPS = 3
 IDLE_POSTURES = ("rest", "limp", "none")
+RUNNER_STALL_S = 1.0          # the pump stops stamping when the runner has not ticked for this long
+RUNNER_START_GRACE_S = 10.0   # ... or has not ticked at all this long after it started
+PRUNE_EVERY_S = 3600.0
+CONCURRENT_OPS = frozenset({"trick_play"})  # run as session tasks, not in line
+TRICK_POSTURES = ("rest", "sit", "stand")
+# BodyClient methods the generic `call` op refuses: goals and tricks have
+# their own ops (session ownership, the runner check, the daemon loop).
+CALL_REFUSED = frozenset({"posture", "limp", "rest", "stand", "sit", "balance", "set_balance", "release",
+                          "upload_trick", "start_trick", "play", "stop_trick", "spin", "wait_ready"})
+BEHAVIOUR_ACTIVE = ("behaviour runner active; stop it with `kilo daemon stop` (or `systemctl --user stop kilo`) "
+                    "and run `kilo run` without --behaviour, or pass --override (`kilo --override ...`) to "
+                    "pause it while this command holds the body")
+
+
+class BehaviourActive(LinkError):
+    pass
 
 
 class Session:
@@ -114,6 +170,7 @@ class Session:
         self.kinds: set[str] = set()
         self.rate_hz = 0.0
         self.stream_task: asyncio.Task | None = None
+        self.tasks: set[asyncio.Task] = set()  # CONCURRENT_OPS in flight
         self.last_telemetry_sent = -1e9
         self.dropped = 0
         self.closed = False
@@ -128,7 +185,8 @@ class Daemon:
                  link_config: LinkConfig | None = None, idle_posture: str = "rest",
                  idle_limp_s: float = 10.0, hold_lease_s: float = 3.0, behaviour: bool = False,
                  log_dir: Path | None = None, release_lease_s: float = 120.0, workers: int = 8,
-                 wire_logger: Any = None, auto_port: bool = False):
+                 wire_logger: Any = None, auto_port: bool = False, log_cap_bytes: int = LOG_DIR_MAX_BYTES,
+                 keep_logs: Any = ()):
         if idle_posture not in IDLE_POSTURES:
             raise ValueError(f"idle posture must be one of {IDLE_POSTURES}")
         self.port = port
@@ -171,6 +229,19 @@ class Daemon:
         self._behaviour_task: asyncio.Task | None = None
         self._server: asyncio.AbstractServer | None = None
         self._shutting_down = False
+        self._reacquiring = False
+        # behaviour runner liveness and pause (--override)
+        self.runner_stall_s = RUNNER_STALL_S
+        self._behaviour_started_at: float | None = None
+        self._runner_stamping = True
+        self.behaviour_paused = threading.Event()
+        self.pausers: set[int] = set()
+        # the trick being played through trick_play: (session, trick_id)
+        self._trick_playing: tuple[Session, int] | None = None
+        # log directory size cap
+        self.log_cap_bytes = log_cap_bytes
+        self.keep_logs = {Path(p) for p in keep_logs}
+        self._last_prune = -1e9
 
     # ---- lifecycle ----------------------------------------------------------------------
     def run(self, install_signals: bool = True) -> int:
@@ -212,12 +283,13 @@ class Daemon:
                                config=self.link_config, dispatch=self.loop.call_soon_threadsafe,
                                wire_logger=self.wire_logger)
         self.client = BodyClient(self.link)
+        self.client.stamp_liveness = False  # pool threads must not stamp (the pump and the runner do)
         for kind in ("telemetry", "event", "hello", "reboot", "goals_cleared", "connection"):
             self.link.subscribe(kind, self._make_fanout(kind))
         self.link.subscribe("telemetry", self._feed_percepts)
         self.link.subscribe("connection", self._log_connection)
         self.percepts.add_listener(self._percept_events)
-        self.link.mark_alive()
+        self.link.mark_alive("daemon")
         self.link.start()
         self._server = await asyncio.start_unix_server(self._handle_client, path=str(self.socket_path),
                                                        limit=LINE_LIMIT)
@@ -292,11 +364,15 @@ class Daemon:
         args = (self.client, self.client.state, self.behaviour_stop, self.log_dir)
         kwargs: dict[str, Any] = {}
         try:
-            if "percepts" in inspect.signature(run_behaviour).parameters:
+            params = inspect.signature(run_behaviour).parameters
+            if "percepts" in params:
                 kwargs["percepts"] = self.percepts
+            if "paused" in params:
+                kwargs["paused"] = self.behaviour_paused
         except (TypeError, ValueError):
             pass
         self.behaviour_state = "running"
+        self._behaviour_started_at = time.monotonic()
         if inspect.iscoroutinefunction(run_behaviour):
             async def runner() -> None:
                 try:
@@ -340,14 +416,59 @@ class Daemon:
     async def _pump(self) -> None:
         while True:
             try:
-                self.link.mark_alive()
+                self._stamp_liveness()
                 self._check_leases()
-                if self.wire_logger is not None and time.monotonic() - self._last_wire_flush >= WIRE_FLUSH_S:
-                    self._last_wire_flush = time.monotonic()
-                    self.loop.run_in_executor(self.pool, self.wire_logger.flush)
+                now = time.monotonic()
+                if self.wire_logger is not None and now - self._last_wire_flush >= WIRE_FLUSH_S:
+                    self._last_wire_flush = now
+                    self.wire_logger.flush()  # a request to its writer thread: does not block
+                if now - self._last_prune >= PRUNE_EVERY_S:
+                    self._last_prune = now
+                    self.loop.run_in_executor(self.pool, self.prune_logs)
             except Exception:
                 log.exception("pump")
             await asyncio.sleep(PUMP_PERIOD_S)
+
+    def _stamp_liveness(self) -> None:
+        """Stamp the link's liveness for the daemon loop; with a behaviour
+        runner, only while the runner ticks too (it stamps as "mind" on
+        every tick), so a hung runner trips the body's watchdog."""
+        link = self.link
+        if self.behaviour_active and self._behaviour_started_at is not None:
+            last = link.alive_stamps.get("mind")
+            if last is None:
+                ok = time.monotonic() - self._behaviour_started_at < RUNNER_START_GRACE_S
+                idle = time.monotonic() - self._behaviour_started_at
+            else:
+                idle = link.clock() - last
+                ok = idle < self.runner_stall_s
+            if not ok:
+                if self._runner_stamping:
+                    self._runner_stamping = False
+                    log.warning("behaviour runner has not ticked for %.1f s: no longer stamping the link's "
+                                "liveness (the body's watchdog takes over)", idle)
+                return
+            if not self._runner_stamping:
+                self._runner_stamping = True
+                log.warning("behaviour runner ticking again: stamping liveness")
+        link.mark_alive("daemon")
+
+    def prune_logs(self) -> list[Path]:
+        """Keep the log directory under ``log_cap_bytes`` (pool thread)."""
+        keep = set(self.keep_logs)
+        for lg in (self.logger, self.wire_logger):
+            if lg is not None and getattr(lg, "path", None) is not None:
+                keep.add(Path(lg.path))
+        try:
+            gone = prune_logs(self.log_dir, self.log_cap_bytes, keep)
+        except Exception:
+            log.exception("pruning %s", self.log_dir)
+            return []
+        if gone:
+            log.warning("log directory %s over %d MB: deleted %d oldest files (%s)", self.log_dir,
+                        self.log_cap_bytes >> 20, len(gone), ", ".join(p.name for p in gone[:5])
+                        + (" ..." if len(gone) > 5 else ""))
+        return gone
 
     def _check_leases(self) -> None:
         now = time.monotonic()
@@ -359,12 +480,16 @@ class Daemon:
             log.warning("port release lease expired: reacquiring %s", self.port)
             self.loop.create_task(self._reacquire())
         if (self.idle_stage == "rest" and self.idle_posture == "rest" and self.idle_since is not None
-                and now - self.idle_since >= self.idle_limp_s and not self._held()):
+                and now - self.idle_since >= self.idle_limp_s and not self._posture_held()):
             self.idle_stage = "limp"
             self._latch_idle("limp")
 
     def _held(self) -> bool:
         return any(o is not None for o in self.goal_owner.values())
+
+    def _posture_held(self) -> bool:
+        """Somebody owns what the body's posture is: SET_POSTURE or a trick."""
+        return self.goal_owner.get("SET_POSTURE") is not None or self.goal_owner.get("TRICK") is not None
 
     def _latch_idle(self, name: str) -> None:
         try:
@@ -376,12 +501,21 @@ class Daemon:
     def _end_hold(self, s: Session) -> None:
         names = [n for n in s.goals if self.goal_owner.get(n) is s]
         s.goals.clear()
+        self._resume_runner_for(s)
         if not names:
             return
         for n in names:
             self.goal_owner.pop(n, None)
         log.info("client %d: hold ended (%s)", s.id, ", ".join(sorted(names)))
         link = self.link
+        if "TRICK" in names:
+            names.remove("TRICK")
+            playing = self._trick_playing
+            if playing is not None and playing[0] is s and not self._shutting_down and not self.port_released:
+                self.pool.submit(self._stop_trick_quietly)  # its TRICK_DONE ends the trick_play op
+            posture_hold_ended = True
+        else:
+            posture_hold_ended = "SET_POSTURE" in names
         if self._shutting_down:
             return  # go_silent() drops everything next
         if self.behaviour_active or self.port_released:
@@ -399,13 +533,44 @@ class Daemon:
                     link.clear_goal("SET_BALANCE")
         if "SET_POSTURE" in names:
             link.clear_goal("SET_POSTURE")
-            if self.idle_posture != "none" and not self._held():
-                self.idle_since = time.monotonic()
-                self.idle_stage = self.idle_posture
-                self._latch_idle(self.idle_posture)
         for n in names:
             if n not in ("SET_POSTURE", "SET_BALANCE"):
                 link.clear_goal(n)
+        # Whoever else still holds SET_BALANCE (or anything but the posture),
+        # a posture nobody owns any more falls back to the idle timeline:
+        # otherwise the body would keep the last posture forever (the daemon
+        # feeds its watchdog).
+        if posture_hold_ended and self.idle_posture != "none" and not self._posture_held():
+            self.idle_since = time.monotonic()
+            self.idle_stage = self.idle_posture
+            self._latch_idle(self.idle_posture)
+
+    def _stop_trick_quietly(self) -> None:
+        try:
+            self.client.stop_trick()
+        except LinkError as e:
+            log.warning("trick stop: %s", e)
+
+    # ---- the behaviour runner vs CLI holds (--override) ----------------------------------
+    def _check_runner(self, s: Session, override: bool) -> None:
+        """Refuse a client goal while the behaviour runner drives the body,
+        or (``override``) pause the runner until this client's hold ends."""
+        if not self.behaviour_active:
+            return
+        if not override:
+            raise BehaviourActive(BEHAVIOUR_ACTIVE)
+        if s.id not in self.pausers:
+            self.pausers.add(s.id)
+            if not self.behaviour_paused.is_set():
+                log.info("client %d: --override, behaviour runner paused", s.id)
+            self.behaviour_paused.set()
+
+    def _resume_runner_for(self, s: Session) -> None:
+        if s.id in self.pausers:
+            self.pausers.discard(s.id)
+            if not self.pausers:
+                self.behaviour_paused.clear()
+                log.info("client %d: hold ended, behaviour runner resumed", s.id)
 
     def _own(self, s: Session, name: str) -> None:
         prev = self.goal_owner.get(name)
@@ -413,8 +578,9 @@ class Daemon:
             prev.goals.discard(name)
         self.goal_owner[name] = s
         s.goals.add(name)
-        self.idle_since = None
-        self.idle_stage = None
+        if name in ("SET_POSTURE", "TRICK"):  # a balance-only hold leaves the idle timeline running
+            self.idle_since = None
+            self.idle_stage = None
 
     # ---- streams -----------------------------------------------------------------------
     def _make_fanout(self, kind: str) -> Callable[..., None]:
@@ -519,9 +685,13 @@ class Daemon:
         if s.stream_task is not None:
             s.stream_task.cancel()
         self._end_hold(s)
+        for t in list(s.tasks):
+            t.cancel()
         if self.released_by is s and self.port_released:
-            log.warning("client %d released the port and went away: reacquiring", s.id)
-            self.loop.create_task(self._reacquire())
+            left = (self.release_until or time.monotonic()) - time.monotonic()
+            log.warning("client %d released %s and went away: keeping it released for the rest of the "
+                        "lease (%.0f s; avrdude may still be writing), or until `reacquire_port`",
+                        s.id, self.port, max(0.0, left))
         try:
             s.writer.close()
         except Exception:
@@ -554,7 +724,18 @@ class Daemon:
             self._reply(s, {"id": rid, "ok": False, "error": {"type": "ValueError", "message": f"unknown op {op!r}",
                                                                 "args": [f"unknown op {op!r}"]}})
             return
-        s.inflight += 1
+        if op in CONCURRENT_OPS:
+            s.inflight += 1  # counted now: the lease must not lapse before the task starts
+            t = asyncio.ensure_future(self._run_op(s, rid, op, handler, args, counted=True))
+            s.tasks.add(t)
+            t.add_done_callback(s.tasks.discard)
+            return
+        await self._run_op(s, rid, op, handler, args)
+
+    async def _run_op(self, s: Session, rid: Any, op: str, handler: Callable[..., Any], args: dict[str, Any],
+                      counted: bool = False) -> None:
+        if not counted:
+            s.inflight += 1
         try:
             result = await handler(s, **args)
             self._reply(s, {"id": rid, "ok": True, "result": jsonable(result)})
@@ -624,13 +805,15 @@ class Daemon:
         return sorted(n for n in s.goals if n in latched and self.goal_owner.get(n) is s)
 
     async def op_posture(self, s: Session, name: str, transition_ticks: int = 0,
-                         balance: bool | None = None) -> None:
+                         balance: bool | None = None, override: bool = False) -> None:
         self._need_port()
+        self._check_runner(s, override)
         self.client.posture(name, transition_ticks=transition_ticks, balance=balance)
         self._own(s, "SET_POSTURE")
 
-    async def op_set_balance(self, s: Session, enable: bool, **gains: Any) -> dict[str, int]:
+    async def op_set_balance(self, s: Session, enable: bool, override: bool = False, **gains: Any) -> dict[str, int]:
         self._need_port()
+        self._check_runner(s, override)
         f = self.client.set_balance(bool(enable), **gains)
         self._own(s, "SET_BALANCE")
         return f
@@ -687,6 +870,9 @@ class Daemon:
         """Any public BodyClient method with JSON-able arguments (generic proxy)."""
         if method.startswith("_") or not callable(getattr(BodyClient, method, None)):
             raise ValueError(f"no BodyClient method {method!r}")
+        if method in CALL_REFUSED or inspect.iscoroutinefunction(getattr(BodyClient, method)):
+            raise ValueError(f"{method}: not through `call`; use the posture, set_balance, release and "
+                             f"trick_upload/trick_play/trick_stop ops")
         self._need_port()
         return await self._blocking(getattr(self.client, method), *(args or []), **(kwargs or {}))
 
@@ -727,6 +913,8 @@ class Daemon:
             self.goal_owner.pop(n, None)
         for sess in self.sessions.values():
             sess.goals.clear()
+            for t in list(sess.tasks):
+                t.cancel()  # a trick_play waiting on a link about to stop
         for n in list(self.link.goals()):
             self.link.clear_goal(n)
         self.idle_since = self.idle_stage = None
@@ -741,14 +929,123 @@ class Daemon:
         return {"port": self.port, "reacquired": True}
 
     async def _reacquire(self) -> None:
-        if not self.port_released:
+        if not self.port_released or self._reacquiring:
             return
+        self._reacquiring = True
+        try:
+            # avrdude leaves DTR low, HUPCL set and 115200: settle first so the
+            # reopen does not reset the body (Appendix F step 5).
+            await self._blocking(self._settle)
+        finally:
+            self._reacquiring = False
         self.port_released = False
         self.released_by = None
         self.release_until = None
-        self.link.mark_alive()
+        self.link.mark_alive("daemon")
         self.link.start()
         log.info("port %s reacquired", self.port)
+
+    def _settle(self) -> None:
+        if not self.port:
+            return
+        try:
+            cycles = settle_port(self.port, self.baud) or []
+        except Exception as e:  # settle_port records its own errors; anything else must not block the reopen
+            log.warning("settling %s: %s", self.port, e)
+            return
+        errs = [c for c in cycles if getattr(c, "error", None)]
+        if errs:
+            log.warning("settling %s: %d of %d opens failed (%s)", self.port, len(errs), len(cycles), errs[0].error)
+
+    # ---- tricks ------------------------------------------------------------------------
+    @staticmethod
+    def _load_trick(name: str | None, trick: dict[str, Any] | None, repeats: int | None = None) -> Any:
+        from dataclasses import replace
+
+        from kilo.tricks import library
+        from kilo.tricks.model import Trick
+
+        if trick is not None:
+            t = Trick.from_dict(trick)
+        elif name:
+            t = library.load(name)
+        else:
+            raise ValueError("trick: give a library name or a trick")
+        if repeats is not None:
+            if not 0 <= int(repeats) <= 255:
+                raise ValueError("repeats must be 0..255")
+            t = replace(t, repeats=int(repeats))
+        return t
+
+    async def op_trick_upload(self, s: Session, name: str | None = None, trick: dict[str, Any] | None = None,
+                              force: bool = False, override: bool = False) -> dict[str, Any]:
+        """Upload a library trick (``name``) or ``trick`` (Trick.to_dict()); cached."""
+        self._need_port()
+        t = self._load_trick(name, trick)
+        self._check_runner(s, override)
+        tid, uploaded = await self._blocking(self.client.upload_trick, t, force=bool(force))
+        return {"name": t.name, "trick_id": tid, "uploaded": uploaded, "crc16": t.crc16(), "frames": len(t.frames)}
+
+    async def op_trick_play(self, s: Session, name: str | None = None, trick: dict[str, Any] | None = None,
+                            mirror: bool = False, speed: float = 1.0, repeats: int | None = None,
+                            posture: str | None = None, hold_s: float | None = None,
+                            timeout_s: float | None = None, override: bool = False) -> dict[str, Any]:
+        """Play a trick and reply on its TRICK_DONE (see the module docstring)."""
+        from kilo.protocol import kilo_protocol as P
+
+        self._need_port()
+        t = self._load_trick(name, trick, repeats)
+        BodyClient.speed_q6(speed)  # range check before anything moves
+        if posture is not None and posture not in TRICK_POSTURES:
+            raise ValueError(f"posture must be one of {', '.join(TRICK_POSTURES)}")
+        self._check_runner(s, override)
+        playing = self._trick_playing
+        if playing is not None and playing[0] is not s:
+            raise LinkError(f"client {playing[0].id} is playing a trick (`kilo trick stop` first)")
+        if posture:
+            self.client.posture(posture)
+            self._own(s, "SET_POSTURE")
+            await asyncio.sleep(1.0)  # the default posture move is 0.5 s
+        elif self.client.state.mode == "LIMP":
+            raise TrickError("the body is LIMP and a trick cannot start from LIMP; add --posture stand")
+        self._own(s, "TRICK")
+        ticks = BodyClient.expected_ticks(t, speed)
+        if timeout_s is None and ticks is not None:
+            timeout_s = (ticks + 1) * P.TICK_MS / 1000.0 + TRICK_DONE_MARGIN_S
+        tid, n = await self._blocking(self.client.start_trick, t, bool(mirror), float(speed))
+        self._trick_playing = (s, tid)
+        clock = self.link.clock
+        t0 = clock()
+        stopped_by_us = False
+        try:
+            while True:
+                m = self.client.trick_done_since(n, tid)
+                if m is not None:
+                    return {"reason": P.TrickDoneReason((m.arg & 0xFFFF) >> 8).name, "trick_id": tid,
+                            "elapsed_s": clock() - t0, "expected_ticks": ticks, "epoch": m.epoch,
+                            "stopped_by_us": stopped_by_us, "name": t.name}
+                elapsed = clock() - t0
+                if hold_s is not None and not stopped_by_us and elapsed >= hold_s:
+                    stopped_by_us = True
+                    await self._blocking(self._stop_trick_quietly)
+                if timeout_s is not None and elapsed > timeout_s:
+                    await self._blocking(self._stop_trick_quietly)
+                    raise TrickError(f"no TRICK_DONE within {timeout_s:.2f} s")
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            # the session went away (its hold end already sent TRICK_STOP) or
+            # the port is being released
+            if not s.closed and not self.port_released:
+                self.pool.submit(self._stop_trick_quietly)
+            raise
+        finally:
+            if self._trick_playing is not None and self._trick_playing[0] is s:
+                self._trick_playing = None
+
+    async def op_trick_stop(self, s: Session, transition_ticks: int = 0) -> None:
+        """TRICK_STOP (any client; also while the behaviour runner is active)."""
+        self._need_port()
+        await self._blocking(self.client.stop_trick, int(transition_ticks))
 
     async def op_verify_hello(self, s: Session, since: float, wait_s: float = 8.0,
                               expected_build: int | None = None, any_cause: bool = False) -> dict[str, Any]:
@@ -799,28 +1096,50 @@ def run_daemon(args: Any) -> int:
         wire = KilologWriter(Path(kl).expanduser() if kl else log_dir / time.strftime("kilo-%Y%m%d-%H%M%S.kilolog.gz"),
                              meta={"source": "kilo run", "port": choice.port})
         log.info("raw frame log %s", wire.path)
+    keep = [log_dir / "daemon.log"] if daemon_log != "none" and not daemon_log else []
     d = Daemon(choice.port, baud=args.baud, socket=args.socket, logger=logger,
                idle_posture=args.idle_posture, idle_limp_s=args.idle_limp, behaviour=args.behaviour,
-               log_dir=log_dir, wire_logger=wire, auto_port=not explicit)
+               log_dir=log_dir, wire_logger=wire, auto_port=not explicit, keep_logs=keep)
     return d.run()
 
 
 def add_file_log(path: Path) -> logging.Handler | None:
     """Also write the daemon's log to ``path`` (rotating, small): there is
-    always something to read even when the user journal is not."""
-    from logging.handlers import RotatingFileHandler
+    always something to read even when the user journal is not.
+
+    The file is written by a QueueListener thread: the link's reader and
+    writer threads log too, and must never wait for the disk. Returns the
+    QueueHandler on the root logger (its ``listener`` is stopped at exit)."""
+    import atexit
+    import queue
+    from logging.handlers import QueueListener, RotatingFileHandler
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        h = RotatingFileHandler(path, maxBytes=DAEMON_LOG_BYTES, backupCount=DAEMON_LOG_BACKUPS)
+        fh = RotatingFileHandler(path, maxBytes=DAEMON_LOG_BYTES, backupCount=DAEMON_LOG_BACKUPS)
     except OSError as e:
         log.warning("cannot write the daemon log %s: %s", path, e)
         return None
-    h.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    fh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    q: queue.Queue[Any] = queue.Queue(10000)
+    h = _DroppingQueueHandler(q)
     h.setLevel(logging.INFO)
+    h.listener = QueueListener(q, fh, respect_handler_level=False)  # type: ignore[attr-defined]
+    h.listener.start()  # type: ignore[attr-defined]
+    atexit.register(h.listener.stop)  # type: ignore[attr-defined]
     root = logging.getLogger()
     root.addHandler(h)
     if root.level > logging.INFO or root.level == logging.NOTSET:
         root.setLevel(logging.INFO)
     log.info("daemon log %s", path)
     return h
+
+
+class _DroppingQueueHandler(logging.handlers.QueueHandler):
+    """A QueueHandler that drops a record rather than block when its queue is full."""
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except Exception:  # queue.Full: the disk is that slow
+            pass
