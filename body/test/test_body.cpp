@@ -92,7 +92,6 @@ int main() {
 
   // ---- Epoch: stale goals refused, LIMP/REST exempt; bad args.
   CHECK(body_goal_posture(b, (uint8_t)(b.epoch + 1), POSTURE_STAND, 0, 0) == GOAL_STALE);
-  CHECK(body_goal_posture(b, b.epoch, POSTURE_STANCE, 0, 0) == GOAL_BAD_ARG);
   CHECK(body_goal_posture(b, b.epoch, 9, 0, 0) == GOAL_BAD_ARG);
   // Uncalibrated (CONFIG_DEFAULTED) robots may not stand.
   cfg.state = CFG_DEFAULTED;

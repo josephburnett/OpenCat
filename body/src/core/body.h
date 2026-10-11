@@ -14,6 +14,7 @@
 #include "battery.h"
 #include "config.h"
 #include "events.h"
+#include "gait.h"
 #include "keyframe.h"
 #include "notes.h"
 #include "params.h"
@@ -79,6 +80,7 @@ struct Body {
   Balance bal;          // the balance layer: SET_BALANCE settings + controller
   Keyframe kf;          // the trick store and player (TRICK owner)
   Fall fall;            // the fall reflex (core/reflex.h)
+  Gait gait;            // the gait generator, STANCE and the body pose (core/gait.h; P2)
   // IMU health
   uint8_t imu_fault;
   uint8_t imu_stale_run, imu_err_run;
@@ -95,13 +97,32 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]);
 // ---- Integration points for the link layer (protocol round) ----
 // Call on every CRC-valid frame from the Pi: feeds the link watchdog.
 void body_link_frame(Body& b);
-// SET_POSTURE goal.
+// SET_POSTURE goal. Any posture but STANCE also stops the gait (LIMP at
+// once, the others with the usual ramp; IDLE moves meanwhile, and the legs
+// crossfade to it when the gait hands them back).
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags);
 // SET_HEAD goal (payload: epoch, mode, pan, tilt, tail, max_speed_dps; doc
 // §3c layer 1). mode 0 releases (never stale); mode 1 holds: STALE, FALLEN,
 // LOW_BATT; BAD_ARG for mode > 1. The safety stage clamps the targets;
 // -32768 leaves that joint to its owner.
 GoalResult body_goal_head(Body& b, const uint8_t* p);
+// SET_GAIT goal (payload: epoch, run, pattern, period_ms, duty, stride_mm,
+// turn_mm, step_h_mm, body_h_mm, flags; doc §3d). BAD_ARG for a field out
+// of the spec's range (0 = the pattern's default for period, duty, step and
+// body height; unknown flags). run 0 stops the gait (ramp, then STANCE,
+// EVENT GAIT_STOPPED) and is never stale. run 1: STALE, FALLEN, LOW_BATT,
+// UNCALIBRATED (as STAND); then latched: IDLE moves to STANCE first if it is
+// elsewhere, and the gait starts once STANCE has settled and no trick or
+// reflex holds the legs (and restarts after one, while the goal stands).
+// Re-sending the running goal only updates its parameters (slewed); a new
+// pattern is a stop then a start.
+GoalResult body_goal_gait(Body& b, const uint8_t* p);
+// SET_BODY_POSE goal (payload: epoch, pitch, roll (a16), dheight_mm,
+// xshift_mm): STALE, FALLEN, LOW_BATT. Applies to the gait and to IDLE
+// STANCE (slewed; pitch and roll clamped to +-30 deg); zeroed by an epoch bump.
+GoalResult body_goal_pose(Body& b, const uint8_t* p);
+// The gait owns the legs (running or stopping): TELEMETRY flags GAIT.
+inline bool body_gait_running(const Body& b) { return b.gait.state != GS_OFF; }
 // The fall reflex holds the joints (FALLEN, RECOVERING or FAILED).
 inline bool body_fallen(const Body& b) { return b.fall.state != FS_UPRIGHT; }
 // SET_BALANCE goal: enable, Kp (Q8), Kd (ms), dead band and clamp (deg).
@@ -128,8 +149,8 @@ void body_trick_end(Body& b, uint8_t reason, uint8_t ticks);
 inline bool body_fall_suppressed(const Body& b) { return kf_fall_ok(b.kf); }
 // IMU re-initialised (hal finished a runtime DMP upload while LIMP).
 void body_imu_recovered(Body& b);
-// TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 4 TRICK, 5 FALLEN, 6 RECOVERING,
-// 7 LOW_BATT, 9 LINK_LOST.
+// TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 3 GAIT (running, stopping, or
+// waiting to start), 4 TRICK, 5 FALLEN, 6 RECOVERING, 7 LOW_BATT, 9 LINK_LOST.
 uint8_t body_mode(const Body& b);
 
 // A new goal epoch (doc §3c): clears the latched motion goals and ends a

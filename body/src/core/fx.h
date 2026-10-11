@@ -35,4 +35,16 @@ uint16_t fx_isqrt32(uint32_t n);
 // (u16 so the keyframe player can ease speed-scaled segments.)
 uint16_t fx_ease_cos(uint16_t i, uint16_t n);
 
+// Host-only operation counters (test_gait.cpp's per-tick cost estimate,
+// doc §3a). Nothing on the AVR.
+#ifndef __AVR__
+struct FxOps {
+  uint32_t sin, atan2, isqrt;
+};
+extern FxOps g_fx_ops;
+#define FX_OP(f) (g_fx_ops.f++)
+#else
+#define FX_OP(f) ((void)0)
+#endif
+
 #endif

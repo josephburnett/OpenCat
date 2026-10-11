@@ -30,6 +30,10 @@ static_assert(SAME(GOAL_BAD_ARG, KILO_GOAL_REFUSED_REASON_BAD_ARG) && SAME(GOAL_
                   SAME(GOAL_UNCALIBRATED, KILO_GOAL_REFUSED_REASON_UNCALIBRATED) &&
                   SAME(KILO_GOAL_REFUSED_REASON_UNCALIBRATED, KILO_ACK_STATUS_UNCALIBRATED),
               "GoalResult != GOAL_REFUSED reasons");
+static_assert(SAME(GS_OFF, 0) && SAME(KILO_GAIT_PATTERN_WALK, 0) && SAME(KILO_GAIT_PATTERN_TROT, 1) &&
+                  SAME(KILO_GAIT_PATTERN_CRAWL, 2) && SAME(KILO_GAIT_FLAGS_BOB, 1) && SAME(KILO_GAIT_FLAGS_WAG, 2) &&
+                  SAME(KILO_GAIT_FLAGS_BALANCE, 4) && SAME(KILO_SET_GAIT_LEN, 11) && SAME(KILO_SET_BODY_POSE_LEN, 7),
+              "core/gait.cpp's pattern rows, flag bits and payload offsets != spec");
 static_assert(SAME(POSTURE_LIMP, KILO_POSTURE_LIMP) && SAME(POSTURE_REST, KILO_POSTURE_REST) &&
                   SAME(POSTURE_SIT, KILO_POSTURE_SIT) && SAME(POSTURE_STAND, KILO_POSTURE_STAND) &&
                   SAME(POSTURE_STANCE, KILO_POSTURE_STANCE) && SAME(POSTURE_CALIB, KILO_POSTURE_CALIB) &&
@@ -163,6 +167,16 @@ static void goal(uint8_t t, const uint8_t* p) {
       if (r != GOAL_OK) refuse(t, r);
       return;
     }
+    case KILO_MSG_SET_GAIT: {
+      uint8_t r = body_goal_gait(*B, p);
+      if (r != GOAL_OK) refuse(t, r);
+      return;
+    }
+    case KILO_MSG_SET_BODY_POSE: {
+      uint8_t r = body_goal_pose(*B, p);
+      if (r != GOAL_OK) refuse(t, r);
+      return;
+    }
     case KILO_MSG_SET_BALANCE: {
       uint8_t r = body_goal_balance(*B, p);
       if (r != GOAL_OK) refuse(t, r);
@@ -173,7 +187,7 @@ static void goal(uint8_t t, const uint8_t* p) {
       for (uint8_t i = 0; i < p[0]; i++) notes_push(B->notes, (int8_t)p[1 + 2 * i], p[2 + 2 * i]);
       return;
     default:
-      // SET_GAIT, SET_BODY_POSE (P2), SET_EYES.
+      // SET_EYES.
       refuse(t, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE);
   }
 }
@@ -417,11 +431,12 @@ static void telemetry(const Body& b) {
   if (config_busy(*b.cfg)) fl |= KILO_TELEMETRY_FLAGS_EEPROM_PENDING;
   if (s.dist_fresh) fl |= KILO_TELEMETRY_FLAGS_DIST_FRESH;
   if (b.kf.run) fl |= KILO_TELEMETRY_FLAGS_TRICK;
+  if (body_gait_running(b)) fl |= KILO_TELEMETRY_FLAGS_GAIT;
   if (arbiter_head_held(b.arb)) fl |= KILO_TELEMETRY_FLAGS_HEAD_HELD;
   m.flags = fl;
   m.last_rx_seq = L.last_rx_seq;
   m.trick_frame = kf_frame(b.kf);
-  m.gait_phase = 0;
+  m.gait_phase = body_gait_running(b) ? (uint8_t)(b.gait.phi >> 8) : 0;
   m.tick_load = s.tick_load;
   m.rx_err = (uint8_t)(L.cnt.rx_crc_err + L.cnt.rx_overflow);
   m.epoch = b.epoch;
