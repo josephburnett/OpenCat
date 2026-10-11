@@ -1,0 +1,75 @@
+# Kilo's personality: drive dynamics, behaviour weights, selector tuning.
+# Loaded by kilo.behaviour.personality.load(); every key is optional (the
+# defaults are in personality.py and equal these values) and unknown keys are
+# errors. Rates are per second; drives live in [0, 1].
+name: kilo
+
+drives:
+  initial: {energy: 0.8, curiosity: 0.2, sociability: 0.3, arousal: 0.0}
+  energy:
+    drain_active: 0.004      # per s while moving / exploring / greeting
+    drain_idle: 0.0008       # per s while awake but still
+    recover_rest: 0.004      # per s while napping or resting
+    battery_full_pct: 60     # at or above this, the battery does not cap energy
+    battery_empty_pct: 10    # at or below this, energy is capped at 0
+  curiosity:
+    growth: 0.003            # per s while not exploring
+    satisfy: 0.02            # per s while exploring
+  sociability:
+    growth: 0.002            # per s while alone
+    satisfy: 0.05            # per s while a face is seen or Kilo is petted
+  arousal:
+    startle: 0.9             # level a startle spikes to
+    approach: 0.6            # level a fast approach spikes to
+    half_life_s: 3.0         # exponential decay
+  noise: 0.0                 # per-tick gaussian jitter on drives (sigma)
+
+# Utility of each top-level behaviour: sum of weight x term. Terms:
+# base (1), energy, fatigue (1 - energy), curiosity, sociability, arousal,
+# calm (1 - arousal), face, pet, near, approaching, alone (percepts, 0/1),
+# and products of them written "a*b" (e.g. sociability*face: lonely AND a face).
+weights:
+  idle:    {base: 0.35}
+  explore: {curiosity: 1.0, energy: 0.2, fatigue: -0.4}
+  nap:     {fatigue: 1.0, calm: 0.1, base: -0.2}
+  greet:   {face: 0.5, sociability*face: 0.6, pet: 0.5}
+  startle: {arousal: 1.2, base: -0.3}
+
+selector:
+  noise: 0.04          # amplitude of a per-behaviour uniform offset ...
+  noise_period_s: 8.0  # ... redrawn this often (keep noise < margin / 2)
+  margin: 0.1          # a challenger must beat the current score by this
+  min_dwell_s: 6.0     # minimum time in a behaviour before a non-urgent switch
+  urgent: [startle, greet]  # may preempt before min_dwell (still need the margin)
+
+safety:
+  low_battery_pct: 20       # below: rest (balance off) until it recovers
+  critical_battery_pct: 8   # below: wind down and shut the Pi down
+  wind_down_s: 5.0          # rest this long before asking for poweroff
+  fallen_settle_s: 2.0      # after a fall clears, wait this long before standing
+
+percepts:
+  near_mm: 250              # ultrasonic: something is near
+  approach_mm_s: 400        # ultrasonic: fast approach = startle
+
+behaviours:
+  idle:
+    posture: sit
+    look_every_s: 6.0
+    look_chance: 0.5
+    look_pan_deg: 30
+    look_tilt_deg: 15
+  explore:
+    posture: stand
+    look_every_s: 1.5
+    looks: 12
+    look_pan_deg: 60
+    look_tilt_deg: 25
+  nap:
+    posture: rest
+    min_s: 40.0              # once asleep, stay at least this long (a longer dwell)
+  greet:
+    trick: hi
+    cooldown_s: 30.0
+  startle:
+    hold_s: 2.0
