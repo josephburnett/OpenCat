@@ -11,6 +11,9 @@ dependencies = ["pyserial>=3.5"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+# PyYAML for personality.yaml (apt python3-yaml on Raspbian); without it a
+# built-in parser reads the subset the file uses.
+behaviour = ["PyYAML>=5"]
 
 [project.scripts]
 kilo = "kilo.cli:main"
@@ -20,6 +23,7 @@ include = ["kilo*"]
 
 [tool.setuptools.package-data]
 "kilo.tricks" = ["library/*.json"]
+"kilo.behaviour" = ["personality.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

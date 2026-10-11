@@ -291,6 +291,112 @@ return the raw arrays (`LegacySkill`), which `legacy.to_trick()` maps:
   `rest`) by leg angles; posture tricks their own if they are one, else STAND.
   `FALL_OK` is set when the expected tilt exceeds 45° (none of the list).
 
+## Behaviour
+
+`kilo/behaviour/` is the P3 mind (§5): a small behaviour-tree engine under a
+utility selector driven by four drives, tuned by an editable personality file.
+It is ticked at 10 Hz by an asyncio runner that writes a JSONL behaviour log.
+
+**Engine** (`tree.py`). Nodes return RUNNING, SUCCESS or FAILURE from
+`tick(ctx)` and are `halt()`ed (resetting them, cancelling a coroutine) when a
+parent abandons them. `Sequence` keeps its place (`memory=False` makes it
+reactive, re-checking leading conditions as guards); `Selector` is
+memory-less, re-checking from the first child every tick, so a higher branch
+preempts and halts a lower running one; `Parallel` has policies `all` and
+`any`. Decorators: `Cooldown(s)`, `Timeout(s)`, `Chance(p)` (rolled once per
+run on the seeded RNG), `Inverter`, `Repeat(n|forever)`, `ForceSuccess`.
+Leaves: `Action` (a function returning a status/bool/None, or a coroutine,
+which runs as a task and keeps the node RUNNING until done), `Condition`,
+`Wait(s)`. The `Context` carries the injectable clock, the body, the latest
+`BodyState.snapshot()`, percepts, drives, the RNG and scratch data, and
+records each tick's active path (node names down to the running leaf).
+
+**Drives** (`drives.py`), all in [0, 1]: *energy* drains while active (slowly
+while still) and recovers while napping, capped by the battery (no cap above
+`battery_full_pct`, zero at `battery_empty_pct`); *curiosity* grows unless
+exploring; *sociability* grows while alone and drops while a face is seen or
+Kilo is petted; *arousal* spikes on a startle (a fall, a fast approach) and
+halves every `half_life_s`.
+
+**Selector** (`selector.py`). Safety branches first, in order: *fallen* (wait
+for the body's own recovery, then `fallen_settle_s`), *wind_down* (critical
+battery, a CRITICAL `LOW_BATTERY` event or a shutdown request: sad beep, rest,
+wait `wind_down_s`, then ask for poweroff; latched), *low_battery* (balance
+off, rest, until the battery is 5 % above the threshold). Otherwise each
+behaviour scores `sum(weight × term) + noise`, where terms are the drives,
+`fatigue` (1 − energy), `calm` (1 − arousal), percepts as 0/1 (`face`, `pet`,
+`near`, `approaching`, `alone`), `base` (1) and products such as
+`sociability*face`; the noise is a per-behaviour uniform offset redrawn every
+`noise_period_s`. Hysteresis: a challenger must beat the running behaviour by
+`margin`, after `min_dwell_s` (nap: `min_s`); `urgent` behaviours skip the
+dwell; when a behaviour finishes, the best is taken freely; if the choice
+FAILs (greet on cooldown), the current one and then the rest are tried in the
+same tick.
+
+**Behaviours** (`library.py`): *idle* (sit; every few seconds maybe glance
+around), *explore* (a stub until gaits exist: stand and look around N times),
+*nap* (balance off, rest, head down), *greet* (when a face or petting is
+present: stand, look at it, `play("hi")`; cooldown), *startle* (stand with
+balance, look toward the stimulus, hold). They call a duck-typed body:
+`posture(name, balance=None)`, `set_balance(enable)`, `look(pan, tilt)`,
+`play(trick, mirror=False)` (awaitable) and `beep(notes)`. `BodyAdapter`
+(`adapter.py`) maps these onto `BodyClient`; head, tricks and the buzzer are
+not in the body yet, so it stubs them (counted in `adapter.unsupported`).
+Postures are sent on change only and re-asserted after an epoch change.
+
+**Personality** (`personality.yaml`, loaded by `personality.load(path)`):
+
+| Section | Keys |
+|---|---|
+| `drives` | `initial.{energy,curiosity,sociability,arousal}`; `energy.{drain_active,drain_idle,recover_rest,battery_full_pct,battery_empty_pct}`; `curiosity.{growth,satisfy}`; `sociability.{growth,satisfy}`; `arousal.{startle,approach,half_life_s}`; `noise` |
+| `weights` | per behaviour (`idle`, `explore`, `nap`, `greet`, `startle`): `term: weight` |
+| `selector` | `noise`, `noise_period_s`, `margin`, `min_dwell_s`, `urgent` |
+| `safety` | `low_battery_pct`, `critical_battery_pct`, `wind_down_s`, `fallen_settle_s` |
+| `percepts` | `near_mm`, `approach_mm_s` (ultrasonic) |
+| `behaviours` | `idle.{posture,look_every_s,look_chance,look_pan_deg,look_tilt_deg}`, `explore.{posture,look_every_s,looks,look_pan_deg,look_tilt_deg}`, `nap.{posture,min_s}`, `greet.{trick,cooldown_s}`, `startle.hold_s` |
+
+Every key is optional (defaults in `personality.py`, equal to the packaged
+file); a behaviour's `weights` replace the default ones as a whole. Unknown
+keys, unknown terms, wrong types and out-of-range values are errors naming the
+key. PyYAML is optional (`pip install -e '.[behaviour]'` or apt
+`python3-yaml`); without it a built-in parser reads the subset the file uses
+(block mappings, `- ` lists, one-line `{}`/`[]`, comments, scalars).
+
+**Running it.**
+
+```sh
+python3 -m kilo.behaviour --vbody --seconds 120 -v       # in-process virtual body
+kilo vbody &                                              # or on a pty ...
+python3 -m kilo.behaviour --port /dev/pts/5 --personality my.yaml --seed 7
+```
+
+Ctrl-C stops; SIGTERM asks for the wind-down. `--poweroff-cmd 'sudo systemctl
+poweroff'` is run when the wind-down completes (nothing is powered off
+otherwise). In code: `Runner(body, cfg, percepts=fn, clock=..., sleep=...,
+seed=..., log_path=...)` then `await runner.run(duration)`; `stop()` and
+`request_shutdown()` end it. `percepts()` returns a dict (`face`, `face_pan`,
+`pet`, `startle`, `stimulus_pan`, `shutdown`, `battery_critical`); `near` and
+`approaching` come from the snapshot's ultrasonic fields.
+
+**Behaviour log**: `~/kilo-logs/behaviour-YYYYmmdd-HHMMSS.jsonl` by default,
+written by `kilo.log.JsonlLogger` (queue + writer thread, never blocking the
+loop). A `start` record (`seed`, `hz`, `personality`), then `behaviour`
+records whenever the choice or the active path changes and at least once a
+second:
+
+```json
+{"t": 1234.5, "wall": 1791692517.47, "kind": "behaviour", "tick": 101,
+ "chosen": "idle", "reason": "best", "status": "running",
+ "path": ["root", "idle", "idle_seq", "Forever", "idle_beat", "Wait(6s)"],
+ "drives": {"energy": 0.79, "curiosity": 0.23, "sociability": 0.32, "arousal": 0.0},
+ "scores": {"idle": 0.32, "explore": 0.31, "nap": 0.12, "greet": 0.0, "startle": -0.3},
+ "percepts": {"face": true}, "mode": "IDLE", "battery_pct": 85.0}
+```
+
+`reason` is `free`, `best`, `margin`, `dwell`, `switch`, `urgent`,
+`fallback(<failed choice>)` or `safety`; `errors` lists actions that raised.
+`poweroff` and `stop` records close the file.
+
 ## Tests
 
 ```sh
@@ -306,7 +412,10 @@ de-dup, reconnect, reboot detection. `test_vbody.py` runs link + client
 against the virtual body (every client command) and checks the vbody's
 dispatch contract case by case. `test_e2e_cli.py` runs the `kilo` CLI as a
 subprocess (`status`, `posture stand`, `param list`, `cal show`) against the
-virtual body on a pty. The suite takes about 20 s.
+virtual body on a pty. `test_behaviour.py` covers the behaviour engine,
+drives, selector hysteresis, personality loading, a simulated seven-minute
+day with a fake body and a fast clock, and the runner against the virtual
+body. The suite takes about 20 s.
 
 ## Layout
 
@@ -322,6 +431,7 @@ kilo/body/state.py          BodyState
 kilo/body/client.py         BodyClient: postures, calibration, params, stats
 kilo/log.py                 JSON-lines logger thread
 kilo/tricks/                trick model, legacy importer, library/*.json (generated)
+kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner
 kilo/cli.py                 the `kilo` command
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
 kilo/vbody/                 virtual body
