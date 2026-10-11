@@ -611,8 +611,7 @@ class BodyClient:
                 self._trick_done.append((self.link.clock(), msg))
         elif msg.code == consts.EV["GAIT_STOPPED"]:
             with self._trick_lock:
-                self._gait_stopped.append((self.link.clock(), msg))
-                del self._gait_stopped[:-64]
+                self._gait_stopped.append((self.link.clock(), msg))  # indexed by count: never trimmed
             # The stop goal (run=0) has done its job: stop refreshing it. A
             # walk latched meanwhile (run=1) stays.
             self.link.clear_goal("SET_GAIT", only_if=lambda g: not g.fields.get("run"))
