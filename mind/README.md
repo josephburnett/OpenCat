@@ -291,6 +291,77 @@ return the raw arrays (`LegacySkill`), which `legacy.to_trick()` maps:
   `rest`) by leg angles; posture tricks their own if they are one, else STAND.
   `FALL_OK` is set when the expected tilt exceeds 45° (none of the list).
 
+## Perception
+
+`kilo/perception/` turns TELEMETRY into percepts for the behaviour layer
+(§5 "Perception"). Pure Python, no threads; numpy is optional (the 10 s
+ring buffer uses it when `python3-numpy` is installed, `array` otherwise).
+
+```python
+from kilo.perception import Percepts
+pc = Percepts()
+p = pc.update(link.state)        # a BodyState, a snapshot() dict, a TELEMETRY message...
+p["near"], p["approaching"], p["approach_mm_s"], p["tilted"], p["picked_up"], p["tap"], p["pet"]
+for e in p["events"]: ...        # PerceptEvent(t, name, data) produced by this update
+pc.notify_self_motion(seconds=1.0)  # when the mind starts a posture move
+```
+
+Attitude convention as measured on Kilo: nose **down** = +pitch, **right**
+side up = +roll, degrees (the spec.toml field comments say the opposite).
+
+- **Ultrasonic** (`ultrasonic.py`, fed once per `DIST_FRESH` range, 12.5 Hz):
+  median of the last 3 echoes (≤ 0.5 s old), range rate by least squares over
+  0.8 s (a jump > 200 mm restarts the window, so a walk-by is not an
+  approach). `near` < 150 mm (left > 200), `clear` > 400 mm (left < 350) or no
+  echo for 1 s, each confirmed by 2 samples; `approaching` when the range
+  closes faster than 100 mm/s for 3 samples within 2 m (released above
+  −40 mm/s), cooldown 2 s. Single dropouts and spikes change nothing.
+- **IMU** (`imu.py`): `tilted`/`level` (> 25° from the posture's reference
+  for 0.5 s, released < 18°; the reference is set by the caller or learned
+  once calm after a mode change), `picked_up`/`put_down` (≥ 12° of attitude
+  excursion within 1 s for 0.5 s, 6° with servos off, while the body is not
+  moving itself), `tap` (1.5°+ impulse on a still body, rising within
+  0.12 s, gone within 0.35 s), `pet` (gentle 1.5-10° rocking, ≥ 4 half
+  cycles of 0.2-1.5 s in 4 s, never faster than 30°/s), `startle` (≥ 10°
+  within 0.2 s, or a gyro rate ≥ 250°/s). Each has a cooldown. During GAIT,
+  TRICK, RECOVERING and for 1 s after a mode change only `tilted` runs.
+  Tap/pet/startle need ≥ 10 Hz telemetry, pickup ≥ 5 Hz.
+- **Limits.** Telemetry has attitude and gyro but no accelerometer, so a
+  straight lift or being held still in the air is invisible; pickup is an
+  attitude-motion heuristic. Raw accelerations (or at least |a| − 1 g), a
+  per-tick max gyro rate since the last telemetry, and the posture id would
+  make pickup, tap and the reference much better.
+
+All thresholds are fields of `UltrasonicConfig` and `ImuConfig`.
+
+## Logs
+
+`kilo --log` (or `--log-file F`) writes JSON lines (`kilo/log.py`): `rx`/`tx`
+records with the frame type, seq, payload hex and decoded `fields`, plus
+`event`, `link`, `goal`, `cmd`, `rx_error`. `kilo/logs/` reads those, the
+1 Hz JSON lines that `kilo monitor` prints when stdout is not a terminal, and
+the raw `.kilolog` format below:
+
+```sh
+python -m kilo.logs summary ~/kilo-logs/kilo-20261010-213000.jsonl [--json]
+python -m kilo.logs replay FILE [--json] [--with-body-events]   # percept events the log would produce
+python -m kilo.logs plot FILE --fields pitch,roll,dist,batt [--out x.png|x.csv] [--csv]
+```
+
+`summary` gives duration, telemetry rate, tick gaps, pitch/roll/gyro stats,
+battery, distance echo rate, the mode timeline and the body's events.
+`plot` writes a PNG with matplotlib (`sudo apt install python3-matplotlib`)
+and a CSV otherwise. Field names: `pitch roll rate_pitch rate_roll rate_yaw
+dist batt load mode balance tick epoch rx_err`. There is no `corr`:
+balance corrections are not in TELEMETRY.
+
+**`.kilolog`** (`kilo/logs/kilolog.py`): `b"KILOLOG\n"`, a u16-length JSON
+header (version, proto, start times, tick_hz), then per frame
+`u8 dir | u32 t_ms | u8 n | n bytes` of the wire frame as sent (COBS +
+0x00). ≈3.5 MB/h of 25 Hz telemetry, ≈1 MB/h as `.kilolog.gz` (read and
+written transparently). `KilologWriter.write_wire()` is ready for the link
+to call; nothing writes it yet.
+
 ## Tests
 
 ```sh
@@ -306,7 +377,10 @@ de-dup, reconnect, reboot detection. `test_vbody.py` runs link + client
 against the virtual body (every client command) and checks the vbody's
 dispatch contract case by case. `test_e2e_cli.py` runs the `kilo` CLI as a
 subprocess (`status`, `posture stand`, `param list`, `cal show`) against the
-virtual body on a pty. The suite takes about 20 s.
+virtual body on a pty. `test_perception.py` and `test_logs.py` drive the
+detectors with synthetic traces (approach, walk-by, dropouts, tilt, tap,
+pet, pickup, quiet noise) and replay fixture logs (`tests/fixtures/`).
+The suite takes about 20-40 s.
 
 ## Layout
 
@@ -321,6 +395,8 @@ kilo/link/serial_link.py    SerialLink: reader/writer threads, goals, commands
 kilo/body/state.py          BodyState
 kilo/body/client.py         BodyClient: postures, calibration, params, stats
 kilo/log.py                 JSON-lines logger thread
+kilo/perception/            ultrasonic + IMU detectors, Percepts aggregator, ring buffer
+kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (python -m kilo.logs)
 kilo/tricks/                trick model, legacy importer, library/*.json (generated)
 kilo/cli.py                 the `kilo` command
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
