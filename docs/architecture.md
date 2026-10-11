@@ -1766,3 +1766,11 @@ opens the port directly if the daemon is not running.
 | H13 | Board tilted 0 → 10° pitch and roll | Body within 3° of level after 1 s |
 | H14 | Walk 2 m (P2) | Drift < 20 cm **(target)**; 360° turn in place < 20 s; 30 s trot without a fall |
 | H15 | `kilo flash --legacy` | Old `kup`, `kwkF` work with the old calibration |
+
+Results so far (docs/p0-hardware-test-results.md):
+- 2026-10-10, from the Pi over the CH343 adapter: **H1 passed** (3 flashes,
+  HELLO FLASHED with the build hash), **H2 passed** for the import side
+  (`cal show` = legacy CALIB; STAND counts recorded, no legacy read-back to
+  compare against yet), **H5 passed** with a held posture and the passive
+  watch (stop 0.5 s, REST 1.5 s, LIMP 12.5 s), **H15 passed** (`kup`,
+  `krest`). H2's legacy count comparison and H6 are still open.
