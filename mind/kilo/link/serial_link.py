@@ -50,8 +50,8 @@ Goals and the epoch rule (§3c, §4, §5):
 - EVENT GOAL_REFUSED with reason STALE drops the refused goal and logs it.
 - Contact (a body that may just have rebooted): after every (re)connect, and
   after the body was lost (no TELEMETRY for 300 ms), no motion goal
-  (SET_POSTURE other than REST/LIMP, a SET_BALANCE enable, the other epoch
-  goals) is sent or refreshed, and TRICK_PLAY is refused, until the body has
+  (SET_POSTURE other than REST/LIMP, a SET_BALANCE enable, SET_GAIT other
+  than a stop, the other epoch goals) is sent or refreshed, and TRICK_PLAY is refused, until the body has
   been heard on this connection: a HELLO that proves a reboot (motion goals
   are cleared first, under the same lock the writer packs goals under), or a
   TELEMETRY (its tick is checked for a restart first). After a reconnect or a
@@ -369,10 +369,16 @@ class SerialLink:
         self._log("goal", action="set", name=name, fields=fields, epoch=epoch)
         return g
 
-    def clear_goal(self, name: str) -> None:
+    def clear_goal(self, name: str, only_if: Callable[[Goal], bool] | None = None) -> bool:
+        """Drop a latched goal (with ``only_if``: only when it says so,
+        checked under the lock). Returns whether one was dropped."""
         with self._lock:
+            g = self._goals.get(name)
+            if only_if is not None and (g is None or not only_if(g)):
+                return False
             self._goals.pop(name, None)
         self._log("goal", action="clear", name=name)
+        return g is not None
 
     def goals(self) -> dict[str, Goal]:
         with self._lock:
@@ -885,11 +891,14 @@ _SAFE_POSTURES = frozenset({consts.POSTURES["rest"], consts.POSTURES["limp"]})
 
 def _is_motion(g: Goal) -> bool:
     """A goal that moves the body: SET_POSTURE but REST/LIMP, a SET_BALANCE
-    enable, any other epoch goal. Held back while out of contact."""
+    enable, SET_GAIT with run=1, any other epoch goal. Held back while out of
+    contact (a gait stop, run=0, is not: stopping is always safe to send)."""
     if g.name == "SET_POSTURE":
         return g.fields.get("posture") not in _SAFE_POSTURES
     if g.name == "SET_BALANCE":
         return bool(g.fields.get("enable"))
+    if g.name == "SET_GAIT":
+        return bool(g.fields.get("run"))
     return g.name in consts.MOTION_GOALS
 
 

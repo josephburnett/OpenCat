@@ -1341,7 +1341,7 @@ active goals at 5 Hz, each stamped with the epoch that was current when it
 was set (never re-stamped).
 Behaviours call methods like:
 
-- `body.walk(stride=30, turn=0, pattern=TROT)`
+- `body.walk(stride_mm=30, turn_mm=0, pattern="trot")`, `body.stop_walk()`
 - `body.look(20, -10)`
 - `await body.play("hi", mirror=True)`, which resolves on `TRICK_DONE`
 - `body.beep([...])`
@@ -1479,9 +1479,16 @@ are in Appendix F.
 **Mind integration backlog (BodyClient).** What the behaviour layer needs from
 `BodyClient` that it works around today (2026-10-10):
 
-- `look(pan, tilt)`, `beep(notes)` and gait `walk(...)` methods, once the body
-  implements SET_HEAD, BEEP-from-the-mind and SET_GAIT; `BodyAdapter` already
-  calls them when present and counts them in `unsupported` otherwise.
+- `beep(notes)`, once the body implements BEEP-from-the-mind; `BodyAdapter`
+  calls it when present and counts it in `unsupported` otherwise. Done:
+  `look(pan, tilt)` (P1) and, in P2, `walk(stride_mm, turn_mm, pattern, ...)`
+  / `stop_walk()` / `wait_gait_stopped()` / `walk_until_stopped()` and
+  `pose(...)` / `release_pose()` (SET_GAIT and SET_BODY_POSE as epoch motion
+  goals; the §3d per-pattern defaults; a stop, run=0, is never held back
+  before contact and is cleared by EVENT GAIT_STOPPED; `walk()` drops the
+  posture goal like `play()`). `BodyAdapter.walk/stop_walk` map to them, but
+  no behaviour walks yet: the owner decides when autonomous walking is
+  allowed (explore stays the stand-and-look-around stub).
 - An event callback for epoch change, FELL, WATCHDOG and LOW_BATTERY (and
   connection changes). Done for now on the runner side without touching
   `BodyClient`: `kilo.behaviour.body_events.BodyEvents` diffs successive
@@ -2218,7 +2225,8 @@ opens the port directly if the daemon is not running. As built
 | `kilo status`, `kilo monitor` | HELLO, stats; live curses telemetry |
 | `kilo posture rest\|sit\|stand\|limp\|balance` | Postures (`balance` = STAND + flag) |
 | `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
-| `kilo walk --pattern trot --stride 30 --turn 0 --period 500 [--keys]`, `kilo stop` | Gait |
+| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern trot\|walk\|crawl] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--for S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
+| `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]`, `kilo posture stance` | Body pose over STANCE and the gait (P2, `SET_BODY_POSE`); the IK standing posture |
 | `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit), eyes, sound |
 | `kilo trick list\|show NAME\|upload NAME\|play NAME [--mirror] [--speed 1.5] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); `import-legacy FILE` and `edit NAME` (jogs joints live and captures frames) later |
 | `kilo cal`, `kilo cal imu` | Joint calibration; IMU offset iteration on the Pi from IMU_RAW (keeps `CalibrateAccel/Gyro`, ≈1 KB, off the body) |

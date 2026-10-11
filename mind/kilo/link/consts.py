@@ -6,7 +6,11 @@ Nothing here is transcribed by hand: change spec.toml, regenerate, re-vendor.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
+import functools
+import inspect
+import re
 
 from kilo.protocol import kilo_protocol as P
 
@@ -63,3 +67,28 @@ REBOOT_MAGIC = P.REBOOT_MAGIC
 CAL_JOINTS = P.CHANNEL_COUNT
 PARAMS = P.PARAMS
 PARAMS_BY_NAME = P.PARAMS_BY_NAME
+GAIT_PATTERNS: dict[str, int] = {p.name.lower(): int(p) for p in P.GaitPattern}
+
+
+# --- field ranges ------------------------------------------------------------------
+# spec.toml's `range = [lo, hi]` reaches the generated dataclasses only as the
+# field comment "range lo..hi" (protocol/gen.py); read it from there so no range
+# is transcribed by hand. Fields without one get their wire type's range.
+_RANGE_RE = re.compile(r"^\s+(\w+): \w+ = [^#\n]*#[^\n]*?\brange (-?\d+)\.\.(-?\d+)", re.M)
+_TYPE_RANGES = {"B": (0, 0xFF), "b": (-0x80, 0x7F), "H": (0, 0xFFFF), "h": (-0x8000, 0x7FFF),
+                "I": (0, 0xFFFFFFFF), "i": (-0x80000000, 0x7FFFFFFF)}
+
+
+@functools.lru_cache(maxsize=None)
+def field_ranges(name: str) -> dict[str, tuple[int, int]]:
+    """{field: (lo, hi)} accepted on the wire for message ``name``: the spec
+    range where there is one, else the field type's range (fixed layouts)."""
+    cls = _CLS[name]
+    names = [f.name for f in dataclasses.fields(cls)]
+    fmt = cls._FMT.format.lstrip("<")
+    out: dict[str, tuple[int, int]] = {}
+    if len(fmt) == len(names) and all(c in _TYPE_RANGES for c in fmt):
+        out = {n: _TYPE_RANGES[c] for n, c in zip(names, fmt)}
+    for m in _RANGE_RE.finditer(inspect.getsource(cls)):
+        out[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+    return out

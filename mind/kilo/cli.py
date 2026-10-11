@@ -4,6 +4,8 @@
     kilo monitor [--rate HZ] [--duration S] [--json] [--passive]
     kilo posture {limp,rest,stand,sit,balance,...} [--transition TICKS] [--for S [--then-watch T]]
     kilo balance on|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand|sit] [--for S]
+    kilo walk [forward|back|left|right|march|stop] [--stride MM] [--turn MM] [--pattern P] [--for S] ...
+    kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--for S]
     kilo cal show | set JOINT DEGREES | save | revert
     kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S] [--force]
@@ -78,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--direct", action="store_true", help="never use the daemon: open the port directly")
     p.add_argument("--override", action="store_true",
                    help="through a daemon running the behaviour runner: pause it while this command holds "
-                        "the body (posture, balance, trick) instead of being refused")
+                        "the body (posture, balance, trick, walk, pose) instead of being refused")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     s = sub.add_parser("status", help="HELLO, state and link statistics")
@@ -206,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     __import__("kilo.cli_trick").cli_trick.add_parser(sub, LINK_COMMANDS)  # kilo trick (cli_trick.py)
     __import__("kilo.cli_head").cli_head.add_parser(sub, LINK_COMMANDS)  # kilo look (cli_head.py)
+    __import__("kilo.cli_walk").cli_walk.add_parser(sub, LINK_COMMANDS)  # kilo walk, kilo pose (cli_walk.py)
     add_log_parser(sub)
     return p
 
@@ -365,6 +368,10 @@ def _event_text(code: Any, arg: Any) -> str:
         from kilo import ir
 
         return f"IR_KEY {ir.describe(arg)}"
+    if name == "GOAL_REFUSED" and isinstance(arg, int):
+        from kilo.logs.analysis import goal_refused_text
+
+        return f"GOAL_REFUSED({goal_refused_text(arg)})"
     return f"{name}({arg})"
 
 
@@ -378,6 +385,8 @@ def render_monitor(snap: dict[str, Any]) -> str:
         ("mode", f"{snap['mode']}  owners {snap['owners']}  epoch {snap['epoch']}"),
         ("flags", ",".join(snap["flags"]) or "-"),
         ("balance", "ACTIVE" if snap["balance"] else "off"),
+        ("gait", f"phase {snap['gait_phase'] / 256:.2f}" if snap.get("gait_phase") is not None
+                 and (snap["mode"] == "GAIT" or "gait" in snap["flags"]) else "-"),
         ("pitch/roll", f"{_fmt(snap['pitch_deg'])}° {_fmt(snap['roll_deg'])}°  "
                        f"upright={snap['upright']} fallen={snap['fallen']} moving={snap['moving']}"),
         ("rates", " ".join(_fmt(r) for r in rates) + " °/s"),
@@ -781,6 +790,14 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     for line in daemon_link_lines(info):
         print(line)
     print(f"holds       {', '.join(info['held_goals']) or '-'}  idle {info['idle'] or '-'}")
+    g = info.get("gait")
+    if g:
+        phase = "-" if g.get("phase") is None else f"{g['phase']:.2f}"
+        if "pattern" in g:
+            print(f"gait        {'walking' if g['run'] else 'stopping'} {g['pattern']}  stride {g['stride_mm']} mm  "
+                  f"turn {g['turn_mm']} mm  phase {phase}  mode {g['mode']}")
+        else:
+            print(f"gait        body walking (no gait goal here)  phase {phase}  mode {g['mode']}")
     print(f"behaviour   {info['behaviour']}")
     if "remote" in info:
         print(f"remote      {info['remote']}")

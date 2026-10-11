@@ -277,6 +277,7 @@ class BodyState:
                 "fallen": self.fallen,
                 "moving": self.moving,
                 "tick_load_ms": None if tel is None else tel.tick_load / 10.0,
+                "gait_phase": None if tel is None else tel.gait_phase,
                 "rx_err": None if tel is None else tel.rx_err,
                 "last_rx_seq": None if tel is None else tel.last_rx_seq,
                 "hello": None if self.hello is None else _fields(self.hello),

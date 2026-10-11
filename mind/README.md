@@ -115,6 +115,9 @@ kilo posture stand           # holds the posture until Ctrl-C (or --for SECONDS)
 kilo posture stand --for 2 --then-watch 15   # hold, go silent, print the watchdog timeline
 kilo posture balance --for 30   # STAND with the balance flag (docs/architecture.md §3f)
 kilo balance on --kp 0.6 --kd 0.05 --for 30   # SET_BALANCE gains (live, not persisted) + hold STAND; prints pitch/roll each second
+kilo walk --for 5            # trot forward 5 s, then stop (ON THE FLOOR ONLY; see Walking)
+kilo walk left --pattern crawl   # turn left in place until Ctrl-C; `kilo walk stop` stops any walk
+kilo pose --pitch 5 --posture stance --for 10   # body pose over STANCE and the gait
 kilo cal [show] | cal set JOINT DEG | cal save | cal revert
 kilo param list | param get ID | param set ID VALUE [--persist]   # ID = number or name
 kilo pca                     # read back the 16 PCA9685 OFF counts
@@ -146,6 +149,63 @@ Goals are only held while the mind is alive. Direct: when `kilo posture`
 exits, heartbeats stop and the body's watchdog stops motion at 0.5 s and moves
 to REST at 1.5 s (§4). Through the daemon the daemon keeps feeding the
 watchdog, so it ends the hold itself (see below).
+
+### Walking
+
+**Kilo walks on the floor only, never on a desk or a table** (the owner's
+rule: Kilo fell off a desk once). `kilo walk` prints that reminder before
+every walk.
+
+```sh
+kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--stride MM] [--turn MM]
+          [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
+          [--for S] [--wait S]
+kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]
+kilo posture stance          # the IK standing posture the gait starts from and hands over to
+```
+
+`kilo walk` latches SET_GAIT (run=1, refreshed at 5 Hz with its epoch) and
+walks until Ctrl-C, SIGTERM or `--for S`; then it latches the stop (run=0)
+and waits for EVENT GAIT_STOPPED (`--wait`, default one period + 1.5 s): the
+body ramps the stride down over one period and hands over to STANCE.
+`forward` (the default) and `back` use the pattern's stride (`--stride`
+sets the magnitude) and `--turn` (+ = left) bends the path; `left` /
+`right` turn in place (`--turn` magnitude, default 20 mm; `--stride` makes
+it an arc); `march` steps in place. Fields left out take the
+docs/architecture.md §3d defaults of the pattern (walk 800 ms / duty 192 /
+30 mm / step 15 mm, trot 500 / 140 / 35 / 12, crawl 1200 / 218 / 25 / 18);
+the body height defaults to 0.8 (crawl 0.7) × (LEG_L1_MM + LEG_L2_MM), read
+from the body's params (`kilo param set LEG_L1_MM 52 --persist` when the
+legs are measured). Head bob, tail wag and balance are on unless
+`--no-...`. Out-of-range values are refused before anything is sent (the
+ranges are the spec's). The body moves to STANCE first from any other
+posture; a walk replaces the posture goal (like a trick). The command exits
+with status 1 if the body refuses SET_GAIT (printed with a hint: UNKNOWN_TYPE
+means a firmware without the gait generator) or an epoch bump (fall,
+watchdog, low battery) clears the goal. `kilo walk stop` stops whoever walks
+(through the daemon also the IR remote's walk) and waits for GAIT_STOPPED.
+
+`kilo pose` latches SET_BODY_POSE (pitch + = nose down, roll + = right side
+up, height delta, forward shift) on top of STANCE and the gait until Ctrl-C
+or `--for`, then latches the neutral pose; `kilo pose release` does that at
+once. Other postures ignore the pose: `--posture stance` takes STANCE first.
+
+`kilo monitor` shows the gait phase while walking, `kilo daemon` the gait
+(pattern, stride, turn, phase, mode), the passive timeline the phase in its
+once-a-second line, and `kilo log summary` the time walking, the gait cycles,
+GAIT_STOPPED and SET_GAIT refusals.
+
+In Python: `BodyClient.walk(stride_mm=None, turn_mm=0, pattern="trot",
+period_ms=None, duty=None, step_h_mm=None, body_h_mm=None, bob=True,
+wag=True, balance=True)` (returns the wire fields), `stop_walk(wait_s=None)`
+(returns the GAIT_STOPPED count for `wait_gait_stopped(n, timeout)` or, with
+`wait_s`, whether it stopped), `await walk_until_stopped(n, timeout)`,
+`gait_state()`, `load_geometry()`, `pose(...)`, `release_pose()`. SET_GAIT
+run=1 and SET_BODY_POSE are motion goals: stamped with the epoch, cleared on
+any epoch change, not sent before contact; a stop (run=0) is never held
+back, and GAIT_STOPPED clears it. No behaviour walks yet
+(`BodyAdapter.walk` exists): the owner decides when autonomous walking is
+allowed.
 
 ## Daemon and systemd
 
@@ -192,8 +252,15 @@ and the trick ops `trick_upload {name | trick}` (a library name or
 `Trick.to_dict()`; cached), `trick_play {name | trick, mirror, speed,
 repeats, posture, hold_s}` (replies on TRICK_DONE: `{reason, trick_id,
 elapsed_s, expected_ticks, epoch, stopped_by_us}`) and `trick_stop
-{transition_ticks}`. `posture`, `set_balance`, `trick_upload` and
-`trick_play` take `override` (see below). `call` refuses the goal and trick
+{transition_ticks}`, and the gait ops (P2) `walk {stride_mm, turn_mm,
+pattern, period_ms, duty, step_h_mm, body_h_mm, bob, wag, balance}`
+(BodyClient.walk; reads the leg geometry once per body boot),
+`stop_walk {wait_s}` (with `wait_s` the reply waits for GAIT_STOPPED:
+`{stopped, elapsed_s}`), `gait` (BodyClient.gait_state()), `pose
+{pitch_deg, roll_deg, dheight_mm, xshift_mm}` and `release_pose`.
+`posture`, `set_balance`, `walk`, `pose`, `trick_upload` and `trick_play`
+take `override` (see below); `stop_walk` and `trick_stop` are always
+allowed. `call` refuses the goal and trick
 methods (they need the ops' ownership and checks) and coroutines. Ops run in
 order per client, except `trick_play`, which runs as a task of the session
 so pings, a `trick_stop` and the client's own disconnect are still seen
@@ -218,7 +285,10 @@ enable off. With a behaviour runner, the daemon only drops the goal. The idle
 REST is latched whenever a hold that owned the posture (or a trick) ends and
 nobody else owns one, even if another client still holds `set_balance`; a
 balance-only hold that ends switches balance off and leaves the posture
-timeline alone.
+timeline alone. A walk (`walk`) is held the same way: when its client goes
+away the daemon latches the gait stop (it never just drops a walk), then
+runs the idle REST/LIMP timeline; a pose hold that ends latches the neutral
+pose.
 
 **Tricks through the daemon.** `kilo trick upload|play|stop` use the trick
 ops: the daemon uploads (cached), takes `--posture` first, plays the trick on
@@ -295,18 +365,18 @@ keys through the daemon's own BodyClient:
 | Key | Command | Legacy | `--remote` |
 |---|---|---|---|
 | CH- | 0xA2 | rest | posture rest |
-| CH | 0x62 | forward | (gait: logs "walking comes in P2") |
+| CH | 0x62 | forward | walk forward (the selected pattern's stride) |
 | CH+ | 0xE2 | gyro toggle | balance on/off (SET_BALANCE, default gains) |
-| \|<< | 0x22 | left | (gait) |
+| \|<< | 0x22 | left | turn left in place (turn 20 mm) |
 | >>\| | 0x02 | stand | posture stand |
-| >\|\| | 0xC2 | right | (gait) |
+| >\|\| | 0xC2 | right | turn right in place |
 | - | 0xE0 | pause/limp | posture limp |
-| + | 0xA8 | backward | (gait) |
+| + | 0xA8 | backward | walk backward |
 | EQ | 0x90 | calibrate | ignored |
-| 0 | 0x68 | stepping | (gait) |
-| 100+ | 0x98 | crawl | (gait) |
-| 200+ | 0xB0 | walk | (gait) |
-| 1 | 0x30 | trot | (gait) |
+| 0 | 0x68 | stepping | march in place (stride 0) |
+| 100+ | 0x98 | crawl | select crawl |
+| 200+ | 0xB0 | walk | select walk |
+| 1 | 0x30 | trot | select trot (the default) |
 | 2 | 0x18 | sit | posture sit |
 | 3 | 0x7A | stretch | trick stretch |
 | 4 | 0x10 | hi | trick hi |
@@ -316,14 +386,22 @@ keys through the daemon's own BodyClient:
 | 8 | 0x4A | butt-up | trick butt_up |
 | 9 | 0x52 | last skill | ignored |
 
+**The direction keys make Kilo walk: use the remote with Kilo on the floor
+only, never on a desk.** A direction key walks (SET_GAIT) with the selected
+pattern and keeps walking until another key, like the legacy firmware; a
+pattern key while walking re-sends the walk with the new pattern (the body
+stops and restarts), otherwise it only selects. A posture or trick key
+stops the gait first (the stop is latched; the trick takes the legs at
+once, a posture is what the body takes after the stop's hand-over to
+STANCE); `-` (limp) stops everything at once.
 Repeats (a held key) are ignored. A trick key uploads the trick if the body
 does not hold it (cached, as `kilo trick play`), stops a playing trick
 first, and takes STAND first from LIMP; a posture key also stops a playing
 trick. What the remote sets is held like the daemon's idle latch: no idle
 REST/LIMP over it, it stays until the next key or a client goal. Keys are
 logged and ignored while the behaviour runner is active, while the port is
-released for flashing, and while a client holds the posture or a trick (the
-balance key: while a client holds SET_BALANCE). `kilo daemon` shows
+released for flashing, and while a client holds the posture, a trick or a
+walk (the balance key: while a client holds SET_BALANCE). `kilo daemon` shows
 `remote on, last key ...`.
 
 **Logs of the daemon.** `kilo run` writes its own log to
@@ -486,7 +564,17 @@ It implements the P0 body's message-level contract (the same dispatch rules as
 the C link layer: ACKs and de-dup, query replies, GOAL_REFUSED reasons,
 calibration/params/EEPROM with EEPROM_BUSY, REBOOT, the two-stage watchdog
 driven by the WD_* params) plus 25 Hz telemetry with a swaying pitch/roll and
-simulated falls. `VirtualBody.process(data, now)` drives it synchronously
+simulated falls, the P1 tricks, balance and head hold, and (P2) the gait's
+state machine: SET_GAIT with the body's refusals (BAD_ARG from the spec
+ranges; a stop is never stale; STALE, FALLEN, LOW_BATT, UNCALIBRATED), STANCE
+first, mode/flag/owner GAIT, `gait_phase` advancing 65536·20/period_ms per
+tick, a one-period ramp-down to STANCE with one EVENT GAIT_STOPPED, an epoch
+bump or LIMP ending it at once, a trick taking the legs while the gait
+continues underneath, SET_BODY_POSE tilting the reported attitude, and a
+JOINTS stream of fake angles that swing with the phase. The full contract is
+the docstring of `kilo/vbody/sim.py`; `VirtualBody(p2=False)` plays the P1
+body (SET_GAIT/SET_BODY_POSE UNKNOWN_TYPE, STANCE BAD_ARG), which the
+cross-check uses against a firmware without the gait. `VirtualBody.process(data, now)` drives it synchronously
 (replies are appended to `sent` and written to the transport, if any); a
 cross-check test compares it frame by frame with the body's C dispatch. It is
 a stand-in for §6's `body/test/vbody`, which will run the real firmware core
@@ -898,8 +986,16 @@ play`), no motion goal into a rebooting body (the vbody's `boot_delay`
 buffers what it hears while it boots), a busy port and a failed verify in
 `kilo flash`, a hung runner tripping the watchdog, `--override`, the logs off
 the control threads, a cancelled `play()`, the port lease, split-owner idle
-latching, the LinkStats race, log pruning. The suite takes about two
-minutes.
+latching, the LinkStats race, log pruning. `test_gait.py` covers walking:
+the spec ranges, the §3d defaults, the vbody's gait state machine
+(deterministic: STANCE first, the phase step, the one-period ramp-down,
+GAIT_STOPPED once, every refusal, epoch bumps, LIMP, a trick over the gait,
+the pose, JOINTS), BodyClient against the vbody (goal bytes, epoch stamp,
+refresh, clearing on a fall), the daemon ops and holds, `kilo walk` /
+`kilo pose` end to end (also SIGTERM and a P1 body's refusal) and the
+renderings; `test_ir.py` the remote's walking. The cross-check's gait case
+is skipped until the firmware implements SET_GAIT. The suite takes about
+three minutes.
 
 ## Layout
 
@@ -912,7 +1008,7 @@ kilo/link/transport.py      pyserial, raw-fd (pty) and loopback transports
 kilo/link/ports.py          port auto-detection
 kilo/link/serial_link.py    SerialLink: reader/writer threads, goals, commands
 kilo/body/state.py          BodyState
-kilo/body/client.py         BodyClient: postures, calibration, params, stats
+kilo/body/client.py         BodyClient: postures, balance, head, gait, pose, tricks, calibration, params, stats
 kilo/log.py                 JSON-lines logger thread
 kilo/perception/            ultrasonic + IMU detectors, Percepts aggregator, SharedPercepts, ring buffer
 kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (kilo log, python -m kilo.logs)
@@ -920,6 +1016,7 @@ kilo/tricks/                trick model, legacy importer, library/*.json (genera
 kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner (run_behaviour)
 kilo/cli_trick.py           `kilo trick` (registered by one line in cli.py)
 kilo/cli_head.py            `kilo look` (registered by one line in cli.py)
+kilo/cli_walk.py            `kilo walk`, `kilo pose` (registered by one line in cli.py)
 kilo/cli.py                 the `kilo` command
 kilo/cli_tools.py           `kilo log`, `--kilolog`, `monitor --percepts`, `kilo daemon` link lines
 kilo/daemon.py              `kilo run`: owns the port, serves the socket, holds, port release
