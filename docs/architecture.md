@@ -1037,8 +1037,8 @@ Appendix D.
 |---|---|---|
 | P0 (incl. fx + integer attitude) | 20 KB (20480 B) | 1540 B |
 | P1 | 24 KB (24576 B, the `size_check.sh` default since 2026-10-11; 22 KB before) | 1540 B |
-| P2 | 24 KB (24576 B) | 1540 B |
-| P5 | 24 KB; removing the DMP frees ≈3.5 KB | 1540 B |
+| P2 | 30 KB (30720 B; owner's decision 2026-10-11 after `docs/firmware-size-report.md`: the 24 KB figure was a budget, the hardware allows 32256 B and Kilo ran the 32016 B legacy image; 1.5 KB guard kept) | 1540 B |
+| P5 | 30 KB; removing the DMP frees ≈3.5 KB | 1540 B |
 
 **Build flags.** The body is compiled with `-mcall-prologues` (C and C++:
 `compiler.cpp.extra_flags` and `compiler.c.extra_flags`, the C++ one also
@@ -1655,7 +1655,7 @@ and `src/` are deleted after P2 is accepted.
   and wag; `kilo walk` with keyboard driving.
 - **Acceptance:** H14, H9 while trotting, the IK/gait tests under simavr. WALK,
   TROT and CRAWL start and stop with no visible foot jump on slow-motion video.
-  Flash ≤ 24 KB.
+  Flash ≤ 30 KB (30720 B; raised from 24 KB on 2026-10-11, §3h).
 - **Then cut over:** delete the legacy firmware (its hex is kept in
   `mind/firmware/`).
 
@@ -1708,7 +1708,7 @@ and `src/` are deleted after P2 is accepted.
    for development?
 9. ~~Flash ceilings.~~ Resolved 2026-10-10: the ceilings were estimates and
    the measured P0 build is 18164 B, so they are now P0 20 KB, P1 22 KB,
-   P2 24 KB (still 7.5 KB under the 31.5 KB available before P5's ≈3.5 KB
+   P2 30 KB (raised from 24 KB on 2026-10-11, see `docs/firmware-size-report.md`; 1.5 KB under the 31.5 KB available before P5's ≈3.5 KB
    DMP saving). Ultrasonic and buzzer stay in P0. 2026-10-11: P1 raised to
    24 KB, and the body is built with `-mcall-prologues -Wl,--relax` (§3h).
 
@@ -2127,7 +2127,7 @@ It never drives the line high against the NyBoard's own reset circuit.
    The reset record mixes the compile time in either way, so rebuilding a
    dirty tree still boots as `FLASHED`.
 3. Run the size/symbol harness on that ELF (`body/tools/size_check.sh --elf`):
-   flash ≤ 24576 B, globals ≤ 1540 B, no forbidden symbol, built with the
+   flash ≤ 30720 B (the phase ceiling, §3h), globals ≤ 1540 B, no forbidden symbol, built with the
    size flags. Stop on failure.
 4. Pulse GPIO4 (`pinctrl`, libgpiod `gpioset`, or sysfs).
 5. Within ≈200 ms, run

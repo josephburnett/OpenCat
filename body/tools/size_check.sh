@@ -7,8 +7,9 @@
 #   - a forbidden symbol is linked (the libraries and features this firmware
 #     replaced: HardwareSerial/Print, Wire, I2Cdev, pulseIn, tone, the heap,
 #     String, soft float, libm);
-#   - flash > FLASH_MAX (default 24576, the P1 ceiling of doc §3h; P0 was 20480,
-#     P2 24576);
+#   - flash > FLASH_MAX (default 30720, the P2 ceiling of doc §3h, set by the
+#     owner 2026-10-11 after docs/firmware-size-report.md: the hardware allows
+#     32256 (32 KB - 512 B optiboot); P0 was 20480, P1 24576);
 #   - globals (.data + .bss + .noinit) > GLOBALS_MAX (default 1540);
 #   - the ELF was not built with the size flags: no __prologue_saves__ (no
 #     -mcall-prologues), or a call/jmp whose target an rcall/rjmp reaches
@@ -21,7 +22,7 @@
 set -u
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${ARDUINO_CLI:-$HOME/.local/bin/arduino-cli}"
-FLASH_MAX="${FLASH_MAX:-24576}"
+FLASH_MAX="${FLASH_MAX:-30720}"
 CFLAGS="-mcall-prologues"  # the same as mind/kilo/tools/flash.py
 LDFLAGS="-Wl,--relax"
 GLOBALS_MAX="${GLOBALS_MAX:-1540}"
