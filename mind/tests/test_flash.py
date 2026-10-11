@@ -33,10 +33,26 @@ class FakeReset:
 def test_commands():
     assert fl.compile_cmd(Path("/r/body"), Path("/o"), "abc12345") == [
         "arduino-cli", "compile", "--fqbn", "arduino:avr:uno", "--output-dir", "/o",
-        "--build-property", "compiler.cpp.extra_flags=-DKILO_BUILD=0xabc12345", "/r/body"]
+        "--build-property", "compiler.cpp.extra_flags=-mcall-prologues -DKILO_BUILD=0xabc12345",
+        "--build-property", "compiler.c.extra_flags=-mcall-prologues",
+        "--build-property", "compiler.c.elf.extra_flags=-Wl,--relax", "/r/body"]
     assert fl.avrdude_cmd("/dev/ttyAMA0", Path("x.hex")) == [
         "avrdude", "-c", "arduino", "-p", "atmega328p", "-P", "/dev/ttyAMA0", "-b", "115200",
         "-D", "-U", "flash:w:x.hex:i"]
+
+
+def test_compile_cmd_carries_the_size_flags():
+    """-mcall-prologues for C and C++ and -Wl,--relax for the link (doc §3h),
+    with or without a build hash, and the same flags size_check.sh expects."""
+    for h in ("abc12345", None):
+        cmd = fl.compile_cmd(Path("/r/body"), Path("/o"), h)
+        props = dict(cmd[i + 1].split("=", 1) for i, a in enumerate(cmd) if a == "--build-property")
+        assert "-mcall-prologues" in props["compiler.cpp.extra_flags"].split()
+        assert "-mcall-prologues" in props["compiler.c.extra_flags"].split()
+        assert "-Wl,--relax" in props["compiler.c.elf.extra_flags"].split()
+        assert ("-DKILO_BUILD=0xabc12345" in props["compiler.cpp.extra_flags"].split()) == (h is not None)
+    sh = (fl.REPO_DIR / "body" / "tools" / "size_check.sh").read_text()
+    assert f'CFLAGS="{fl.CFLAGS}"' in sh and f'LDFLAGS="{fl.LDFLAGS}"' in sh
 
 
 def test_reset_method():

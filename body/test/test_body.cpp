@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include "../src/core/body.h"
 #include "../src/core/posture.h"
+#include "../src/core/reset.h"
 #include "check.h"
 #include "fake_eeprom.h"
 
@@ -198,6 +199,50 @@ int main() {
       if (counts[ch] != want[ch]) same = false;
     }
     CHECK(same);
+  }
+
+  // ---- Boot epoch (doc §3c): a goal stamped before a warm reboot is STALE
+  //      after it, consecutive boots never repeat an epoch.
+  {
+    ResetRecord rec = {0, 0, 0, 0, 0};
+    uint16_t last;
+    reset_classify(rec, 5, last);  // cold boot (invalid magic)
+    config_defaults(cfg.img);
+    cfg.state = CFG_MIGRATED;
+    body_init(b, &cfg, nullptr, true, rec.epoch);
+    in = TickIn();
+    in.imu = IMU_FRESH;
+    in.att.gz = 16384;
+    CHECK(b.epoch == 1);
+    for (int boot = 0; boot < 3; boot++) {
+      uint8_t old = b.epoch;
+      CHECK(body_goal_posture(b, old, POSTURE_STAND, 0, 0) == GOAL_OK);
+      tick();
+      rec.alive_tick = b.tick;  // what the firmware's tick writes
+      rec.epoch = b.epoch;
+      CHECK(reset_classify(rec, 5, last) == RESET_WARM_UNEXPECTED);  // watchdog/DTR reset
+      int16_t warm[DRIVEN_COUNT] = {0};
+      body_init(b, &cfg, warm, true, rec.epoch);
+      CHECK(b.epoch != old && b.epoch == (uint8_t)(old + 1));
+      // the refresh the UART buffered during the init: refused
+      CHECK(body_goal_posture(b, old, POSTURE_STAND, 0, 0) == GOAL_STALE);
+      CHECK(body_goal_posture(b, old, POSTURE_REST, 0, 0) == GOAL_OK);  // REST is never stale
+    }
+    // a runtime bump (watchdog stage 1, fall, low battery) just before the reset:
+    // the record holds the bumped epoch, the boot goes past it.
+    body_epoch_bump(b);
+    uint8_t bumped = b.epoch;
+    rec.epoch = b.epoch;
+    reset_classify(rec, 5, last);
+    body_init(b, &cfg, nullptr, true, rec.epoch);
+    CHECK(b.epoch == (uint8_t)(bumped + 1));
+    CHECK(body_goal_posture(b, bumped, POSTURE_STAND, 0, 0) == GOAL_STALE);
+    // wrap: 255 -> 1
+    rec.epoch = 255;
+    reset_classify(rec, 5, last);
+    body_init(b, &cfg, nullptr, true, rec.epoch);
+    CHECK(b.epoch == 1 && body_goal_posture(b, 255, POSTURE_STAND, 0, 0) == GOAL_STALE);
+    CHECK(body_goal_posture(b, 0, POSTURE_STAND, 0, 0) == GOAL_STALE);
   }
 
   // ---- IMU health: 10 ticks without a packet -> IMU_FAULT; recovery.

@@ -49,6 +49,10 @@ both the same frames and compares the replies:
   after a reboot the body is silent for that long (no tick, no telemetry) and
   the bytes that arrive meanwhile are buffered, as in the UART's RX buffer,
   and handled right after the boot HELLO.
+- boot epoch (doc §3c): the first power-on starts at epoch 0 (the link
+  harness's fresh body); every ``reboot()`` starts at the previous run's
+  last epoch + 1, skipping 0 (``boot_epoch``, the body's reset_boot_epoch),
+  so goals stamped before the reboot are STALE after it.
 
 Two ways to drive it:
 
@@ -91,6 +95,14 @@ EEPROM_SIZE = 1024
 P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.MsgId.SET_BALANCE,
                       P.MsgId.SET_HEAD})
 HEAD_HOLD_S = P.HEAD_HOLD_MS / 1000.0
+
+
+def boot_epoch(last_epoch: int) -> int:
+    """The epoch a reboot starts at (body core/reset.cpp reset_boot_epoch):
+    the previous run's last epoch + 1, skipping 0."""
+    e = (last_epoch + 1) & 0xFF
+    return e or 1
+
 # SET_BALANCE defaults (body/src/core/balance.h) and the posture it runs in.
 BALANCE_DEFAULTS = {"enable": 0, "kp_q8": 128, "kd_ms": 30, "deadband_deg": 2, "max_corr_deg": 15}
 BALANCE_MAX_DEG = 30
@@ -184,11 +196,11 @@ class VirtualBody:
         self._boot_rx = bytearray()
         self._power_on(int(reset_cause), 0)
 
-    def _power_on(self, cause: int, last_alive: int) -> None:
+    def _power_on(self, cause: int, last_alive: int, epoch: int = 0) -> None:
         self.reset_cause = cause
         self.last_alive_tick = last_alive
         self.tick = 0
-        self.epoch = 0
+        self.epoch = epoch
         self.posture = "LIMP"  # cold boot stays LIMP
         self.last_rx_seq = 0
         self.last_cmd: tuple[int, int, int, float] | None = None  # (seq, type, status, at)
@@ -300,7 +312,7 @@ class VirtualBody:
         constructor's) the boot HELLO and EVENT BOOT."""
         delay = self.boot_delay if boot_delay is None else boot_delay
         with self.lock:
-            self._power_on(int(cause), self.tick)
+            self._power_on(int(cause), self.tick, boot_epoch(self.epoch))
             if delay > 0:
                 self.booting_until = self.clock() + delay
                 self._boot_rx.clear()

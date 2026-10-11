@@ -390,7 +390,10 @@ starts the LIMP timer at the REST trip (11.5 s).
 `kilo flash` follows Appendix F:
 
 1. `arduino-cli compile --fqbn arduino:avr:uno --output-dir ~/.cache/kilo-build body/`
-   with the first 8 hex digits of the git commit as `-DKILO_BUILD=0x...`, then
+   with the size flags (`-mcall-prologues` in `compiler.cpp.extra_flags` and
+   `compiler.c.extra_flags`, `-Wl,--relax` in `compiler.c.elf.extra_flags`;
+   docs/architecture.md §3h) and the first 8 hex digits of the git commit as
+   `-DKILO_BUILD=0x...` (also in `compiler.cpp.extra_flags`), then
    `body/tools/size_check.sh --elf` on that build (the size/symbol harness; it
    honours `FLASH_MAX`, e.g. `FLASH_MAX=18432 kilo flash` while the P0 build is
    over its 16 KB ceiling, see docs/architecture.md §8 question 9).

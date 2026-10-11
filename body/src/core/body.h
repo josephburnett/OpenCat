@@ -87,7 +87,7 @@ struct Body {
 
 // warm_angles: canonical-order angles read back from the PCA9685, or null
 // for a cold start. imu_ok: did dmpInitialize succeed.
-void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok);
+void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok, uint8_t epoch = 0);
 
 // Steps 2 and 4-6 of the tick. Fills all 16 PCA9685 channel counts.
 void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]);

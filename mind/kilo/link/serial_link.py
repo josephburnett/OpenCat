@@ -60,8 +60,8 @@ Goals and the epoch rule (§3c, §4, §5):
   is unsolicited, or when its identity (reset cause, last_alive_tick,
   fw_build) differs from the previous HELLO's. Goals set meanwhile stay
   latched and go out once contact is back. (A body that reboots without the
-  mind noticing within 300 ms still sees the refreshes sent meanwhile: the
-  body-side fix is a boot epoch that never repeats, docs §3c.)
+  mind noticing within 300 ms still sees the refreshes sent meanwhile; it
+  boots at a new epoch, so they are STALE: docs §3c "Boot epoch".)
 
 Commands: ``request()`` assigns a seq, waits 50 ms for the matching ACK (or
 the data reply, for queries), and retries up to 3 times. Non-query commands

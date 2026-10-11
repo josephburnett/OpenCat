@@ -103,6 +103,7 @@ static void run_tick(void) {
   link_tick();
   sys_wdt_kick();
   sys_reset_record.alive_tick = b.tick;
+  sys_reset_record.epoch = b.epoch;  // the next boot starts past it
   uint32_t dt32 = clock_micros() - t0;
   uint16_t dt = (uint16_t)(dt32 > 0xFFFF ? 0xFFFF : dt32);
   if (dt > g_stats.max_tick_us) g_stats.max_tick_us = dt;
@@ -182,16 +183,16 @@ int main(void) {
   led_on();
   imu_present = mpu_init_blocking(g_config.img.imu_offset, IMU_INIT_ATTEMPTS);
   led_off();
-  body_init(g_body, &g_config, is_warm ? warm : 0, imu_present);
+  body_init(g_body, &g_config, is_warm ? warm : 0, imu_present, sys_reset_record.epoch);
   // 4. HELLO and EVENT BOOT, then the watchdog.
   uint16_t caps = (KILO_BUZZER ? KILO_HELLO_CAPS_BUZZER : 0) | (imu_present ? KILO_HELLO_CAPS_DMP : 0) |
                   (KILO_ULTRASONIC ? KILO_HELLO_CAPS_ULTRASONIC : 0);
   link_init(FW_BUILD, caps);
   link_boot(g_stats.reset_cause, g_stats.last_alive_tick);
-  events_push(g_body.ev, EV_BOOT, g_stats.reset_cause, 0, 0);
-  if (g_config.state == CFG_MIGRATED) events_push(g_body.ev, EV_CONFIG_MIGRATED, 0, 0, 0);
-  if (g_config.state == CFG_DEFAULTED) events_push(g_body.ev, EV_CONFIG_DEFAULTED, g_config.reason, 0, 0);
-  if (!imu_present) events_push(g_body.ev, EV_IMU_FAULT, 0, 0, 0);
+  events_push(g_body.ev, EV_BOOT, g_stats.reset_cause, 0, g_body.epoch);
+  if (g_config.state == CFG_MIGRATED) events_push(g_body.ev, EV_CONFIG_MIGRATED, 0, 0, g_body.epoch);
+  if (g_config.state == CFG_DEFAULTED) events_push(g_body.ev, EV_CONFIG_DEFAULTED, g_config.reason, 0, g_body.epoch);
+  if (!imu_present) events_push(g_body.ev, EV_IMU_FAULT, 0, 0, g_body.epoch);
   sys_wdt_arm();
   // 5. The loop: poll the link always, tick on the 20 ms grid, otherwise
   //    do background work. Nothing here blocks.

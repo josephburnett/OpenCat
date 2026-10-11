@@ -60,7 +60,7 @@ int main() {
   sched_start(s, 0xFFFFF000u);
   CHECK(!sched_due(s, 0xFFFFFFF0u) && sched_due(s, 0x00003E20u));  // across the micros() wrap
   // ---- reset cause.
-  ResetRecord r = {0x1234, 0, 0, 0};
+  ResetRecord r = {0x1234, 0, 0, 0, 0};
   uint16_t last;
   CHECK(reset_classify(r, 77, last) == RESET_COLD && last == 0);
   r.alive_tick = 500;
@@ -70,6 +70,23 @@ int main() {
   CHECK(reset_classify(r, 78, last) == RESET_REQUESTED && last == 9);
   r.alive_tick = 4242;
   CHECK(reset_classify(r, 78, last) == RESET_WARM_UNEXPECTED && last == 4242);
+  // ---- boot epoch (doc §3c): the epoch counter runs on across resets.
+  CHECK(reset_boot_epoch(0) == 1 && reset_boot_epoch(7) == 8 && reset_boot_epoch(254) == 255);
+  CHECK(reset_boot_epoch(255) == 1);  // wraps, skipping 0
+  for (uint16_t e = 0; e < 256; e++) CHECK(reset_boot_epoch((uint8_t)e) != (uint8_t)e && reset_boot_epoch((uint8_t)e) != 0);
+  r.epoch = 41;  // the epoch the last tick of the previous run wrote
+  CHECK(reset_classify(r, 78, last) == RESET_WARM_UNEXPECTED && r.epoch == 42);
+  uint8_t prev = r.epoch;  // warm reboots in a row (the ticks bumped nothing): never the same epoch twice
+  for (int i = 0; i < 300; i++) {
+    reset_classify(r, 78, last);
+    CHECK(r.epoch != prev && r.epoch != 0);
+    prev = r.epoch;
+  }
+  r.epoch = 255;
+  reset_classify(r, 79, last);  // a flash keeps the counter running too
+  CHECK(r.epoch == 1);
+  ResetRecord cold = {0x0000, 0, 0, 0, 0x9C};  // power-up garbage
+  CHECK(reset_classify(cold, 78, last) == RESET_COLD && cold.epoch == 0x9D);
   // ---- CRC-16/CCITT-FALSE check value.
   CHECK(kilo_crc16((const uint8_t*)"123456789", 9) == 0x29B1);
   // ---- notes: legacy pitches, rests, clamp, timing.

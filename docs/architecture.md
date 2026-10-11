@@ -469,19 +469,24 @@ gait after recovery. So:
   set; it is never re-stamped. Any epoch change the mind sees, in TELEMETRY,
   in any EVENT or in HELLO, clears its motion goals from older epochs; it
   then adopts the new epoch and decides afresh (§5).
-- **Gap: a reboot restarts the epoch at 0.** A body that reboots (brown-out,
-  watchdog reset, the DTR edge of a port reopen) comes back at epoch 0, so a
-  goal the mind set at epoch 0 and refreshes during the 0.3-2 s init (the
-  UART buffers it) is accepted after the boot as if nothing happened. The
-  mind narrows this (§5 "Contact": no motion goal after a reconnect or once
-  telemetry has been missing for 300 ms, until the body is heard again; a
-  HELLO with a new identity is a reboot), but the refreshes of the first
-  300 ms of a reboot on a live connection still reach the booting body.
-  **TODO (body):** a boot epoch that never repeats: keep a boot counter in
-  `.noinit` RAM (survives a warm reset; validated with a magic and its
-  complement, reseeded from the EEPROM or the ADC noise on a cold boot) and
-  start `epoch` at a value derived from it (never 0 after a reboot, and not
-  the previous boot's), so every goal stamped before the reboot is STALE.
+- **Boot epoch: a reboot never restarts at the previous epoch.** A body
+  that reboots (brown-out, watchdog reset, the DTR edge of a port reopen)
+  would otherwise accept the goals the mind refreshes during the 0.3-2 s
+  init (the UART buffers them) as if nothing happened. The reset record in
+  `.noinit` RAM (`core/reset.h`, which survives every reset but not power
+  loss) carries the epoch: the tick writes `b.epoch` into it next to the
+  alive canary, and a boot starts at that value + 1, skipping 0
+  (`reset_boot_epoch`: 255 wraps to 1). So the epoch counter keeps running
+  across warm resets (requested, flashed, watchdog, reset pin): consecutive
+  boots never repeat an epoch, and every goal stamped before the reset,
+  including after a last-moment bump, is STALE. A cold boot has no valid
+  record; its byte is whatever power-up RAM holds, + 1 (random-ish). HELLO,
+  EVENT BOOT and the first TELEMETRY report the boot epoch, and the mind
+  adopts it (§5). The mind's side (§5 "Contact": no motion goal after a
+  reconnect or once telemetry has been missing for 300 ms, until the body is
+  heard again; a HELLO with a new identity is a reboot) remains as the
+  second layer. The virtual body does the same (`boot_epoch` in
+  `kilo.vbody.sim`; its first power-on is epoch 0, as the link harness).
 
 ### 3d. Gait generator
 
@@ -1003,9 +1008,17 @@ Appendix D.
 | Phase | Flash ceiling (`body/tools/size_check.sh FLASH_MAX`) | Globals ceiling |
 |---|---|---|
 | P0 (incl. fx + integer attitude) | 20 KB (20480 B) | 1540 B |
-| P1 | 22 KB (22528 B, the `size_check.sh` default since the balance layer) | 1540 B |
-| P2 | 24 KB | 1540 B |
-| P5 | P2 − 3.5 KB (DMP removed) | 1540 B |
+| P1 | 24 KB (24576 B, the `size_check.sh` default since 2026-10-11; 22 KB before) | 1540 B |
+| P2 | 24 KB (24576 B) | 1540 B |
+| P5 | 24 KB; removing the DMP frees ≈3.5 KB | 1540 B |
+
+**Build flags.** The body is compiled with `-mcall-prologues` (C and C++:
+`compiler.cpp.extra_flags` and `compiler.c.extra_flags`, the C++ one also
+carrying `-DKILO_BUILD=0x...`) and linked with `-Wl,--relax`
+(`compiler.c.elf.extra_flags`), by `kilo flash` (`kilo.tools.flash.compile_cmd`)
+and by `body/tools/size_check.sh`, which also fails an ELF built without
+them (no `__prologue_saves__`, or a `call`/`jmp` an `rcall`/`rjmp` would
+reach). The host tests (g++) do not use them.
 
 **Measured at the P0 integration (default build: ultrasonic and buzzer on,
 all P0 messages):** 18164 B flash, 1061 B globals, over the P0 ceiling by
@@ -1040,6 +1053,13 @@ a decision for the owner, §8): `-mrelax -mcall-prologues` through
 the body is compiled); raising the P1 flash ceiling toward the P2 one
 (24 KB; 32256 B is the hardware limit); dropping the ultrasonic or buzzer
 (≈0.4 KB each, features).
+
+**Owner decision 2026-10-11:** the first two are taken. With
+`-mcall-prologues` and `-Wl,--relax` the same source is **22092 B flash**
+(−422 B), globals unchanged (1432 B); the P1 ceiling is 24 KB (24576 B).
+**Measured with the boot epoch** (§3c): **22132 B flash** (+40 B),
+**1433 B globals** (+1 B `.noinit`, the epoch in the reset record), 2444 B
+under the P1 ceiling.
 
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
 use is reported through a painted canary (`stack_free_min` in STATS). RAM is
@@ -1310,8 +1330,8 @@ the lock the writer packs goals under), or a TELEMETRY whose tick has been
 checked for a restart. A reboot clears the motion goals every time; only its
 count is debounced. The behaviour runner forgets its posture/balance cache on
 an epoch, `reboots` or `connected` change. What is left (refreshes sent in
-the first 300 ms of a reboot on a live connection) needs the body's boot
-epoch, **TODO (body)** in §3c.
+the first 300 ms of a reboot on a live connection) is refused STALE by
+the body: it boots at a new epoch (§3c "Boot epoch").
 
 **Body state.** `BodyState` holds:
 - the latest telemetry, with time unwrapped;
@@ -1573,7 +1593,8 @@ and `src/` are deleted after P2 is accepted.
     trick.
 - **Acceptance:** H7, H9 (looping trick), H11-H13. Each first-version trick
   matches the old firmware side by side, in the owner's judgement. Attitude
-  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 22 KB.
+  agrees with the legacy `ypr` within 1° static (A/B). Flash ≤ 24 KB
+  (22 KB until 2026-10-11).
 - **Status:**
   - Joint-space balance: done on the host (3c layer 2, 3f): controller,
     legacy gain table, gating, `SET_BALANCE`, TELEMETRY `BALANCE_ACTIVE`,
@@ -1592,7 +1613,8 @@ and `src/` are deleted after P2 is accepted.
     limits, frame timing exactly as the JSON. Hardware: the "P1 tricks
     hardware test" in `docs/p1-hardware-test.md` (side by side with the
     legacy firmware, H9 with `push_up --repeats 255`).
-  - Flash 21246 B of 22528 B; globals 1525 B of 1540 B.
+  - Flash 21246 B of 22528 B (the ceiling then); globals 1525 B of 1540 B.
+    Now 22132 B of 24576 B, 1433 B globals (§3h).
 
 **P2: gait + IK.**
 - **Deliverables:** measured geometry; IK, gait, STANCE, geometric balance, bob
@@ -1653,7 +1675,8 @@ and `src/` are deleted after P2 is accepted.
 9. ~~Flash ceilings.~~ Resolved 2026-10-10: the ceilings were estimates and
    the measured P0 build is 18164 B, so they are now P0 20 KB, P1 22 KB,
    P2 24 KB (still 7.5 KB under the 31.5 KB available before P5's ≈3.5 KB
-   DMP saving). Ultrasonic and buzzer stay in P0.
+   DMP saving). Ultrasonic and buzzer stay in P0. 2026-10-11: P1 raised to
+   24 KB, and the body is built with `-mcall-prologues -Wl,--relax` (§3h).
 
 ---
 
@@ -2051,15 +2074,20 @@ It never drives the line high against the NyBoard's own reset circuit.
    lease runs out, or when the flashing client disconnects). The port's
    exclusive flock keeps any other process off it. This happens after the
    build (step 2), so the body stays supervised while it compiles.
-2. `arduino-cli compile --fqbn arduino:avr:uno --output-dir ~/.cache/kilo-build body/`.
-   About 1-3 min on a Pi 2 **(est.)**. The build hash goes in through
-   `compiler.cpp.extra_flags=-DKILO_BUILD=0x<first 8 hex digits of the commit>`,
+2. `arduino-cli compile --fqbn arduino:avr:uno --output-dir ~/.cache/kilo-build
+   --build-property "compiler.cpp.extra_flags=-mcall-prologues -DKILO_BUILD=0x<hash>"
+   --build-property compiler.c.extra_flags=-mcall-prologues
+   --build-property compiler.c.elf.extra_flags=-Wl,--relax body/`
+   (the size flags of §3h). About 1-3 min on a Pi 2 **(est.)**. The build
+   hash goes in through
+   `-DKILO_BUILD=0x<first 8 hex digits of the commit>`,
    and the body reports it as `HELLO.fw_build`. A plain arduino-cli build
    without it reports an FNV-1a hash of the compile date and time instead.
    The reset record mixes the compile time in either way, so rebuilding a
    dirty tree still boots as `FLASHED`.
-3. Run the size/symbol harness on that ELF (`body/tools/size_check.sh --elf`).
-   Stop on failure.
+3. Run the size/symbol harness on that ELF (`body/tools/size_check.sh --elf`):
+   flash ≤ 24576 B, globals ≤ 1540 B, no forbidden symbol, built with the
+   size flags. Stop on failure.
 4. Pulse GPIO4 (`pinctrl`, libgpiod `gpioset`, or sysfs).
 5. Within ≈200 ms, run
    `avrdude -p m328p -c arduino -P /dev/ttyAMA0 -b 115200 -D -U flash:w:body.ino.hex:i`.

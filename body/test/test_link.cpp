@@ -231,6 +231,13 @@ static void test_hello_and_queries(void) {
   CHECK(h.reset_cause == RESET_FLASHED && h.last_alive_tick == 1234 && h.caps == KILO_HELLO_CAPS_DMP);
   CHECK(h.max_payload == 60 && h.trick_capacity == KF_CAPACITY && h.joint_count == 11);
   CHECK(h.config_state == CFG_MIGRATED && h.epoch == 7);
+  // A boot epoch from the reset record (body_init) is what HELLO reports.
+  body_init(b, b.cfg, nullptr, true, 0x2A);
+  link_boot(RESET_WARM_UNEXPECTED, 77);
+  out = g_lh.take();
+  CHECK(out.size() == 1 && out[0].type == KILO_MSG_HELLO);
+  std::memcpy(&h, out[0].payload.data(), sizeof h);
+  CHECK(h.reset_cause == RESET_WARM_UNEXPECTED && h.epoch == 0x2A);
   // PING: PONG echoes the token, never an ACK; a repeat (same seq) is answered again.
   for (int i = 0; i < 2; i++) {
     out = rx(KILO_MSG_PING, 9, {0xEF, 0xBE});

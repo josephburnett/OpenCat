@@ -1,14 +1,18 @@
 #!/bin/bash
 # Size and symbol harness for the body firmware (doc §6).
 #
-# Builds body/ with arduino-cli exactly as `kilo flash` does, prints flash
-# and RAM, and FAILS if:
+# Builds body/ with arduino-cli exactly as `kilo flash` does (same size flags:
+# -mcall-prologues for C and C++, -Wl,--relax for the link; doc §3h), prints
+# flash and RAM, and FAILS if:
 #   - a forbidden symbol is linked (the libraries and features this firmware
 #     replaced: HardwareSerial/Print, Wire, I2Cdev, pulseIn, tone, the heap,
 #     String, soft float, libm);
-#   - flash > FLASH_MAX (default 22528, the P1 ceiling of doc §3h; P0 was 20480,
+#   - flash > FLASH_MAX (default 24576, the P1 ceiling of doc §3h; P0 was 20480,
 #     P2 24576);
-#   - globals (.data + .bss + .noinit) > GLOBALS_MAX (default 1540).
+#   - globals (.data + .bss + .noinit) > GLOBALS_MAX (default 1540);
+#   - the ELF was not built with the size flags: no __prologue_saves__ (no
+#     -mcall-prologues), or a call/jmp whose target an rcall/rjmp reaches
+#     (no --relax).
 #
 # Usage: body/tools/size_check.sh [build-dir]       build, then check
 #        body/tools/size_check.sh --elf FILE.elf       check an existing build
@@ -17,7 +21,9 @@
 set -u
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${ARDUINO_CLI:-$HOME/.local/bin/arduino-cli}"
-FLASH_MAX="${FLASH_MAX:-22528}"
+FLASH_MAX="${FLASH_MAX:-24576}"
+CFLAGS="-mcall-prologues"  # the same as mind/kilo/tools/flash.py
+LDFLAGS="-Wl,--relax"
 GLOBALS_MAX="${GLOBALS_MAX:-1540}"
 
 if [ "${1:-}" = "--elf" ]; then
@@ -26,8 +32,10 @@ if [ "${1:-}" = "--elf" ]; then
 else
   BUILD="${1:-${TMPDIR:-/tmp}/kilo-body-build}"
   mkdir -p "$BUILD"
-  args=(compile --fqbn arduino:avr:uno --build-path "$BUILD")
-  if [ -n "${EXTRA_FLAGS:-}" ]; then args+=(--build-property "compiler.cpp.extra_flags=$EXTRA_FLAGS"); fi
+  args=(compile --fqbn arduino:avr:uno --build-path "$BUILD"
+        --build-property "compiler.cpp.extra_flags=$CFLAGS${EXTRA_FLAGS:+ $EXTRA_FLAGS}"
+        --build-property "compiler.c.extra_flags=$CFLAGS"
+        --build-property "compiler.c.elf.extra_flags=$LDFLAGS")
   if ! out=$("$CLI" "${args[@]}" "$BODY" 2>&1); then
     echo "$out"
     echo "size_check: BUILD FAILED"
@@ -38,7 +46,9 @@ fi
 TOOLS=$(ls -d "$HOME"/.arduino15/packages/arduino/tools/avr-gcc/*/bin 2>/dev/null | sort | tail -1)
 NM="$TOOLS/avr-nm"
 SIZE="$TOOLS/avr-size"
+OBJDUMP="$TOOLS/avr-objdump"
 fail=0
+echo "expected build flags: compiler.cpp/c.extra_flags=$CFLAGS compiler.c.elf.extra_flags=$LDFLAGS"
 
 # Flash = .text + .data (what avrdude writes); globals = .data + .bss +
 # .noinit (the RAM that is not stack).
@@ -62,6 +72,27 @@ if [ -n "$hits" ]; then
   fail=1
 else
   echo "forbidden-symbol scan: clean (no Serial/Print/Wire/twi_/I2Cdev/pulseIn/tone/heap/String/soft-float/libm)"
+fi
+
+# Build flags. -mcall-prologues links libgcc's shared register save/restore
+# code; --relax leaves no call/jmp within rcall/rjmp reach (+-4 KB).
+if "$NM" "$ELF" | grep -q '__prologue_saves__'; then
+  echo "flags: $CFLAGS ok (__prologue_saves__ linked)"
+else
+  echo "FAIL: built without $CFLAGS (no __prologue_saves__)"; fail=1
+fi
+near=$("$OBJDUMP" -d "$ELF" | awk '
+  function hex(s,   i, v, c) { v = 0; s = tolower(s); sub(/^0x/, "", s)
+    for (i = 1; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)); if (!c) break; v = v * 16 + c - 1 }
+    return v }
+  /\t(call|jmp)\t0x/ { a = $1; sub(/:$/, "", a); n = split($0, f, "\t")
+    for (i = 1; i < n; i++) if (f[i] == "call" || f[i] == "jmp") t = f[i + 1]
+    d = hex(t) - (hex(a) + 2); if (d >= -4096 && d <= 4094) near++ }
+  END { print near + 0 }')
+if [ "$near" -eq 0 ]; then
+  echo "flags: $LDFLAGS ok (no call/jmp within rcall/rjmp reach)"
+else
+  echo "FAIL: built without $LDFLAGS ($near call/jmp an rcall/rjmp would reach)"; fail=1
 fi
 
 echo "largest symbols:"

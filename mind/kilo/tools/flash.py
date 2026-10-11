@@ -3,8 +3,10 @@
 Sequence:
 
 1. Build (optional): ``arduino-cli compile --fqbn arduino:avr:uno --output-dir
-   DIR --build-property compiler.cpp.extra_flags=-DKILO_BUILD=0x<git hash>
-   body/``, then ``body/tools/size_check.sh`` (the size/symbol harness) if present; stop on
+   DIR --build-property "compiler.cpp.extra_flags=-mcall-prologues
+   -DKILO_BUILD=0x<git hash>" --build-property
+   compiler.c.extra_flags=-mcall-prologues --build-property
+   compiler.c.elf.extra_flags=-Wl,--relax body/``, then ``body/tools/size_check.sh`` (the size/symbol harness) if present; stop on
    failure. Building happens *before* the link is stopped, so the body stays
    supervised during the 1-3 min compile on a Pi 2.
 2. Stop the serial link: the in-process ``SerialLink``, or the daemon's (the
@@ -116,11 +118,21 @@ def git_hash(repo: Path = REPO_DIR) -> str | None:
         return None
 
 
+# Size flags for the body build (doc §3h): -mcall-prologues shares the
+# register save/restore code between functions, --relax turns call/jmp into
+# rcall/rjmp where they reach (≈420 B of flash, RAM unchanged). The same
+# flags are in body/tools/size_check.sh.
+CFLAGS = "-mcall-prologues"
+LDFLAGS = "-Wl,--relax"
+
+
 def compile_cmd(sketch: Path, out_dir: Path, build_hash: str | None) -> list[str]:
-    cmd = ["arduino-cli", "compile", "--fqbn", FQBN, "--output-dir", str(out_dir)]
-    if build_hash:
-        cmd += ["--build-property", f"compiler.cpp.extra_flags=-DKILO_BUILD=0x{build_hash}"]
-    return cmd + [str(sketch)]
+    cpp = CFLAGS + (f" -DKILO_BUILD=0x{build_hash}" if build_hash else "")
+    return ["arduino-cli", "compile", "--fqbn", FQBN, "--output-dir", str(out_dir),
+            "--build-property", f"compiler.cpp.extra_flags={cpp}",
+            "--build-property", f"compiler.c.extra_flags={CFLAGS}",
+            "--build-property", f"compiler.c.elf.extra_flags={LDFLAGS}",
+            str(sketch)]
 
 
 def find_avrdude() -> tuple[str, str | None]:

@@ -195,6 +195,26 @@ def test_reboot_detected(rig):
     assert client.state.reset_cause == "WARM_UNEXPECTED"
 
 
+def test_reboot_starts_a_new_epoch():
+    """Boot epoch (docs §3c): each reboot starts at the last epoch + 1,
+    skipping 0, HELLO reports it, and a goal from before the reboot is STALE."""
+    from kilo.vbody.sim import boot_epoch
+
+    assert [boot_epoch(e) for e in (0, 1, 41, 254, 255)] == [1, 2, 42, 255, 1]
+    vb = VirtualBody()
+    assert vb.epoch == 0  # first power-on: the fresh body of the link harness
+    seen = [vb.epoch]
+    for _ in range(300):  # never the same epoch twice in a row, never 0, wraps
+        vb.reboot(P.ResetCause.WARM_UNEXPECTED, boot_delay=0)
+        assert vb.epoch not in (0, seen[-1])
+        seen.append(vb.epoch)
+    assert 255 in seen and seen[seen.index(255) + 1] == 1
+    hello = [p for t, _, p in vb.take_sent() if t == P.MsgId.HELLO][-1]
+    assert vb.msgs.unpack(P.MsgId.HELLO, hello).epoch == vb.epoch
+    old = vb.epoch
+    vb.reboot(P.ResetCause.REQUESTED, boot_delay=0)
+    assert vb.epoch == boot_epoch(old)
+
 def test_pty_round_trip():
     transport, path, slave = open_pty()
     vb = VirtualBody(transport).start()
@@ -417,7 +437,7 @@ def test_contract_f_commands_and_dedup():
     s.vb.epoch = 7
     out = s.send("REBOOT", magic=P.REBOOT_MAGIC)
     assert [t for t, _ in out] == [M.ACK, M.HELLO, M.EVENT]
-    assert out[1][1].reset_cause == P.ResetCause.REQUESTED and out[1][1].epoch == 0
+    assert out[1][1].reset_cause == P.ResetCause.REQUESTED and out[1][1].epoch == 8  # boot epoch: the last + 1
     assert events(out) == [(EV.BOOT, P.ResetCause.REQUESTED)]
     assert s.vb.posture == "LIMP" and not s.vb.wd_armed and s.vb.last_cmd is None
 

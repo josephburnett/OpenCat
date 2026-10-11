@@ -15,7 +15,8 @@
 //
 // After every command: one line per frame the body sent, "tx TYPE PAYLOADHEX"
 // (decimal type), then "end". A REBOOT that is acked OK is emulated like the
-// AVR: the body restarts and sends HELLO (REQUESTED) and EVENT BOOT.
+// AVR: the body restarts at its boot epoch (core/reset.h) and sends HELLO
+// (REQUESTED) and EVENT BOOT.
 #include <cstdio>
 #include <iostream>
 #include <sstream>
@@ -29,7 +30,7 @@
 
 static Config cfg;
 
-static void boot(uint8_t state, uint8_t batt) {
+static void boot(uint8_t state, uint8_t batt, uint8_t epoch = 0) {
   g_ee.reset();
   config_defaults(cfg.img);
   cfg.state = (ConfigState)state;
@@ -37,7 +38,7 @@ static void boot(uint8_t state, uint8_t batt) {
   cfg.saved = 0;
   cfg.newest = 0xFF;
   params_load(cfg.img);
-  body_init(g_body, &cfg, nullptr, true);
+  body_init(g_body, &cfg, nullptr, true, epoch);
   g_body.batt.level = (BattLevel)batt;
   g_lh.reset();
   for (int c = 0; c < 16; c++) g_lh.pca[c] = PCA_FULL_OFF;  // cold boot: every channel off
@@ -54,9 +55,9 @@ static void flush(void) {
   if (g_lh.reboots) {
     uint8_t state = cfg.state, batt = g_body.batt.level;
     uint16_t tick = g_body.tick;
-    boot(state, batt);
+    boot(state, batt, reset_boot_epoch(g_body.epoch));  // the boot epoch, as main.cpp
     link_boot(RESET_REQUESTED, tick);
-    events_push(g_body.ev, EV_BOOT, RESET_REQUESTED, 0, 0);
+    events_push(g_body.ev, EV_BOOT, RESET_REQUESTED, 0, g_body.epoch);
     link_send_events();
     for (const TxFrame& f : g_lh.take()) out.push_back(f);
   }

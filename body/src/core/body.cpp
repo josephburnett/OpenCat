@@ -4,10 +4,12 @@
 #include "posture.h"
 #include "pgm.h"
 
-void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok) {
-  // Everything starts at zero (queues empty, counters 0, epoch 0, filter
-  // unseeded, watchdog unarmed) except what is set below.
+void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok, uint8_t epoch) {
+  // Everything starts at zero (queues empty, counters 0, filter unseeded,
+  // watchdog unarmed) except what is set below. The epoch is the boot epoch
+  // from the reset record (core/reset.h), never the previous run's.
   memset(&b, 0, sizeof b);
+  b.epoch = epoch;
   b.cfg = cfg;
   b.att.gz = Q14_ONE;  // upright until the first packet says otherwise
   b.imu_fault = imu_ok ? 0 : 1;

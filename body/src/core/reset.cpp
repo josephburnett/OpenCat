@@ -1,5 +1,10 @@
 #include "reset.h"
 
+uint8_t reset_boot_epoch(uint8_t last_epoch) {
+  uint8_t e = (uint8_t)(last_epoch + 1);
+  return e ? e : 1;
+}
+
 ResetCause reset_classify(ResetRecord& r, uint32_t build, uint16_t& last_alive) {
   ResetCause c;
   if (r.magic != RESET_MAGIC) {
@@ -15,5 +20,6 @@ ResetCause reset_classify(ResetRecord& r, uint32_t build, uint16_t& last_alive) 
   r.build = build;
   r.reason = RESET_REASON_NONE;
   r.alive_tick = 0;
+  r.epoch = reset_boot_epoch(r.epoch);  // garbage on a cold boot: still a start
   return c;
 }

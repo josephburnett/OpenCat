@@ -49,7 +49,7 @@ steps assume (`kilo daemon` must say "no daemon listening").
 
 ```sh
 body/tools/host_tests.sh                   # ends "host tests: ALL PASSED"
-body/tools/size_check.sh                   # flash ~19.5 KB of 22528, PASS
+body/tools/size_check.sh                   # flash ~22.1 KB of 24576, PASS
 (cd mind && python -m pytest -q)
 ```
 
@@ -260,7 +260,7 @@ the side at the same spot for both firmwares.
 
 ```sh
 body/tools/host_tests.sh                   # ends "host tests: ALL PASSED" (incl. "keyframe ... 0 failed")
-body/tools/size_check.sh                   # flash ~22.5 KB of 22528, globals 1432 of 1540, PASS
+body/tools/size_check.sh                   # flash ~22.1 KB of 24576, globals 1433 of 1540, PASS
 (cd mind && python -m pytest -q)
 kilo -v flash
 kilo status                                # `proto 1.2`
@@ -418,7 +418,7 @@ Kilo must not fall off the surface.
 
 ```sh
 body/tools/host_tests.sh                   # ALL PASSED, incl. "reflex ... 0 failed"
-body/tools/size_check.sh                   # flash ~22.5 KB of 22528, globals 1432 of 1540, PASS
+body/tools/size_check.sh                   # flash ~22.1 KB of 24576, globals 1433 of 1540, PASS
 (cd mind && python -m pytest -q)
 kilo -v flash
 kilo status                                # stack free: note it (was ≈730 B before the trick store)
