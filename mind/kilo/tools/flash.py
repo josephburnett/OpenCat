@@ -7,10 +7,10 @@ Sequence:
    body/``, then ``body/tools/size_check.sh`` (the size/symbol harness) if present; stop on
    failure. Building happens *before* the link is stopped, so the body stays
    supervised during the 1-3 min compile on a Pi 2.
-2. Stop the serial link (the in-process ``SerialLink``, if given). The daemon
-   lock protocol (``/run/kilo/serial.lock``) arrives with the daemon; meanwhile
-   pyserial's ``exclusive=True`` makes a second kilo process fail to open the
-   port rather than share it.
+2. Stop the serial link: the in-process ``SerialLink``, or the daemon's (the
+   ``link`` argument is then a port lease on the daemon socket, see
+   kilo.cli). pyserial's ``exclusive=True`` (flock) makes any other kilo
+   process fail to open the port rather than share it.
 3. Reset into optiboot:
    - ``dtr``: USB adapter (CH340/CH343). ``avrdude -c arduino`` pulses DTR itself.
    - ``gpio``: Pi header. GPIO4 is pulsed low (emulated open-drain, see
@@ -18,15 +18,24 @@ Sequence:
    - ``auto``: ``gpio`` for the Pi's UART (ttyAMA*, ttyS*, serial0), else ``dtr``.
 4. ``avrdude -c arduino -p atmega328p -P PORT -b 115200 -D -U flash:w:HEX:i``,
    retried once (with a fresh reset).
-5. Clear HUPCL on the port (open, ``termios``, close; see
-   ``kilo.link.transport.clear_hupcl``). avrdude drops DTR on exit and its
-   termios setup re-enables HUPCL; without this every later ``kilo`` command
-   would reset the body on open. This open raises DTR, which is the one
-   post-flash reset; later opens find DTR already asserted.
-6. Restart the link and, for new firmware, expect HELLO with reset cause
-   FLASHED within 3 s, and (when this run built the firmware) HELLO.fw_build
+5. Settle the port (``kilo.link.transport.settle_port``): a few production
+   opens (pyserial at the link baud, DTR/RTS asserted, HUPCL cleared). avrdude
+   drops DTR on exit, re-enables HUPCL and leaves the line at 115200; the
+   first settle open makes every transition at once (the one post-flash
+   reset), the others absorb whatever else the driver does, so the verify
+   open and every later ``kilo`` command find the line unchanged and do not
+   reset the body.
+6. Restart the link and, for new firmware, expect a HELLO after the flash
+   within ``verify_timeout`` (8 s: reset, optiboot's wait, DMP init and the
+   first HELLO take ≈2.2 s on Kilo, plus the link restart) with reset cause
+   FLASHED (any cause over a USB adapter, where the settle reset makes it
+   WARM_UNEXPECTED), and (when this run built the firmware) HELLO.fw_build
    equal to the build hash: the first 8 hex digits of the git commit, passed
    as ``-DKILO_BUILD=0x<hash>`` and reported by the body as a u32.
+
+With a daemon running (``kilo run``), step 2 asks it to release the port
+(``release_port`` with a lease) and step 6 has it reacquire the port and
+verify on its link.
 
 ``--legacy`` flashes ``mind/firmware/opencat-legacy.hex`` (token protocol at
 115200), skipping the build and the HELLO check.
@@ -43,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from kilo.link.transport import clear_hupcl_path
+from kilo.link.transport import DEFAULT_BAUD, describe_settle, settle_port
 from kilo.protocol.kilo_protocol import RESET_PULSE_MS
 from kilo.tools.gpio import ResetBackend, pick_backend
 
@@ -77,6 +86,10 @@ class FlashOptions:
     avrdude: str | None = None
     avrdude_conf: str | None = None
     retries: int = 1
+    verify_timeout: float = 8.0
+    settle_cycles: int = 3
+    baud: int = DEFAULT_BAUD
+    verbose: bool = False
 
 
 @dataclass
@@ -86,6 +99,8 @@ class FlashResult:
     reset: str = ""
     attempts: int = 0
     verified: bool | None = None
+    hello: dict[str, Any] | None = None  # the HELLO the verify saw (any cause), if any
+    settle: list[Any] = field(default_factory=list)
     expected_build: int | None = None  # HELLO.fw_build to expect, if this run built it
 
 
@@ -125,6 +140,11 @@ def avrdude_cmd(port: str, hex_path: Path, avrdude: str = "avrdude", conf: str |
                   "-U", f"flash:w:{hex_path}:i"]
 
 
+def is_usb_port(port: str) -> bool:
+    """A USB adapter (DTR wired to RESET), as opposed to the Pi header UART."""
+    return not port.startswith(PI_UART_PREFIXES)
+
+
 def reset_method(port: str, requested: str = "auto") -> str:
     if requested != "auto":
         return requested
@@ -137,17 +157,24 @@ def flash(
     link: Any = None,
     run: Callable[..., Any] = subprocess.run,
     reset_backend: ResetBackend | None = None,
-    verify: Callable[[float, int | None], bool] | None = None,
+    verify: Callable[[float, int | None, float], Any] | None = None,
     say: Callable[[str], None] = print,
-    hupcl: Callable[[str], Any] = clear_hupcl_path,
+    settle: Callable[[str], Any] | None = None,
 ) -> FlashResult:
-    """Run the flash sequence. ``link`` (a SerialLink) is stopped and restarted.
+    """Run the flash sequence. ``link`` (a SerialLink, or anything with
+    ``running``/``stop()``/``start()``) is stopped and restarted.
 
-    ``verify(since, expected_build)`` is called after the link restarts for
-    new firmware and should return True once a HELLO with reset cause FLASHED
-    (and fw_build == expected_build, unless None) arrived after ``since``
-    (see ``verify_hello``).
+    ``settle(port)`` runs after avrdude, before the link restarts (default
+    ``settle_port`` with ``opts.settle_cycles`` and ``opts.baud``).
+
+    ``verify(since, expected_build, timeout)`` is called after the link
+    restarts for new firmware; it returns a ``VerifyResult`` (or a bool),
+    true once a HELLO with the right cause (and fw_build == expected_build,
+    unless None) arrived after ``since`` (see ``verify_hello``).
     """
+    if settle is None:
+        def settle(port: str) -> Any:
+            return settle_port(port, opts.baud, cycles=opts.settle_cycles)
     if opts.legacy:
         hex_path = opts.hex_path or LEGACY_HEX
         build = False
@@ -224,36 +251,98 @@ def flash(
         if last is not None:
             raise last
     finally:
-        # 5. keep DTR asserted from here on, so only this open resets the body
+        # 5. settle DTR/HUPCL/baud so that no later open resets the body
         if not opts.dry_run:
-            hupcl(opts.port)
+            res.settle = list(settle(opts.port) or [])
+            _report_settle(res.settle, opts, say)
         # 6. restart the link whatever happened
         if was_running:
             say("restarting serial link")
             link.start()
     if opts.verify and not opts.legacy and not opts.dry_run and verify is not None:
-        res.verified = verify(t_flash, res.expected_build)
-        want = "reset_cause=FLASHED" + ("" if res.expected_build is None
-                                        else f" fw_build={res.expected_build:08x}")
-        say(f"verified: HELLO {want}" if res.verified else f"warning: no HELLO with {want} within 3 s")
+        r = verify(t_flash, res.expected_build, opts.verify_timeout)
+        res.verified = bool(r)
+        res.hello = getattr(r, "hello", None)
+        cause = "any reset cause" if is_usb_port(opts.port) else "reset_cause=FLASHED"
+        want = cause + ("" if res.expected_build is None else f" fw_build={res.expected_build:08x}")
+        seen = describe_hello(res.hello)
+        if res.verified:
+            say(f"verified: HELLO {want}" + (f" ({seen})" if seen else ""))
+        else:
+            say(f"warning: no HELLO with {want} within {opts.verify_timeout:g} s; "
+                + (f"last HELLO seen: {seen}" if seen else "no HELLO seen at all"))
     return res
 
 
-def verify_hello(link: Any, since: float, expected_build: int | None = None,
-                 timeout: float = 3.0, any_cause: bool = False) -> bool:
-    """True once ``link`` saw a HELLO with reset cause FLASHED after ``since``
-    (and fw_build == ``expected_build`` unless that is None).
+def _report_settle(cycles: list[Any], opts: FlashOptions, say: Callable[[str], None]) -> None:
+    if not cycles:
+        return
+    errs = [c for c in cycles if getattr(c, "error", None)]
+    hup = [str(c.cycle) for c in cycles if getattr(c, "hupcl_was_set", None)]
+    say(f"settled {opts.port}: {len(cycles)} open/close cycles at {opts.baud}"
+        + (f", HUPCL was set on cycle {','.join(hup)}" if hup else "")
+        + (f", {len(errs)} failed" if errs else ""))
+    if opts.verbose or errs:
+        for line in describe_settle(cycles).splitlines():
+            say("  " + line)
 
-    ``any_cause``: accept any reset cause. Over a USB adapter, opening the port
-    to verify pulses DTR and resets the body once more, so the HELLO it sees
-    says WARM_UNEXPECTED rather than FLASHED; the build hash still proves what
-    is running."""
+
+def describe_hello(h: dict[str, Any] | None) -> str:
+    if not h:
+        return ""
+    from kilo.link import consts
+
+    cause = consts.RESET_CAUSES.get(h.get("reset_cause"), h.get("reset_cause"))
+    build = h.get("fw_build")
+    return (f"build {build:08x}" if isinstance(build, int) else f"build {build}") + f" reset {cause}"
+
+
+@dataclass
+class VerifyResult:
+    ok: bool
+    hello: dict[str, Any] | None = None  # the last HELLO seen after ``since`` (any cause)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def verify_hello(link: Any, since: float, expected_build: int | None = None,
+                 timeout: float = 8.0, any_cause: bool = False) -> VerifyResult:
+    """Wait up to ``timeout`` for a HELLO received after ``since`` with reset
+    cause FLASHED (and fw_build == ``expected_build`` unless that is None).
+
+    ``any_cause``: accept any reset cause. Over a USB adapter the settle (or
+    the verify open) pulses DTR and resets the body once more, so the HELLO
+    says WARM_UNEXPECTED rather than FLASHED; the build hash still proves
+    what is running. Whatever happens, the result carries the last HELLO
+    seen after ``since`` so a failure can say what the body did report."""
+    from kilo.link.messages import fields_of
     from kilo.protocol.kilo_protocol import ResetCause
 
-    def ok() -> bool:
+    def fresh() -> Any:
         st = link.state
         h = st.hello
-        return (h is not None and st.hello_at is not None and st.hello_at >= since
-                and (any_cause or h.reset_cause == ResetCause.FLASHED)
+        return h if h is not None and st.hello_at is not None and st.hello_at >= since else None
+
+    def ok() -> bool:
+        h = fresh()
+        return (h is not None and (any_cause or h.reset_cause == ResetCause.FLASHED)
                 and (expected_build is None or h.fw_build == expected_build))
-    return link.wait_until(ok, timeout)
+    # Wait in slices; if no fresh HELLO came (the boot HELLO went out before
+    # the port was open, the on-connect HELLO_REQ hit optiboot), ask for one.
+    deadline = time.monotonic() + timeout
+    good = False
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        if link.wait_until(ok, min(1.0, left)):
+            good = True
+            break
+        if fresh() is None and getattr(link.state, "alive", False) and hasattr(link, "request"):
+            try:
+                link.request("HELLO_REQ", timeout=0.3)
+            except Exception:
+                pass
+    h = fresh()
+    return VerifyResult(good, None if h is None else fields_of(h))

@@ -1,0 +1,27 @@
+# Kilo mind daemon: a systemd *user* service (mind/README.md "Daemon and systemd").
+#
+# Installed by mind/systemd/install.sh to ~/.config/systemd/user/kilo.service,
+# with lingering enabled so it runs from boot without a login session.
+#
+#   systemctl --user start|stop|restart|status kilo
+#   journalctl --user -u kilo -f
+#
+# Settings: ~/.config/kilo/env (KILO_PORT, KILO_RUN_ARGS, ...; see env.example).
+[Unit]
+Description=Kilo mind daemon (owns the body's serial port: kilo run)
+Documentation=file:%h/OpenCat/mind/README.md
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/kilo/env
+Environment=PYTHONUNBUFFERED=1
+# --log: JSON-lines frame log in ~/kilo-logs; stderr (the daemon's own log) goes to the journal.
+ExecStart=%h/OpenCat/.venv/bin/kilo run --log $KILO_RUN_ARGS
+# SIGTERM: drop goals, go silent (the body's watchdog takes over), close the port.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

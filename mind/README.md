@@ -78,16 +78,38 @@ The link runs at 250000 baud 8N1. Flashing uses 115200 (optiboot).
 **DTR and resets.** On the NyBoard DTR is AC-coupled to RESET, so a DTR rising
 edge (the kernel raises DTR on open) resets the 328P. Every time `kilo` opens a
 serial port it clears the tty's HUPCL flag (like `stty -hupcl`), so DTR stays
-asserted after close and the next open does not reset the body. `kilo flash`
-clears it again right after avrdude, which drops DTR and re-enables HUPCL; the
-post-flash verify is then the last reset. The first open after a replug still
-resets the body once.
+asserted after close and the next open does not reset the body. The first open
+after a replug still resets the body once.
+
+After avrdude it takes more than that. Measured on Kilo (2026-10-10): the first
+*two* open/close cycles after avrdude each reset the board, and only from the
+third does DTR stay up; a port left at B0 (`stty 0`) behaves the same. What we
+believe happens: avrdude's arduino programmer ends with DTR and RTS explicitly
+cleared, restores its saved termios (HUPCL on) and leaves the line coding at
+115200. Several independent things can then make a rising DTR edge on a later
+open: the kernel raises DTR on every open whose saved baud is not B0; cdc-acm
+raises it when termios goes from B0 to a real baud; HUPCL drops it again on the
+last close; and some USB bridges glitch the modem lines on a line-coding (baud)
+change. The old sequence fixed these one per open (a raw open that only cleared
+HUPCL, then the verify open that set 250000), which gives two resets.
+
+So `kilo flash` now *settles* the port (`kilo.link.transport.settle_port`):
+three production opens in a row (pyserial at the link baud, DTR and RTS set
+before `open()` so pyserial asserts them, HUPCL cleared, DTR/RTS asserted again,
+close, 0.3 s gap). The first makes every transition at once (the one reset
+that cannot be avoided: DTR is low after avrdude and must come up); the others
+must be no-ops whatever the exact mechanism, and absorb a second reset if there
+is one, before the verify opens the port. `kilo -v flash` prints what each
+cycle found (HUPCL set or not, DTR/RTS). Tests model the four mechanisms
+(`tests/test_settle.py`); the hardware check is docs/p1-hardware-test.md step 2:
+`kilo status` right after `kilo flash` must show uptime continuing, not 0.
 
 ## CLI
 
 ```sh
 kilo status                  # HELLO, mode, attitude, battery, link stats (--json)
 kilo monitor                 # live telemetry table; Ctrl-C to quit
+kilo monitor --rate 25 --json   # JSON lines at 25 Hz (also the default when stdout is not a terminal)
 kilo monitor --passive --duration 20   # send nothing; timeline of events and changes
 kilo posture stand           # holds the posture until Ctrl-C (or --for SECONDS)
 kilo posture stand --for 2 --then-watch 15   # hold, go silent, print the watchdog timeline
@@ -101,16 +123,111 @@ kilo flash                   # build body/, size harness, reset, avrdude, verify
 kilo flash --no-build        # flash the last build
 kilo flash --legacy          # flash mind/firmware/opencat-legacy.hex
 kilo vbody                   # virtual body on a pty; prints the pty path
+kilo run [--behaviour]       # the daemon: owns the port, serves the socket (normally systemd)
+kilo daemon [status] | daemon stop
 ```
 
 Global options: `--port`, `--baud`, `--log` / `--log-file FILE` (JSON-lines
 log of every frame and event, written by a background thread),
-`--timeout`, `-v`/`-vv`.
+`--timeout`, `-v`/`-vv`, `--socket PATH`, `--direct`.
 
-There is no daemon yet, so each command opens the port itself. Goals are only
-held while the mind is alive: when `kilo posture` exits, heartbeats stop and
-the body's watchdog stops motion at 0.5 s and moves to REST at 1.5 s. That is
-by design (§4).
+Every command first tries the daemon's socket and, when no daemon listens,
+opens the port itself (the "direct" path, which the hardware-test docs use with
+the daemon stopped). Output is the same either way. `--direct` skips the
+daemon; `--port P` naming another port than the daemon's opens P directly.
+
+Goals are only held while the mind is alive. Direct: when `kilo posture`
+exits, heartbeats stop and the body's watchdog stops motion at 0.5 s and moves
+to REST at 1.5 s (§4). Through the daemon the daemon keeps feeding the
+watchdog, so it ends the hold itself (see below).
+
+## Daemon and systemd
+
+`kilo run` is one process that owns the serial port, the `SerialLink` and the
+`BodyClient`, and serves a Unix socket. The socket path comes from one
+resolver (`kilo.remote.socket_path()`) used by both sides: `--socket`, else
+`$KILO_SOCKET`, else `/run/kilo/kilo.sock` for root, else
+`$XDG_RUNTIME_DIR/kilo/kilo.sock` (`/run/user/1000/kilo/kilo.sock` for joe on the
+Pi), else `~/.kilo/kilo.sock`.
+
+**Protocol.** JSON lines. Request `{"id": 7, "op": "param_get", "args": {"id":
+"WD_LIMP_S"}}`, reply `{"id": 7, "ok": true, "result": ...}` or `{"id": 7, "ok":
+false, "error": {"type": "CommandError", "message": ..., "args": [...]}}` (the
+client re-raises the same exception type, so the CLI prints the same errors).
+Ops: `daemon` (pid, port, clients, holds, behaviour), `ping`, `alive`,
+`snapshot`, `wait_ready`, `stats`, `goals`, `posture`, `set_balance`,
+`release`, `cal_get|cal_set|cal_save|cal_revert`, `param_get|param_set|param_list`,
+`pca_read`, `eeprom_read`, `request` (the raw `SerialLink.request()`, for
+queries and commands, not goals), `call` (any other public BodyClient method
+with JSON-able arguments), `subscribe {rate_hz, kinds}` / `unsubscribe`,
+`release_port {lease_s}` / `reacquire_port`, `verify_hello` (for `kilo
+flash`), `shutdown`. After `subscribe`, the daemon streams `{"stream": kind,
+"t": ..., "data": ...}` lines without an id: `snapshot` (BodyState.snapshot()
+at `rate_hz`), `telemetry` (decimated to `rate_hz`), `event`, `hello`,
+`reboot`, `goals_cleared`, `connection`. The loop never blocks: body calls run
+in a thread pool, and a client that does not read loses stream messages
+(counted, then one `dropped` line) instead of stalling anyone; one that does
+not read its replies is disconnected.
+
+**Holds.** A goal a client sets (`posture`, `set_balance`) belongs to that
+client. The daemon keeps it alive while the client stays connected and sends
+something at least every 3 s (`RemoteBody` pings while `kilo posture` or
+`kilo balance` holds). When the client goes away, or goes quiet, the hold
+ends the way `kilo posture --for` ends without a daemon, minus the 0.5 s stop
+stage: the daemon latches REST at once and LIMP 10 s later (`kilo run
+--idle-posture rest|limp|none`, `--idle-limp S`), and switches a balance
+enable off. With a behaviour runner, the daemon only drops the goal.
+
+**Silent modes.** `kilo monitor --passive` and `kilo posture --then-watch`
+must send nothing and therefore need the port to themselves; with a daemon on
+that port they refuse and say so. Stop the daemon first (`kilo daemon stop`,
+or `systemctl --user stop kilo`).
+
+**Flashing with a daemon.** `kilo flash` builds first, then asks the daemon
+to release the port (`release_port`, 300 s lease; the daemon also takes the
+port back if the flashing client disconnects), runs avrdude, settles the port,
+asks the daemon to reacquire it and verifies the HELLO on the daemon's link.
+
+**Shutdown.** SIGTERM or SIGINT (or `kilo daemon stop`): stop the behaviour
+runner, close clients, drop every goal and go silent so the body's watchdog
+takes over (stop, REST, LIMP), close the port, remove the socket.
+
+**Behaviour runner.** `kilo run --behaviour` imports
+`kilo.behaviour.runner.run_behaviour` lazily and calls
+`run_behaviour(client, state, stop_event, log_dir)` in its own thread:
+`client` is the daemon's `BodyClient`, `state` its `BodyState`, `stop_event` a
+`threading.Event` set at shutdown (return promptly once set), `log_dir` a
+`pathlib.Path` (`--log-dir`, default `~/kilo-logs`). An `async def` runner is
+awaited on the daemon's loop instead (same arguments). The daemon stamps the
+link's liveness itself; the runner only sets goals. If the import fails the
+daemon logs it and runs without.
+
+**systemd: a user service.** `mind/systemd/kilo.service` runs `kilo run --log`
+as joe's *user* service, with lingering so it starts at boot without a login.
+Why a user service rather than a system unit with `User=joe`: it is installed
+and managed without sudo (`systemctl --user`), it runs with joe's groups
+(`dialout`) and venv, and `$XDG_RUNTIME_DIR` (`/run/user/1000`) is the same
+directory joe's shell sees, so `kilo status` finds the socket with no
+configuration. The cost: lingering must be on (install.sh does it), and the
+P3 "clean Pi shutdown on CRITICAL battery" needs a polkit rule or a sudoers
+line for `systemctl poweroff` from a user service.
+
+```sh
+mind/systemd/install.sh          # idempotent: unit -> ~/.config/systemd/user/, ~/.config/kilo/env
+                                 # from env.example if missing, lingering, daemon-reload, enable
+mind/systemd/install.sh --start  # ... and (re)start it now
+systemctl --user status kilo
+journalctl --user -u kilo -f     # the daemon's log (frames go to ~/kilo-logs/kilo-*.jsonl)
+kilo daemon                      # pid, port, clients, holds
+systemctl --user stop kilo       # before `kilo monitor --passive` or the hardware-test steps
+```
+
+`~/.config/kilo/env` (systemd `EnvironmentFile` syntax) sets `KILO_PORT`
+(`/dev/ttyACM0`, the CH343 adapter in a Pi USB port, for now; `/dev/ttyAMA0`
+once the Pi sits on the NyBoard header) and `KILO_RUN_ARGS` (e.g.
+`--behaviour`). `--kilo PATH` points the unit at another `kilo` executable than
+`~/OpenCat/.venv/bin/kilo`. If `journalctl --user` shows nothing (volatile
+journal), use `journalctl _SYSTEMD_USER_UNIT=kilo.service` (joe is in `adm`).
 
 ### Watching the body on its own (passive)
 
@@ -163,8 +280,9 @@ starts the LIMP timer at the REST trip (11.5 s).
    `body/tools/size_check.sh --elf` on that build (the size/symbol harness; it
    honours `FLASH_MAX`, e.g. `FLASH_MAX=18432 kilo flash` while the P0 build is
    over its 16 KB ceiling, see docs/architecture.md §8 question 9).
-2. Stops the serial link (in-process; a second kilo process cannot hold the port
-   because it is opened exclusively).
+2. Releases the port: asks a running daemon to let go of it (see "Daemon and
+   systemd"), or stops its own link. A second kilo process cannot hold the
+   port meanwhile because it is opened exclusively.
 3. Resets the board: on a USB adapter avrdude toggles DTR itself; on the Pi
    header (`--reset auto` picks it for ttyAMA*/ttyS*/serial0) GPIO4 is driven
    low for 100 ms (`--reset-ms`, spec `reset_pulse_ms`) and released back to an input (emulated
@@ -175,9 +293,16 @@ starts the LIMP timer at the REST trip (11.5 s).
 4. `avrdude -c arduino -p atmega328p -P PORT -b 115200 -D -U flash:w:HEX:i`,
    retried once with a fresh reset. avrdude is taken from PATH or from
    arduino-cli's `~/.arduino15` tools.
-5. Clears HUPCL on the port (see "DTR and resets" above), then restarts the
-   link and waits up to 3 s for HELLO with reset cause FLASHED
-   and, when it built the firmware, `fw_build` equal to that build hash.
+5. Settles the port (three production open/close cycles, see "DTR and
+   resets" above; `--settle-cycles N`), then restarts the link (or has the
+   daemon reacquire the port) and waits up to `--verify-timeout` (8 s) for a
+   HELLO received after the flash: reset cause FLASHED on the Pi header UART,
+   any cause over a USB adapter (where the settle reset makes it
+   WARM_UNEXPECTED), and, when it built the firmware, `fw_build` equal to that
+   build hash. On Kilo reset, optiboot's wait, DMP init and the first HELLO
+   take about 2.2 s, plus the link restart; if the boot HELLO went out before
+   the port was open it asks with HELLO_REQ. Either way it prints the HELLO it
+   saw (build and reset cause), and on failure the last one, if any.
 
 `--dry-run` prints the commands without running them.
 
@@ -488,8 +613,16 @@ detectors with synthetic traces (approach, walk-by, dropouts, tilt, tap,
 pet, pickup, quiet noise) and replay fixture logs (`tests/fixtures/`).
 `test_behaviour.py` covers the behaviour engine, drives, selector
 hysteresis, personality loading, a simulated seven-minute day with a fake
-body and a fast clock, and the runner against the virtual body. The suite
-takes about 40 s.
+body and a fast clock, and the runner against the virtual body.
+`test_daemon.py` runs the daemon on a real Unix socket
+against the virtual body on a pty: every op, hold semantics on disconnect and
+lease, streams and their rate, a client that never reads, port
+release/reacquire, shutdown, the behaviour hook, and the CLI through the
+daemon against direct (same output). `test_settle.py` checks the post-flash
+settle against a model of the line (tty core, cdc-acm, HUPCL, a line-coding
+glitch), flash verification, `kilo flash` with a fake avrdude direct and
+through the daemon, and `kilo monitor --rate`. `test_systemd.py` runs
+install.sh against fake systemctl/loginctl. The suite takes about a minute.
 
 ## Layout
 
@@ -509,7 +642,10 @@ kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (p
 kilo/tricks/                trick model, legacy importer, library/*.json (generated)
 kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner
 kilo/cli.py                 the `kilo` command
+kilo/daemon.py              `kilo run`: owns the port, serves the socket, holds, port release
+kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody (BodyClient over the socket)
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
 kilo/vbody/                 virtual body
 firmware/                   stored hex images (legacy firmware)
+systemd/                    kilo.service (user unit), env.example, install.sh
 ```

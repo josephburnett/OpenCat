@@ -123,3 +123,10 @@ def keep_alive(link: SerialLink, seconds: float, period: float = 0.02) -> None:
     while time.monotonic() < end:
         link.mark_alive()
         time.sleep(period)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_daemon(monkeypatch, tmp_path_factory):
+    """Never let a test (or a `kilo` subprocess) find a developer's running
+    daemon: point the socket somewhere empty unless a test sets its own."""
+    monkeypatch.setenv("KILO_SOCKET", str(tmp_path_factory.mktemp("nosock") / "none.sock"))

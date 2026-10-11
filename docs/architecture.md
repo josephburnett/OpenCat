@@ -1801,7 +1801,11 @@ RESET (the falling edge resets) or wired directly (the low level holds reset).
 It never drives the line high against the NyBoard's own reset circuit.
 
 **Flash sequence (`kilo flash`):**
-1. Ask the daemon to release `/dev/ttyAMA0` (`/run/kilo/serial.lock`).
+1. Ask the daemon to release `/dev/ttyAMA0` (the socket's `release_port` op,
+   with a lease; the daemon takes the port back on `reacquire_port`, when the
+   lease runs out, or when the flashing client disconnects). The port's
+   exclusive flock keeps any other process off it. This happens after the
+   build (step 2), so the body stays supervised while it compiles.
 2. `arduino-cli compile --fqbn arduino:avr:uno --output-dir ~/.cache/kilo-build body/`.
    About 1-3 min on a Pi 2 **(est.)**. The build hash goes in through
    `compiler.cpp.extra_flags=-DKILO_BUILD=0x<first 8 hex digits of the commit>`,
@@ -1815,8 +1819,13 @@ It never drives the line high against the NyBoard's own reset circuit.
 5. Within ≈200 ms, run
    `avrdude -p m328p -c arduino -P /dev/ttyAMA0 -b 115200 -D -U flash:w:body.ino.hex:i`.
    Optiboot only starts on an external reset and waits ≈1 s.
-6. Reopen at 250000 and expect HELLO with `reset_cause = FLASHED` and
-   `fw_build` equal to the build hash within 3 s. Retry once.
+6. Settle the port (three production open/close cycles: link baud, DTR and
+   RTS asserted, HUPCL cleared; mind/README.md "DTR and resets"), have the
+   daemon reacquire it, and expect a HELLO received after the flash with
+   `reset_cause = FLASHED` (any cause over a USB adapter) and `fw_build` equal
+   to the build hash within 8 s (`--verify-timeout`; reset, optiboot, DMP init
+   and the first HELLO take ≈2.2 s on Kilo). Print the HELLO seen either way.
+   Retry once.
 
 `kilo flash --legacy` writes `mind/firmware/opencat-legacy.hex`, which talks
 the token protocol at 115200 and finds its EEPROM intact.
@@ -1884,7 +1893,11 @@ arduino-cli compiles `src/` recursively, which is why the logic lives under
 `body/src/`.
 
 **CLI.** `kilo` talks to the daemon over `/run/kilo/kilo.sock` (JSON lines), or
-opens the port directly if the daemon is not running.
+opens the port directly if the daemon is not running. As built
+(`kilo/daemon.py`, `kilo/remote.py`): the socket is
+`$XDG_RUNTIME_DIR/kilo/kilo.sock` for the systemd user service
+(`/run/kilo/kilo.sock` only as root); protocol and ops in mind/README.md
+"Daemon and systemd".
 
 | Command | Purpose |
 |---|---|
