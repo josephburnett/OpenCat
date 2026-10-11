@@ -30,15 +30,16 @@ one on connect) are only sent while the mind's main loop proved alive within
 
 ## Install on the Pi
 
-pyserial comes from apt (`python3-serial`, 3.5). Recommended: a venv that can
-see the system site packages, so pyserial is not installed twice and the
-system Python stays untouched:
+pyserial comes from apt (`python3-serial`, 3.5). Recommended: a per-repo venv
+that can see the system site packages, so pyserial is not installed twice and
+the system Python stays untouched:
 
 ```sh
 sudo apt install python3-serial python3-venv
-python3 -m venv --system-site-packages ~/kilo-venv
-~/kilo-venv/bin/pip install -e ~/OpenCat/mind          # add '.[test]' for pytest
-echo 'export PATH="$HOME/kilo-venv/bin:$PATH"' >> ~/.bashrc
+cd ~/OpenCat
+python3 -m venv --system-site-packages ~/OpenCat/.venv
+~/OpenCat/.venv/bin/pip install -e mind pytest
+echo 'export PATH="$HOME/OpenCat/.venv/bin:$PATH"' >> ~/.bashrc
 ```
 
 The alternative, `pip install --break-system-packages -e .` into the system
@@ -52,10 +53,16 @@ UART on, 1-Wire off, UART clock 48 MHz, GPIO4 left as an input).
 ## Port rules
 
 1. `--port P` (or `$KILO_PORT`) always wins.
-2. On a Raspberry Pi, the header UART: `/dev/serial0` resolved, else
-   `/dev/ttyAMA0`. On the Pi 2 B that is the PL011 `ttyAMA0` on GPIO14/15.
-3. Otherwise the first `/dev/ttyUSB*`, then `/dev/ttyACM*` (the Petoi CH340 /
-   CH343 USB adapter, e.g. in WSL2 through usbipd).
+2. A plugged-in USB serial adapter: the first `/dev/ttyUSB*`, then
+   `/dev/ttyACM*` (the Petoi CH340 / CH343 USB adapter, e.g. in WSL2 through
+   usbipd, or in one of the Pi's USB ports). Plugging an adapter in is an
+   explicit choice, whereas the header UART's device node exists on every Pi
+   whether or not anything is wired to it. On a Pi, `kilo` warns that the
+   header UART was ignored; select it with `KILO_PORT=/dev/ttyAMA0` (or
+   `--port`).
+3. Otherwise, on a Raspberry Pi, the header UART: `/dev/serial0` resolved,
+   else `/dev/ttyAMA0`. On the Pi 2 B that is the PL011 `ttyAMA0` on
+   GPIO14/15.
 
 Device nodes are globbed rather than listed with `serial.tools.list_ports`,
 which hides `ttyAMA*`/`ttyS*` as "platform" ports on recent kernels (the same
@@ -64,9 +71,17 @@ problem Petoi's `serialMaster/ardSerial.py` works around).
 > **Unplug the CH343 USB adapter whenever the Pi drives the UART**, and vice
 > versa. Both drive the 328P's single RX line; with both attached, frames from
 > each side corrupt the other's. On a Pi with an adapter plugged in, `kilo`
-> prints a warning and still picks the header UART.
+> picks the adapter and prints a warning that the header UART was ignored.
 
 The link runs at 250000 baud 8N1. Flashing uses 115200 (optiboot).
+
+**DTR and resets.** On the NyBoard DTR is AC-coupled to RESET, so a DTR rising
+edge (the kernel raises DTR on open) resets the 328P. Every time `kilo` opens a
+serial port it clears the tty's HUPCL flag (like `stty -hupcl`), so DTR stays
+asserted after close and the next open does not reset the body. `kilo flash`
+clears it again right after avrdude, which drops DTR and re-enables HUPCL; the
+post-flash verify is then the last reset. The first open after a replug still
+resets the body once.
 
 ## CLI
 
@@ -114,7 +129,8 @@ by design (§4).
 4. `avrdude -c arduino -p atmega328p -P PORT -b 115200 -D -U flash:w:HEX:i`,
    retried once with a fresh reset. avrdude is taken from PATH or from
    arduino-cli's `~/.arduino15` tools.
-5. Restarts the link and waits up to 3 s for HELLO with reset cause FLASHED
+5. Clears HUPCL on the port (see "DTR and resets" above), then restarts the
+   link and waits up to 3 s for HELLO with reset cause FLASHED
    and, when it built the firmware, `fw_build` equal to that build hash.
 
 `--dry-run` prints the commands without running them.

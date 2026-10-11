@@ -20,7 +20,7 @@ import threading
 import time
 import tty
 from collections import deque
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 DEFAULT_BAUD = 250000
 READ_TIMEOUT_S = 0.02
@@ -37,6 +37,42 @@ class Transport(Protocol):
 TransportFactory = Callable[[], Transport]
 
 
+def clear_hupcl(fd: int, termios_mod: Any = None) -> bool:
+    """Clear HUPCL on a tty fd, so closing it leaves DTR asserted.
+
+    On the NyBoard DTR is AC-coupled to RESET: every DTR rising edge resets
+    the 328P. The kernel raises DTR on open and, with HUPCL set, drops it on
+    the last close, so each ``kilo`` command would reset the body. termios
+    state persists per device across opens, and avrdude (or a replug) sets
+    HUPCL again, so this is done on every open. Returns True on success;
+    False (silently) for non-ttys, Windows, or any termios error.
+    """
+    try:
+        if termios_mod is None:
+            import termios as termios_mod  # POSIX only
+        attrs = termios_mod.tcgetattr(fd)
+        if attrs[2] & termios_mod.HUPCL:
+            attrs[2] &= ~termios_mod.HUPCL
+            termios_mod.tcsetattr(fd, termios_mod.TCSANOW, attrs)
+        return True
+    except Exception:
+        return False
+
+
+def clear_hupcl_path(path: str, termios_mod: Any = None) -> bool:
+    """Open ``path`` (non-blocking, no controlling tty), clear HUPCL, close.
+
+    Opening raises DTR (one reset if it was low); the close then keeps it up."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except (OSError, AttributeError):
+        return False
+    try:
+        return clear_hupcl(fd, termios_mod)
+    finally:
+        os.close(fd)
+
+
 class SerialTransport:
     """pyserial port, 8N1, no flow control, low-latency mode where supported."""
 
@@ -48,6 +84,10 @@ class SerialTransport:
             port, baud, timeout=READ_TIMEOUT_S, write_timeout=0.5,
             exclusive=True,  # flock: a second kilo process cannot grab the port
         )
+        try:  # keep DTR asserted after close: no reset on the next open
+            clear_hupcl(self._ser.fileno())
+        except (AttributeError, OSError, ValueError):
+            pass  # no fileno() (Windows)
         try:  # ASYNC_LOW_LATENCY (§5); not supported on every driver
             self._ser.set_low_latency_mode(True)
         except (AttributeError, OSError, ValueError, NotImplementedError):
