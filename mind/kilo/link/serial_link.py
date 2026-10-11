@@ -797,7 +797,12 @@ class SerialLink:
         ev = consts.EVENTS.get(code, str(code))
         with self._lock:
             self.state.events.append((now, msg))
-        log.info("event %s arg=%s epoch=%s", ev, msg.arg, msg.epoch)
+        if code == consts.EV["IR_KEY"]:
+            from kilo import ir
+
+            log.info("event IR_KEY %s epoch=%s", ir.describe(msg.arg), msg.epoch)
+        else:
+            log.info("event %s arg=%s epoch=%s", ev, msg.arg, msg.epoch)
         self._log("event", name=ev, code=code, arg=msg.arg, tick=msg.tick, epoch=msg.epoch)
         with self._lock:
             prev_epoch = self.state.epoch

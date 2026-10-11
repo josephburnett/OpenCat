@@ -8,7 +8,7 @@
     kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S] [--force]
     kilo vbody [--fall-after S] [--no-keys]
-    kilo run [--port P] [--socket PATH] [--log] [--kilolog [FILE]] [--behaviour]
+    kilo run [--port P] [--socket PATH] [--log] [--kilolog [FILE]] [--behaviour] [--remote]
     kilo daemon [status|stop]
     kilo log summary|replay|plot FILE ...
     kilo --kilolog [FILE] COMMAND ...    (also: kilo monitor --percepts; kilo.cli_tools)
@@ -194,6 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="telemetry/behaviour log dir (default ~/kilo-logs)")
     s.add_argument("--behaviour", action="store_true",
                    help="start kilo.behaviour.runner.run_behaviour if it is installed")
+    s.add_argument("--remote", action="store_true",
+                   help="act on the IR remote's keys (EVENT IR_KEY; key map in kilo.ir and mind/README.md)")
     s.add_argument("--idle-posture", choices=("rest", "limp", "none"), default="rest",
                    help="what the daemon latches when a client's hold ends (default rest, then limp)")
     s.add_argument("--idle-limp", type=float, default=10.0, metavar="S",
@@ -357,6 +359,15 @@ def _fresh_telemetry(client: BodyClient, timeout: float = 0.3) -> None:
     link.wait_until(lambda: st.telemetry_at is not None and st.telemetry_at > since, timeout)
 
 
+def _event_text(code: Any, arg: Any) -> str:
+    name = consts.EVENTS.get(code, code)
+    if name == "IR_KEY" and isinstance(arg, int):
+        from kilo import ir
+
+        return f"IR_KEY {ir.describe(arg)}"
+    return f"{name}({arg})"
+
+
 def render_monitor(snap: dict[str, Any]) -> str:
     rates = snap["rates_dps"] or (None, None, None)
     rows = [
@@ -376,7 +387,7 @@ def render_monitor(snap: dict[str, Any]) -> str:
     ]
     out = [f"{k:>11}  {v}" for k, v in rows]
     out.append("     events  " + ("  ".join(
-        f"-{age:.1f}s {consts.EVENTS.get(e.get('code'), e.get('code'))}({e.get('arg')})"
+        f"-{age:.1f}s {_event_text(e.get('code'), e.get('arg'))}"
         for age, e in reversed(snap["events"][-5:])) or "-"))
     st = snap["stats"]
     out.append(f"      frames  rx {st['frames_rx']} tx {st['frames_tx']} hb {st['heartbeats']} "
@@ -686,7 +697,8 @@ def cmd_vbody(args: argparse.Namespace) -> int:
     keys = not args.no_keys and sys.stdin.isatty()
     if not args.quiet:
         print(f"virtual body on {path}: run `kilo --port {path} monitor`"
-              + ("; keys: f/F fall right/left, r reboot, q quit" if keys else "; Ctrl-C to quit"),
+              + ("; keys: f/F fall right/left, r reboot, 0-9 IR remote digit, q quit" if keys
+                 else "; Ctrl-C to quit"),
               file=sys.stderr, flush=True)
     vb.start()
     old = None
@@ -706,6 +718,10 @@ def cmd_vbody(args: argparse.Namespace) -> int:
                     vb.trigger_fall(-1)
                 elif ch == "r":
                     vb.reboot(3)
+                elif ch and ch in "0123456789":
+                    from kilo import ir
+
+                    vb.ir_key(ir.BY_LABEL[ch].command)
                 elif ch in ("q", "\x04"):
                     break
         else:
@@ -766,6 +782,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print(line)
     print(f"holds       {', '.join(info['held_goals']) or '-'}  idle {info['idle'] or '-'}")
     print(f"behaviour   {info['behaviour']}")
+    if "remote" in info:
+        print(f"remote      {info['remote']}")
     print(f"frame log   {info['log_file'] or '-'}")
     return EXIT_OK
 

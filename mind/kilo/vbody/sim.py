@@ -44,6 +44,7 @@ both the same frames and compares the replies:
   FELL(+-1) with the epoch bump, 1 s FALLEN, 1 s RECOVERING, then STAND (REST
   if uncalibrated) and EVENT RECOVERED; the body's rc timing is not
   simulated); TRICK_PLAY is refused REFUSED_FALLEN meanwhile;
+- the IR remote (``ir_key``): EVENT IR_KEY as the body's decoder sends it;
 - boot: unsolicited HELLO and EVENT BOOT; TELEMETRY at the TELEM_DIV divider.
   ``boot_delay`` (seconds, default 0) mimics the real body's 0.3-2 s init:
   after a reboot the body is silent for that long (no tick, no telemetry) and
@@ -294,6 +295,14 @@ class VirtualBody:
             self._event(EV.FELL, side)
         self._say("fell")
 
+    def ir_key(self, command: int, repeat: bool = False) -> None:
+        """Simulate the IR remote (the body's NEC decoder on D4): EVENT
+        IR_KEY(command | 0x100 for a held-key repeat). Test and `kilo vbody`
+        key hook; the decoder itself is host-tested in body/test/test_ir.cpp."""
+        with self.lock:
+            self._event(EV.IR_KEY, (int(command) & 0xFF) | (0x100 if repeat else 0))
+        self._say(f"IR key 0x{int(command) & 0xFF:02X}" + (" repeat" if repeat else ""))
+
     def set_battery(self, level: int) -> None:
         """Simulate a battery level change (BatteryLevel); LOW or worse bumps the epoch."""
         with self.lock:
@@ -375,7 +384,7 @@ class VirtualBody:
         self._send("HELLO", proto_major=P.PROTO_MAJOR, proto_minor=P.PROTO_MINOR,
                    fw_build=self.fw_build, reset_cause=self.reset_cause,
                    last_alive_tick=self.last_alive_tick,
-                   caps=int(P.HelloCaps.BUZZER | P.HelloCaps.DMP | P.HelloCaps.ULTRASONIC),
+                   caps=int(P.HelloCaps.BUZZER | P.HelloCaps.IR | P.HelloCaps.DMP | P.HelloCaps.ULTRASONIC),
                    max_payload=P.MAX_PAYLOAD, trick_capacity=P.TRICK_CAPACITY, joint_count=P.JOINT_COUNT,
                    config_state=self.config_state, epoch=self.epoch)
 

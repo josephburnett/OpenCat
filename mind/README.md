@@ -124,7 +124,7 @@ kilo flash --no-build        # flash the last build
 kilo flash --legacy          # flash mind/firmware/opencat-legacy.hex
 kilo vbody                   # virtual body on a pty; prints the pty path
 kilo monitor --percepts      # ... plus percept flags and live percept events (tap, pet, near, startle...)
-kilo run [--behaviour] [--kilolog]   # the daemon: owns the port, serves the socket (normally systemd)
+kilo run [--behaviour] [--remote] [--kilolog]   # the daemon: owns the port, serves the socket (normally systemd)
 kilo daemon [status] | daemon stop   # status: port/link state, holds, behaviour, percepts, logs
 kilo log summary|replay|plot FILE ...   # log tools (same as python -m kilo.logs; see Logs)
 kilo --kilolog status        # any command: raw wire frames to ~/kilo-logs/kilo-<time>.kilolog.gz
@@ -281,6 +281,50 @@ without. The packaged runner writes
 `<log-dir>/behaviour-<time>.jsonl` (see Behaviour) and stops within 0.1 s of
 SIGTERM; `$KILO_PERSONALITY` (in `~/.config/kilo/env`) picks another
 personality file.
+
+**IR remote.** The body decodes the Petoi IR remote (NEC, on the NyBoard's
+receiver at D4) and relays every key as `EVENT IR_KEY` (arg = the NEC
+command byte, `| 0x100` for a held-key repeat; HELLO caps bit `IR`). `kilo
+monitor` shows it as `IR_KEY 2 (0x18, sit)` (`... repeat` while held), the
+passive timeline as `EVENT IR_KEY ...`, and `kilo vbody` sends digits 0-9
+from its keyboard. The key table is `kilo.ir.KEYS` (from the legacy
+`src/infrared.h`). `kilo run --remote` (off by default, like `--behaviour`;
+on the Pi add it to `KILO_RUN_ARGS` in `~/.config/kilo/env`) acts on the
+keys through the daemon's own BodyClient:
+
+| Key | Command | Legacy | `--remote` |
+|---|---|---|---|
+| CH- | 0xA2 | rest | posture rest |
+| CH | 0x62 | forward | (gait: logs "walking comes in P2") |
+| CH+ | 0xE2 | gyro toggle | balance on/off (SET_BALANCE, default gains) |
+| \|<< | 0x22 | left | (gait) |
+| >>\| | 0x02 | stand | posture stand |
+| >\|\| | 0xC2 | right | (gait) |
+| - | 0xE0 | pause/limp | posture limp |
+| + | 0xA8 | backward | (gait) |
+| EQ | 0x90 | calibrate | ignored |
+| 0 | 0x68 | stepping | (gait) |
+| 100+ | 0x98 | crawl | (gait) |
+| 200+ | 0xB0 | walk | (gait) |
+| 1 | 0x30 | trot | (gait) |
+| 2 | 0x18 | sit | posture sit |
+| 3 | 0x7A | stretch | trick stretch |
+| 4 | 0x10 | hi | trick hi |
+| 5 | 0x38 | push-up | trick push_up |
+| 6 | 0x5A | pee | trick pee |
+| 7 | 0x42 | wash face | trick wash_face |
+| 8 | 0x4A | butt-up | trick butt_up |
+| 9 | 0x52 | last skill | ignored |
+
+Repeats (a held key) are ignored. A trick key uploads the trick if the body
+does not hold it (cached, as `kilo trick play`), stops a playing trick
+first, and takes STAND first from LIMP; a posture key also stops a playing
+trick. What the remote sets is held like the daemon's idle latch: no idle
+REST/LIMP over it, it stays until the next key or a client goal. Keys are
+logged and ignored while the behaviour runner is active, while the port is
+released for flashing, and while a client holds the posture or a trick (the
+balance key: while a client holds SET_BALANCE). `kilo daemon` shows
+`remote on, last key ...`.
 
 **Logs of the daemon.** `kilo run` writes its own log to
 `<log-dir>/daemon.log` (`~/kilo-logs/daemon.log`, rotating at 1 MB, 3 old

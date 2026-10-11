@@ -104,6 +104,18 @@ a pathlib.Path for the runner's own logs; a ``paused`` keyword, if it takes
 one, gets the ``--override`` Event. The runner stamps the link's liveness
 each tick (the pump follows it, above). An import failure or an exception
 is logged and the daemon carries on without it.
+
+IR remote (``--remote``, off by default; the owner's request 2026-10-11).
+The body relays the Petoi remote as EVENT IR_KEY; the daemon maps keys to
+actions on its own BodyClient (``kilo.ir.ACTIONS``: postures, tricks, the
+CH+ balance toggle; gait keys log "walking comes in P2"; held-key repeats,
+EQ, 9 and unknown keys are ignored). The actions run in the thread pool, one
+at a time (``kilo.ir.RemoteControl``). A posture or trick set by the remote
+is held like the idle latch: nobody owns it and the idle REST/LIMP timeline
+is stopped, so it stays until the next key or a client goal. Keys are logged
+and ignored while the behaviour runner is active, while the port is
+released, and while a client holds the posture or a trick (the balance key:
+while a client holds SET_BALANCE).
 """
 
 from __future__ import annotations
@@ -186,7 +198,7 @@ class Daemon:
                  idle_limp_s: float = 10.0, hold_lease_s: float = 3.0, behaviour: bool = False,
                  log_dir: Path | None = None, release_lease_s: float = 120.0, workers: int = 8,
                  wire_logger: Any = None, auto_port: bool = False, log_cap_bytes: int = LOG_DIR_MAX_BYTES,
-                 keep_logs: Any = ()):
+                 keep_logs: Any = (), remote: bool = False):
         if idle_posture not in IDLE_POSTURES:
             raise ValueError(f"idle posture must be one of {IDLE_POSTURES}")
         self.port = port
@@ -205,6 +217,9 @@ class Daemon:
         self.idle_limp_s = idle_limp_s
         self.hold_lease_s = hold_lease_s
         self.behaviour = behaviour
+        self.remote = remote
+        self._remote_lock = threading.Lock()  # one remote action at a time
+        self.remote_last: str | None = None   # the last remote key acted on (op_daemon)
         self.log_dir = Path(log_dir) if log_dir else Path.home() / "kilo-logs"
         self.release_lease_s = release_lease_s
         self.pool = concurrent.futures.ThreadPoolExecutor(workers, thread_name_prefix="kilo-daemon")
@@ -288,6 +303,11 @@ class Daemon:
             self.link.subscribe(kind, self._make_fanout(kind))
         self.link.subscribe("telemetry", self._feed_percepts)
         self.link.subscribe("connection", self._log_connection)
+        if self.remote:
+            from kilo.ir import RemoteControl
+
+            self._remote_control = RemoteControl(self.client)
+            self.link.subscribe("event", self._on_ir_key)
         self.percepts.add_listener(self._percept_events)
         self.link.mark_alive("daemon")
         self.link.start()
@@ -582,6 +602,46 @@ class Daemon:
             self.idle_since = None
             self.idle_stage = None
 
+    # ---- the IR remote (--remote) -----------------------------------------------------------
+    def _on_ir_key(self, msg: Any) -> None:
+        """Link event callback (on the loop): EVENT IR_KEY -> a remote action."""
+        if msg.code != consts.EV["IR_KEY"]:
+            return
+        from kilo import ir
+
+        text = ir.describe(msg.arg)
+        action = ir.action_for(msg.arg)
+        if action.kind == "ignore":
+            log.debug("remote %s: ignored", text)
+            return
+        if self.behaviour_active:
+            log.info("remote %s: ignored (behaviour runner active)", text)
+            return
+        if self.port_released or self._shutting_down:
+            return
+        if action.kind == "gait":
+            log.info("remote %s: walking comes in P2", text)
+            return
+        owner = (self.goal_owner.get("SET_BALANCE") if action.kind == "balance_toggle"
+                 else self.goal_owner.get("SET_POSTURE") or self.goal_owner.get("TRICK"))
+        if owner is not None:
+            log.info("remote %s: ignored (client %d holds the body)", text, owner.id)
+            return
+        if action.kind in ("posture", "trick"):
+            # held like the idle latch: no owner, and no idle timeline over it
+            self.goal_owner["SET_POSTURE"] = None
+            self.idle_since = self.idle_stage = None
+        self.remote_last = text
+        self.pool.submit(self._remote_perform, action, text)
+
+    def _remote_perform(self, action: Any, text: str) -> None:
+        with self._remote_lock:
+            try:
+                did = self._remote_control.perform(action)
+                log.info("remote %s: %s", text, did)
+            except Exception as e:  # LinkError, TrickError, a missing trick file: log, keep serving
+                log.warning("remote %s: %s failed: %s", text, action.kind, e)
+
     # ---- streams -----------------------------------------------------------------------
     def _make_fanout(self, kind: str) -> Callable[..., None]:
         def fan(*args: Any) -> None:
@@ -765,7 +825,9 @@ class Daemon:
                 "socket_why": self.socket_why, "auto_port": self.auto_port,
                 "started": self.started_wall, "uptime_s": round(now - self.started, 1),
                 "clients": len(self.sessions), "port_released": self.port_released,
-                "behaviour": self.behaviour_state, "connected": st.connected, "alive": st.alive,
+                "behaviour": self.behaviour_state, "remote": ("off" if not self.remote else
+                                                             f"on, last key {self.remote_last or '-'}"),
+                "connected": st.connected, "alive": st.alive,
                 "port_present": bool(self.port) and os.path.exists(self.port),
                 "connected_for_s": round(now - st.connected_since, 1)
                 if st.connected and st.connected_since is not None else None,
@@ -1099,7 +1161,8 @@ def run_daemon(args: Any) -> int:
     keep = [log_dir / "daemon.log"] if daemon_log != "none" and not daemon_log else []
     d = Daemon(choice.port, baud=args.baud, socket=args.socket, logger=logger,
                idle_posture=args.idle_posture, idle_limp_s=args.idle_limp, behaviour=args.behaviour,
-               log_dir=log_dir, wire_logger=wire, auto_port=not explicit, keep_logs=keep)
+               remote=getattr(args, "remote", False), log_dir=log_dir, wire_logger=wire,
+               auto_port=not explicit, keep_logs=keep)
     return d.run()
 
 

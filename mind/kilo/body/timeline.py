@@ -20,6 +20,7 @@ import sys
 import threading
 from typing import Any, TextIO
 
+from kilo import ir
 from kilo.link import consts
 from kilo.link.serial_link import SerialLink
 
@@ -73,6 +74,9 @@ class Timeline:
             arg = msg.arg & 0xFFFF
             extra = (f" ({self.link.messages.name_of(arg >> 8)}: "
                      f"{consts.REFUSE_REASON.get(arg & 0xFF, arg & 0xFF)})")
+        elif name == "IR_KEY":
+            self.say(f"EVENT IR_KEY {ir.describe(msg.arg)} tick={msg.tick} epoch={msg.epoch}")
+            return
         self.say(f"EVENT {name} arg={msg.arg}{extra} tick={msg.tick} epoch={msg.epoch}")
 
     def _on_hello(self, msg: Any, solicited: bool) -> None:
