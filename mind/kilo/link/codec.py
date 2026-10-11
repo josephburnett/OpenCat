@@ -19,11 +19,16 @@ Interface (structural, any object with these methods works)::
     decoder.feed(data: bytes) -> list[Frame | DecodeError]
         Consume any number of bytes (possibly partial frames) and return
         the frames and errors completed by them, in wire order.
+
+    decoder.feed_wire(data: bytes) -> list[tuple[Frame | DecodeError, bytes]]   (optional)
+        The same, each result paired with its wire bytes as received (the
+        COBS frame and its 0x00 delimiter; b"" for an overflow). The link
+        uses it for the raw ``.kilolog`` when the decoder has it.
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from kilo.protocol import kilo_link_codec as _C
 
@@ -70,16 +75,43 @@ class Codec(Protocol):
 class KiloDecoder:
     """Streaming decoder over kilo_link_codec.StreamDecoder (checks type and length)."""
 
+    WIRE_MAX = 256  # longest wire record kept (a valid frame is <= MAX_ENCODED + 1)
+
     def __init__(self) -> None:
         self._d = _C.StreamDecoder(check_type=True)
+        self._raw = bytearray()  # wire bytes of the frame in progress (feed_wire)
+
+    @staticmethod
+    def _wrap(r: Any) -> Frame | DecodeError:
+        if isinstance(r, _C.FrameError):
+            return DecodeError(r.kind, r.payload or b"", r.type, r.seq)
+        return Frame(r.type, r.seq, r.payload)
 
     def feed(self, data: bytes) -> list[Frame | DecodeError]:
-        out: list[Frame | DecodeError] = []
-        for r in self._d.feed(bytes(data)):
-            if isinstance(r, _C.FrameError):
-                out.append(DecodeError(r.kind, r.payload or b"", r.type, r.seq))
-            else:
-                out.append(Frame(r.type, r.seq, r.payload))
+        return [self._wrap(r) for r in self._d.feed(bytes(data))]
+
+    def feed_wire(self, data: bytes) -> list[tuple[Frame | DecodeError, bytes]]:
+        out: list[tuple[Frame | DecodeError, bytes]] = []
+        data = bytes(data)
+        pos = 0
+        while pos < len(data):
+            z = data.find(b"\x00", pos)
+            end = len(data) if z < 0 else z + 1
+            piece = data[pos:end]
+            pos = end
+            results = list(self._d.feed(piece))
+            if z < 0:
+                room = self.WIRE_MAX - len(self._raw)
+                if room > 0:
+                    self._raw += piece[:room]
+                out += [(self._wrap(r), b"") for r in results]  # overflow
+                continue
+            wire = bytes(self._raw) + piece
+            self._raw.clear()
+            if len(wire) > self.WIRE_MAX:
+                wire = b""
+            out += [(self._wrap(r), wire if isinstance(r, _C.Frame) or r.kind != "overflow" else b"")
+                    for r in results]
         return out
 
 

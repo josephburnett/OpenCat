@@ -28,6 +28,27 @@ timeline, without the 0.5 s stop stage), and a balance enable is switched
 off. With a behaviour runner active the daemon only drops the goal and leaves
 the body to the runner.
 
+Port hot-plug. The daemon starts whether or not the port exists (robot
+unplugged, adapter not enumerated yet) and the link's reader keeps trying to
+open it, backing off from 2 s to 10 s (``DAEMON_LINK``); after a USB replug
+the read error closes the port and the same retry loop reopens it. Without
+``--port``/``$KILO_PORT`` the port is auto-detected again on every attempt.
+``kilo daemon`` shows connected/alive, whether the device node exists, the
+last open error and the reconnect count; the ``connection`` stream carries
+``{connected, alive, port, error}`` on every change.
+
+Percepts. The daemon feeds a ``kilo.perception.SharedPercepts`` on every
+TELEMETRY: the ``percepts`` op returns its flags and recent events, the
+``percepts`` stream kind pushes each batch of percept events, and the
+behaviour runner gets the same object (``run_behaviour(..., percepts=)``
+when its signature takes it), so its ``notify_self_motion()`` calls quiet
+the IMU detectors for everyone.
+
+Logs. ``--kilolog [FILE]`` hands a ``KilologWriter`` to the link (raw wire
+frames both ways, flushed every 5 s); ``run_daemon`` also writes the
+daemon's own log to ``<log-dir>/daemon.log`` (1 MB x 3, rotating), because
+the user journal is not always readable or persistent on the Pi.
+
 Port release (Appendix F). ``release_port {lease_s}`` stops the link and
 closes the port so ``kilo flash`` can run avrdude; ``reacquire_port`` (or the
 lease running out, or the releasing client disconnecting) reopens it. While
@@ -65,7 +86,8 @@ from kilo.body.client import BodyClient
 from kilo.link import consts
 from kilo.link.serial_link import LinkConfig, LinkError, NotConnected, SerialLink
 from kilo.link.transport import DEFAULT_BAUD, open_port
-from kilo.remote import dumps, encode_error, jsonable, socket_path
+from kilo.perception.shared import SharedPercepts
+from kilo.remote import dumps, encode_error, jsonable, socket_candidates
 
 log = logging.getLogger("kilo.daemon")
 
@@ -73,7 +95,12 @@ STREAM_BUFFER_MAX = 256 << 10   # drop stream messages for a client beyond this 
 REPLY_BUFFER_MAX = 4 << 20      # disconnect a client that does not read its replies
 LINE_LIMIT = 1 << 20
 PUMP_PERIOD_S = 0.2
-STREAM_KINDS = ("snapshot", "telemetry", "event", "hello", "reboot", "goals_cleared", "connection")
+STREAM_KINDS = ("snapshot", "telemetry", "event", "hello", "reboot", "goals_cleared", "connection", "percepts")
+WIRE_FLUSH_S = 5.0
+# The daemon's link: wait for a missing port patiently (2 s, backing off to 10 s).
+DAEMON_LINK = dict(reconnect_min_s=2.0, reconnect_max_s=10.0)
+DAEMON_LOG_BYTES = 1 << 20
+DAEMON_LOG_BACKUPS = 3
 IDLE_POSTURES = ("rest", "limp", "none")
 
 
@@ -100,15 +127,22 @@ class Daemon:
                  logger: Any = None, transport_factory: Callable[[], Any] | None = None,
                  link_config: LinkConfig | None = None, idle_posture: str = "rest",
                  idle_limp_s: float = 10.0, hold_lease_s: float = 3.0, behaviour: bool = False,
-                 log_dir: Path | None = None, release_lease_s: float = 120.0, workers: int = 8):
+                 log_dir: Path | None = None, release_lease_s: float = 120.0, workers: int = 8,
+                 wire_logger: Any = None, auto_port: bool = False):
         if idle_posture not in IDLE_POSTURES:
             raise ValueError(f"idle posture must be one of {IDLE_POSTURES}")
         self.port = port
+        self.auto_port = auto_port or port is None
         self.baud = baud
-        self.socket_path = socket_path(socket)
+        self.socket_path, self.socket_why = socket_candidates(socket)[0]
         self.logger = logger
-        self.factory = transport_factory or (lambda: open_port(port, baud))
-        self.link_config = link_config
+        self.wire_logger = wire_logger
+        self.factory = transport_factory or self._open_port
+        self.link_config = link_config or LinkConfig(**DAEMON_LINK)
+        self.percepts = SharedPercepts()
+        self._loop_thread: int | None = None
+        self._was_connected = False
+        self._last_wire_flush = time.monotonic()
         self.idle_posture = idle_posture
         self.idle_limp_s = idle_limp_s
         self.hold_lease_s = hold_lease_s
@@ -149,15 +183,40 @@ class Daemon:
             except RuntimeError:
                 pass  # the loop already finished
 
+    def _open_port(self) -> Any:
+        """The link's transport factory: (re)detect the port when it was not
+        given, and fail fast (OSError) while the device node is missing."""
+        port = self.port
+        if self.auto_port:
+            from kilo.link.ports import detect_port
+
+            port = detect_port(None).port
+            if port is None:
+                raise OSError("no serial port found (plug the body in, or set KILO_PORT)")
+        if not os.path.exists(port):
+            raise FileNotFoundError(f"{port} does not exist (unplugged?)")
+        t = open_port(port, self.baud)
+        if port != self.port:
+            log.info("port %s", port)
+            self.port = port
+            if self.link is not None:
+                self.link.state.port = port
+        return t
+
     async def serve(self, install_signals: bool = True) -> int:
         self.loop = asyncio.get_running_loop()
+        self._loop_thread = threading.get_ident()
         self.stopping = asyncio.Event()
         await self._prepare_socket()
         self.link = SerialLink(self.factory, logger=self.logger, port_name=self.port,
-                               config=self.link_config, dispatch=self.loop.call_soon_threadsafe)
+                               config=self.link_config, dispatch=self.loop.call_soon_threadsafe,
+                               wire_logger=self.wire_logger)
         self.client = BodyClient(self.link)
         for kind in ("telemetry", "event", "hello", "reboot", "goals_cleared", "connection"):
             self.link.subscribe(kind, self._make_fanout(kind))
+        self.link.subscribe("telemetry", self._feed_percepts)
+        self.link.subscribe("connection", self._log_connection)
+        self.percepts.add_listener(self._percept_events)
         self.link.mark_alive()
         self.link.start()
         self._server = await asyncio.start_unix_server(self._handle_client, path=str(self.socket_path),
@@ -175,7 +234,8 @@ class Daemon:
         pump = asyncio.create_task(self._pump())
         if self.behaviour:
             self._start_behaviour()
-        log.info("kilo %s daemon: port %s, socket %s", __version__, self.port, self.socket_path)
+        log.info("kilo %s daemon: port %s, socket %s (%s)", __version__, self.port or "auto-detect",
+                 self.socket_path, self.socket_why)
         self.ready.set()
         try:
             await self.stopping.wait()
@@ -212,6 +272,8 @@ class Daemon:
             await self.loop.run_in_executor(self.pool, link.stop)
         if self.logger is not None:
             await self.loop.run_in_executor(self.pool, self.logger.close)
+        if self.wire_logger is not None:
+            await self.loop.run_in_executor(self.pool, self.wire_logger.close)
         try:
             self.socket_path.unlink()
         except OSError:
@@ -228,11 +290,17 @@ class Daemon:
             return
         self.log_dir.mkdir(parents=True, exist_ok=True)
         args = (self.client, self.client.state, self.behaviour_stop, self.log_dir)
+        kwargs: dict[str, Any] = {}
+        try:
+            if "percepts" in inspect.signature(run_behaviour).parameters:
+                kwargs["percepts"] = self.percepts
+        except (TypeError, ValueError):
+            pass
         self.behaviour_state = "running"
         if inspect.iscoroutinefunction(run_behaviour):
             async def runner() -> None:
                 try:
-                    await run_behaviour(*args)
+                    await run_behaviour(*args, **kwargs)
                     self.behaviour_state = "finished"
                 except asyncio.CancelledError:
                     raise
@@ -243,7 +311,7 @@ class Daemon:
         else:
             def runner_thread() -> None:
                 try:
-                    run_behaviour(*args)
+                    run_behaviour(*args, **kwargs)
                     self.behaviour_state = "finished"
                 except Exception as e:
                     self.behaviour_state = f"failed: {e}"
@@ -274,6 +342,9 @@ class Daemon:
             try:
                 self.link.mark_alive()
                 self._check_leases()
+                if self.wire_logger is not None and time.monotonic() - self._last_wire_flush >= WIRE_FLUSH_S:
+                    self._last_wire_flush = time.monotonic()
+                    self.loop.run_in_executor(self.pool, self.wire_logger.flush)
             except Exception:
                 log.exception("pump")
             await asyncio.sleep(PUMP_PERIOD_S)
@@ -359,7 +430,8 @@ class Daemon:
             elif kind == "goals_cleared":
                 data = {"reason": args[0], "names": args[1]}
             elif kind == "connection":
-                data = {"connected": args[0], "alive": args[1]}
+                data = {"connected": args[0], "alive": args[1], "port": self.port,
+                        "error": self.link.last_open_error if self.link is not None else None}
             else:
                 data = args[0]
             now = time.monotonic()
@@ -372,6 +444,34 @@ class Daemon:
                     s.last_telemetry_sent = now
                 self._stream(s, kind, data)
         return fan
+
+    # ---- percepts and connection notes (on the loop) ---------------------------------------
+    def _feed_percepts(self, msg: Any) -> None:
+        self.percepts.update(self.client.state)
+
+    def _percept_events(self, events: list[Any], d: dict[str, Any]) -> None:
+        """SharedPercepts listener: any thread (the loop, or the behaviour runner)."""
+        data = {"events": [e.as_dict() for e in events],
+                "flags": {k: bool(d.get(k)) for k in ("near", "approaching", "clear", "tilted", "picked_up",
+                                                      "tap", "pet", "startle")}}
+        if threading.get_ident() == self._loop_thread or self.loop is None:
+            self._fan_percepts(data)
+        else:
+            try:
+                self.loop.call_soon_threadsafe(self._fan_percepts, data)
+            except RuntimeError:
+                pass
+
+    def _fan_percepts(self, data: dict[str, Any]) -> None:
+        for s in list(self.sessions.values()):
+            if "percepts" in s.kinds:
+                self._stream(s, "percepts", data)
+
+    def _log_connection(self, connected: bool, alive: bool) -> None:
+        was, self._was_connected = self._was_connected, connected
+        if was and not connected and not self._shutting_down and not self.port_released:
+            log.warning("port %s closed; reopening (every %.0f-%.0f s until it is back)", self.port,
+                        self.link.cfg.reconnect_min_s, self.link.cfg.reconnect_max_s)
 
     def _stream(self, s: Session, kind: str, data: Any) -> None:
         if s.closed:
@@ -478,13 +578,29 @@ class Daemon:
     # ---- ops ---------------------------------------------------------------------------
     async def op_daemon(self, s: Session) -> dict[str, Any]:
         st = self.client.state
+        link = self.link
+        now = time.monotonic()
         return {"pid": os.getpid(), "version": __version__, "port": self.port, "socket": str(self.socket_path),
-                "started": self.started_wall, "uptime_s": round(time.monotonic() - self.started, 1),
+                "socket_why": self.socket_why, "auto_port": self.auto_port,
+                "started": self.started_wall, "uptime_s": round(now - self.started, 1),
                 "clients": len(self.sessions), "port_released": self.port_released,
                 "behaviour": self.behaviour_state, "connected": st.connected, "alive": st.alive,
+                "port_present": bool(self.port) and os.path.exists(self.port),
+                "connected_for_s": round(now - st.connected_since, 1)
+                if st.connected and st.connected_since is not None else None,
+                "open_error": link.last_open_error, "open_fail_streak": link.open_fail_streak,
+                "retry_in_s": link.retry_in_s if not st.connected else None,
+                "open_failures": st.stats.open_failures, "reconnects": st.stats.reconnects,
+                "disconnects": st.stats.disconnects,
                 "log_file": str(self.logger.path) if self.logger is not None else None,
+                "kilolog": str(self.wire_logger.path) if self.wire_logger is not None else None,
+                "percepts": self.percepts.flags(),
                 "held_goals": sorted(n for n, o in self.goal_owner.items() if o is not None),
                 "idle": self.idle_stage}
+
+    async def op_percepts(self, s: Session) -> dict[str, Any]:
+        """The daemon's percepts: flags, distance/approach, recent events."""
+        return self.percepts.state()
 
     async def op_ping(self, s: Session) -> str:
         return "pong"
@@ -654,21 +770,57 @@ def run_daemon(args: Any) -> int:
     """``kilo run``: argparse namespace from kilo.cli."""
     from kilo.link.ports import detect_port
 
+    log_dir = Path(args.log_dir).expanduser() if getattr(args, "log_dir", None) else Path.home() / "kilo-logs"
+    daemon_log = getattr(args, "daemon_log", None)
+    if daemon_log != "none":
+        add_file_log(Path(daemon_log).expanduser() if daemon_log else log_dir / "daemon.log")
     choice = detect_port(args.port)
     for w in choice.warnings:
         log.warning("%s", w)
+    explicit = choice.reason in ("--port", "$KILO_PORT")
     if choice.port is None:
-        log.error("no serial port found; set KILO_PORT (~/.config/kilo/env) or --port")
-        return 1
-    log_dir = Path(args.log_dir).expanduser() if getattr(args, "log_dir", None) else Path.home() / "kilo-logs"
+        log.warning("no serial port found yet: waiting for one to appear (set KILO_PORT in "
+                    "~/.config/kilo/env or pass --port to pin it)")
+    else:
+        log.info("port %s (%s%s)", choice.port, choice.reason, "" if explicit else "; re-detected on reconnect")
+        if not os.path.exists(choice.port):
+            log.warning("%s does not exist yet (robot unplugged?): waiting for it", choice.port)
     logger = None
     if args.log or args.log_file:
         from kilo.log import JsonlLogger
 
         logger = JsonlLogger(args.log_file or log_dir / time.strftime("kilo-%Y%m%d-%H%M%S.jsonl"))
         log.info("frame log %s", logger.path)
+    wire = None
+    kl = getattr(args, "kilolog", None)
+    if kl is not None:
+        from kilo.logs.kilolog import KilologWriter
+
+        wire = KilologWriter(Path(kl).expanduser() if kl else log_dir / time.strftime("kilo-%Y%m%d-%H%M%S.kilolog.gz"),
+                             meta={"source": "kilo run", "port": choice.port})
+        log.info("raw frame log %s", wire.path)
     d = Daemon(choice.port, baud=args.baud, socket=args.socket, logger=logger,
                idle_posture=args.idle_posture, idle_limp_s=args.idle_limp, behaviour=args.behaviour,
-               log_dir=log_dir)
-    log.info("port %s (%s)", choice.port, choice.reason)
+               log_dir=log_dir, wire_logger=wire, auto_port=not explicit)
     return d.run()
+
+
+def add_file_log(path: Path) -> logging.Handler | None:
+    """Also write the daemon's log to ``path`` (rotating, small): there is
+    always something to read even when the user journal is not."""
+    from logging.handlers import RotatingFileHandler
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        h = RotatingFileHandler(path, maxBytes=DAEMON_LOG_BYTES, backupCount=DAEMON_LOG_BACKUPS)
+    except OSError as e:
+        log.warning("cannot write the daemon log %s: %s", path, e)
+        return None
+    h.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    h.setLevel(logging.INFO)
+    root = logging.getLogger()
+    root.addHandler(h)
+    if root.level > logging.INFO or root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
+    log.info("daemon log %s", path)
+    return h

@@ -1200,15 +1200,36 @@ from before the change is replayed.
   gentle tracking, not snapping.
 - **Microphone (later):** loudness and onset detection only.
 
-**Logging.** Frames go to `~/kilo-logs/*.kilolog` (≈1 MB/h at 25 Hz), replayable
-through the codec. A JSONL behaviour log records drives and the active path.
-`kilo log plot` produces offline plots. Together these close the loop for
+**Logging.** Frames go to `~/kilo-logs/*.kilolog.gz` (≈1 MB/h at 25 Hz;
+`kilo --kilolog`, `kilo run --kilolog`), replayable through the codec. A JSONL
+behaviour log records drives and the active path; the daemon also keeps
+`~/kilo-logs/daemon.log`. `kilo log summary|replay|plot` analyses offline. Together these close the loop for
 learning control: change a gain, walk, plot.
 
 **Flashing tool.** `kilo flash` builds with arduino-cli, runs the size/symbol
 harness and refuses to flash if it fails, embeds the git hash, releases the
 port, resets the body over GPIO4, runs avrdude, and verifies by HELLO. Details
 are in Appendix F.
+
+**Mind integration backlog (BodyClient).** What the behaviour layer needs from
+`BodyClient` that it works around today (2026-10-10):
+
+- `look(pan, tilt)`, `beep(notes)` and gait `walk(...)` methods, once the body
+  implements SET_HEAD, BEEP-from-the-mind and SET_GAIT; `BodyAdapter` already
+  calls them when present and counts them in `unsupported` otherwise.
+- An event callback for epoch change, FELL, WATCHDOG and LOW_BATTERY (and
+  connection changes). Done for now on the runner side without touching
+  `BodyClient`: `kilo.behaviour.body_events.BodyEvents` diffs successive
+  snapshots (epoch, the last 8 EVENTs, connected/alive) and the runner logs
+  `body_event` records and calls `on_body_event`. A real callback
+  (`SerialLink.subscribe("event"/"goals_cleared")` re-exported by
+  `BodyClient`) would remove the 10 Hz polling window.
+- The battery level enum (OK/WARN/LOW/CRITICAL, as in EVENT LOW_BATTERY) and
+  the current posture id in the snapshot, instead of the millivolt percentage
+  and the mode name the behaviours infer them from.
+- A cheap snapshot for 10 Hz polling: `BodyState.snapshot()` builds the full
+  dict (link stats, HELLO fields, events) every call; a slim variant (attitude,
+  mode, epoch, flags, distance, battery, alive) would do for the runner.
 
 ---
 

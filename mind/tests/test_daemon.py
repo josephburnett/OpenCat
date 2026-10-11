@@ -22,7 +22,7 @@ from kilo.body.state import BodyState
 from kilo.daemon import Daemon
 from kilo.link import consts
 from kilo.link.serial_link import CommandError, LinkConfig, NotConnected
-from kilo.remote import DaemonError, RemoteBody, connect, socket_path
+from kilo.remote import DaemonError, RemoteBody, connect, socket_candidates, socket_path
 from kilo.vbody.sim import VirtualBody, open_pty
 
 from conftest import FAST
@@ -94,7 +94,41 @@ def test_socket_path_resolution():
     assert socket_path(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=0) == Path("/run/kilo/kilo.sock")
     assert socket_path(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=1000) == Path(
         "/run/user/1000/kilo/kilo.sock")
-    assert socket_path(env={}, euid=1000, home="/home/joe") == Path("/home/joe/.kilo/kilo.sock")
+    no_run = lambda d: False
+    assert socket_path(env={}, euid=1000, home="/home/joe", is_dir=no_run) == Path("/home/joe/.kilo/kilo.sock")
+    # a non-login SSH shell: no $XDG_RUNTIME_DIR, but the systemd user runtime dir exists
+    has_run = lambda d: d == "/run/user/1000"
+    assert socket_path(env={}, euid=1000, home="/home/joe", is_dir=has_run) == Path(
+        "/run/user/1000/kilo/kilo.sock")
+    assert [p for p, _ in socket_candidates(env={}, euid=1000, home="/home/joe", is_dir=has_run)] == [
+        Path("/run/user/1000/kilo/kilo.sock"), Path("/home/joe/.kilo/kilo.sock")]
+    assert [p for p, _ in socket_candidates(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=1000,
+                                            home="/home/joe", is_dir=has_run)] == [
+        Path("/run/user/1000/kilo/kilo.sock"), Path("/home/joe/.kilo/kilo.sock")]  # deduplicated
+    assert len(socket_candidates(env={"KILO_SOCKET": "/s"}, euid=1000)) == 1
+
+
+def test_connect_tries_every_candidate(sockdir, monkeypatch, start_daemon):
+    """No --socket and no $KILO_SOCKET: the client walks the candidates and
+    finds a daemon on the second one; `kilo daemon` lists what it tried."""
+    import kilo.remote as remote_mod
+
+    d, vb, path, sock = start_daemon()
+    first = sockdir / "first.sock"
+    monkeypatch.setattr(remote_mod, "socket_candidates",
+                        lambda explicit=None, **kw: [(Path(explicit), "--socket")] if explicit else
+                        [(first, "first"), (sock, "second")])
+    tried = []
+    conn = connect(tried=tried)
+    try:
+        assert conn is not None and conn.path == sock
+        assert tried == [(first, "no socket file"), (sock, "daemon answered")]
+    finally:
+        conn.close()
+    monkeypatch.setattr(remote_mod, "socket_candidates",
+                        lambda explicit=None, **kw: [(first, "first"), (sockdir / "x.sock", "second")])
+    tried = []
+    assert connect(tried=tried) is None and [p for p, _ in tried] == [first, sockdir / "x.sock"]
 
 
 def test_connect_without_daemon(sockdir):
@@ -466,7 +500,9 @@ def test_cli_posture_hold_through_the_daemon(start_daemon):
 def test_cli_run_subcommand(vbody_pty, sockdir):
     vb, path = vbody_pty
     sock = sockdir / "run.sock"
-    p = subprocess.Popen([sys.executable, "-m", "kilo.cli", "run", "--port", path, "--socket", str(sock)],
+    log_dir = sockdir / "logs"  # never the developer's ~/kilo-logs
+    p = subprocess.Popen([sys.executable, "-m", "kilo.cli", "run", "--port", path, "--socket", str(sock),
+                          "--log-dir", str(log_dir)],
                          cwd=MIND, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         assert wait_for(lambda: sock.exists(), 10)
@@ -476,6 +512,7 @@ def test_cli_run_subcommand(vbody_pty, sockdir):
         p.wait(10)
         assert p.returncode == 0 and not sock.exists()
         assert "shutting down" in p.stderr.read()
+        assert "shutting down" in (log_dir / "daemon.log").read_text()
     finally:
         if p.poll() is None:
             p.kill()

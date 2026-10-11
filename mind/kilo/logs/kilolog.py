@@ -1,10 +1,11 @@
 """The ``.kilolog`` raw frame log (docs/architecture.md §5 "Logging").
 
 A binary file of wire frames exactly as they crossed the UART, so a session
-can be replayed through the codec. Nothing writes it yet: ``KilologWriter`` is
-the hook the link can call from its reader/writer threads later (one
-``write_wire(wire, "rx"|"tx")`` per frame). Today's ``kilo --log`` writes JSONL
-(``kilo.log``), which ``kilo.logs.reader`` reads too.
+can be replayed through the codec. ``kilo --kilolog [FILE]`` and ``kilo run
+--kilolog [FILE]`` hand a ``KilologWriter`` to the SerialLink, which calls
+``write_wire(wire, "rx"|"tx")`` once per frame from its reader and writer
+paths (default file ``~/kilo-logs/kilo-<time>.kilolog.gz``). ``kilo --log``
+writes JSONL (``kilo.log``), which ``kilo.logs.reader`` reads too.
 
 Format, version 1 (all integers little-endian)::
 
@@ -43,6 +44,11 @@ MAGIC = b"KILOLOG\n"
 VERSION = 1
 _REC = struct.Struct("<BIB")
 DIR_RX, DIR_TX = 0, 1
+
+
+def default_path() -> Path:
+    """``~/kilo-logs/kilo-YYYYmmdd-HHMMSS.kilolog.gz``."""
+    return Path.home() / "kilo-logs" / time.strftime("kilo-%Y%m%d-%H%M%S.kilolog.gz")
 
 
 def _open(path: Path, mode: str) -> BinaryIO:
@@ -85,6 +91,8 @@ class KilologWriter:
         t_ms = int(round((t - self.start_mono) * 1000)) & 0xFFFFFFFF
         rec = _REC.pack(DIR_TX if direction == "tx" else DIR_RX, t_ms, len(wire)) + wire
         with self._lock:
+            if self._f.closed:
+                return  # frames racing the close are dropped
             self._f.write(rec)
             self.records += 1
 
@@ -97,12 +105,16 @@ class KilologWriter:
         self.write_wire(C.encode_message(msg, seq), direction, t)
 
     def flush(self) -> None:
+        """Push buffered records to disk (a sync point in a .gz, so a killed
+        writer leaves a readable file up to here)."""
         with self._lock:
-            self._f.flush()
+            if not self._f.closed:
+                self._f.flush()
 
     def close(self) -> None:
         with self._lock:
-            self._f.close()
+            if not self._f.closed:
+                self._f.close()
 
     def __enter__(self) -> "KilologWriter":
         return self
@@ -138,11 +150,14 @@ def read_kilolog(path: str | os.PathLike) -> tuple[dict[str, Any], Iterator[Kilo
         wraps, last_ms = 0, 0
         with f:
             while True:
-                h = f.read(_REC.size)
-                if len(h) < _REC.size:
-                    return
-                flags, t_ms, n = _REC.unpack(h)
-                wire = f.read(n)
+                try:
+                    h = f.read(_REC.size)
+                    if len(h) < _REC.size:
+                        return
+                    flags, t_ms, n = _REC.unpack(h)
+                    wire = f.read(n)
+                except (EOFError, gzip.BadGzipFile, OSError):
+                    return  # a .gz cut short (crash or kill mid-write): keep what was read
                 if len(wire) < n:
                     return
                 if t_ms < last_ms - (1 << 31):

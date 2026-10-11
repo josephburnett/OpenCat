@@ -44,23 +44,47 @@ ALIVE_PERIOD_S = 0.5  # RemoteLink.mark_alive() pings the daemon at most this of
 
 
 # ---- socket path ------------------------------------------------------------------
-def socket_path(explicit: str | os.PathLike | None = None, *, env: dict[str, str] | None = None,
-                euid: int | None = None, home: str | os.PathLike | None = None) -> Path:
-    """Where the daemon listens. In order: ``explicit`` (``--socket``),
-    ``$KILO_SOCKET``, ``/run/kilo/kilo.sock`` for root,
-    ``$XDG_RUNTIME_DIR/kilo/kilo.sock``, else ``~/.kilo/kilo.sock``."""
+RUN_USER_ROOT = "/run/user"
+
+
+def socket_candidates(explicit: str | os.PathLike | None = None, *, env: dict[str, str] | None = None,
+                      euid: int | None = None, home: str | os.PathLike | None = None,
+                      is_dir: Callable[[str], bool] = os.path.isdir) -> list[tuple[Path, str]]:
+    """Every place a daemon may listen, most specific first, as (path, why).
+
+    ``explicit`` (``--socket``) or ``$KILO_SOCKET`` alone when given;
+    ``/run/kilo/kilo.sock`` for root; else ``$XDG_RUNTIME_DIR/kilo/kilo.sock``,
+    then ``/run/user/<uid>/kilo/kilo.sock`` when ``/run/user/<uid>`` exists
+    (a non-login SSH shell has no ``$XDG_RUNTIME_DIR``, but the systemd user
+    service listens there), then ``~/.kilo/kilo.sock``."""
     if explicit:
-        return Path(explicit)
+        return [(Path(explicit), "--socket")]
     env = os.environ if env is None else env
     if env.get("KILO_SOCKET"):
-        return Path(env["KILO_SOCKET"])
+        return [(Path(env["KILO_SOCKET"]), "$KILO_SOCKET")]
     if euid is None:
         euid = os.geteuid() if hasattr(os, "geteuid") else -1
     if euid == 0:
-        return Path("/run/kilo/kilo.sock")
+        return [(Path("/run/kilo/kilo.sock"), "root")]
+    out: list[tuple[Path, str]] = []
     if env.get("XDG_RUNTIME_DIR"):
-        return Path(env["XDG_RUNTIME_DIR"]) / "kilo" / "kilo.sock"
-    return Path(home if home is not None else Path.home()) / ".kilo" / "kilo.sock"
+        out.append((Path(env["XDG_RUNTIME_DIR"]) / "kilo" / "kilo.sock", "$XDG_RUNTIME_DIR"))
+    run_dir = f"{RUN_USER_ROOT}/{euid}"
+    if euid >= 0 and is_dir(run_dir):
+        out.append((Path(run_dir) / "kilo" / "kilo.sock", f"{run_dir} (systemd user runtime dir)"))
+    out.append((Path(home if home is not None else Path.home()) / ".kilo" / "kilo.sock", "~/.kilo"))
+    seen: set[Path] = set()
+    return [(p, why) for p, why in out if not (p in seen or seen.add(p))]
+
+
+def socket_path(explicit: str | os.PathLike | None = None, *, env: dict[str, str] | None = None,
+                euid: int | None = None, home: str | os.PathLike | None = None,
+                is_dir: Callable[[str], bool] = os.path.isdir) -> Path:
+    """Where the daemon listens: the first of ``socket_candidates()``. In
+    order: ``explicit`` (``--socket``), ``$KILO_SOCKET``, ``/run/kilo/kilo.sock``
+    for root, ``$XDG_RUNTIME_DIR/kilo/kilo.sock``, ``/run/user/<uid>/kilo/kilo.sock``
+    if ``/run/user/<uid>`` exists, else ``~/.kilo/kilo.sock``."""
+    return socket_candidates(explicit, env=env, euid=euid, home=home, is_dir=is_dir)[0][0]
 
 
 # ---- JSON helpers -------------------------------------------------------------------
@@ -242,10 +266,26 @@ class DaemonConnection:
         self.close()
 
 
-def connect(path: str | os.PathLike | None = None, timeout: float = 2.0) -> DaemonConnection | None:
-    """Connect to a running daemon; None when nobody listens on the socket."""
-    p = socket_path(path)
+def connect(path: str | os.PathLike | None = None, timeout: float = 2.0,
+            tried: list[tuple[Path, str]] | None = None) -> DaemonConnection | None:
+    """Connect to a running daemon; None when nobody listens.
+
+    With ``path`` only that socket is tried; without, every
+    ``socket_candidates()`` path in turn (the first daemon that answers wins).
+    ``tried`` collects (path, outcome) for each socket looked at."""
+    if path is not None:
+        return _connect_one(socket_path(path), timeout, tried)
+    for p, _why in socket_candidates():
+        conn = _connect_one(p, timeout, tried)
+        if conn is not None:
+            return conn
+    return None
+
+
+def _connect_one(p: Path, timeout: float, tried: list[tuple[Path, str]] | None) -> DaemonConnection | None:
+    note = (lambda what: tried.append((p, what))) if tried is not None else (lambda what: None)
     if not p.exists():
+        note("no socket file")
         return None
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -254,7 +294,9 @@ def connect(path: str | os.PathLike | None = None, timeout: float = 2.0) -> Daem
     except OSError as e:
         s.close()
         if e.errno in (errno.ECONNREFUSED, errno.ENOENT, errno.ENOTSOCK):
+            note("stale socket (nobody listens)")
             return None  # stale socket file: no daemon
+        note(f"error: {e}")
         raise DaemonError(f"cannot connect to {p}: {e}") from None
     s.settimeout(None)
     conn = DaemonConnection(s, p)
@@ -262,7 +304,9 @@ def connect(path: str | os.PathLike | None = None, timeout: float = 2.0) -> Daem
         conn.info = conn.call("daemon", timeout=timeout) or {}
     except (DaemonError, OSError):
         conn.close()
+        note("no answer")
         return None
+    note("daemon answered")
     return conn
 
 

@@ -16,6 +16,15 @@ Threads:
   instead of being masked by this thread. Goals and commands issued by the
   mind itself are sent immediately regardless.
 - **logger**: ``kilo.log.JsonlLogger`` (optional) writes every frame off-thread.
+- **wire_logger**: a ``kilo.logs.kilolog.KilologWriter`` (optional): every
+  frame's wire bytes as sent (writer path) and as received (reader path, from
+  the decoder's ``feed_wire``), for ``kilo --kilolog``.
+
+Reconnection: the reader thread reopens the port (calls the factory) after a
+failed open or a read/write error, backing off from ``reconnect_min_s`` to
+``reconnect_max_s``; the first failure of a streak is logged as a warning,
+``last_open_error``/``open_fail_streak`` say what is going on, and
+``connection`` subscribers hear every connect and disconnect.
 
 Silence (``passive=True`` or ``go_silent()``): the link keeps reading and
 decoding, but writes nothing at all to the transport: no HELLO_REQ, no
@@ -140,6 +149,7 @@ class SerialLink:
         port_name: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         passive: bool = False,
+        wire_logger: Any = None,
     ):
         self._factory = transport_factory
         self.codec = codec or default_codec()
@@ -147,6 +157,10 @@ class SerialLink:
         self.state = state or BodyState(clock=clock)
         self.cfg = config or LinkConfig()
         self.logger = logger
+        self.wire_logger = wire_logger
+        self.last_open_error: str | None = None
+        self.open_fail_streak = 0
+        self.retry_in_s: float | None = None  # current reconnect backoff while the port is missing
         self._dispatch_fn = dispatch
         self.clock = clock
         self.state.port = port_name
@@ -460,6 +474,8 @@ class SerialLink:
             return False
         self._last_tx_at = self.clock()
         self.last_tx = (self._last_tx_at, time.time(), name)
+        if self.wire_logger is not None:
+            self._wire(data, "tx", self._last_tx_at)
         if name == "HEARTBEAT":
             self.last_heartbeat = self.last_tx[:2]
         st.frames_tx += 1
@@ -535,13 +551,30 @@ class SerialLink:
             self._log("link", connected=False)
             self._emit("connection", False, False)
 
+    def _wire(self, data: bytes, direction: str, t: float) -> None:
+        try:
+            self.wire_logger.write_wire(data, direction, t)
+        except Exception as e:  # a full disk or a closed writer never stops the link
+            log.debug("wire log: %s", e)
+
     def _connect(self) -> bool:
         try:
             t = self._factory()
         except Exception as e:  # OSError, serial.SerialException, ...
             self.state.stats.open_failures += 1
-            log.debug("open failed: %s", e)
+            self.last_open_error = str(e) or type(e).__name__
+            self.open_fail_streak += 1
+            if self.open_fail_streak == 1:
+                log.warning("cannot open %s: %s; retrying (backoff %.1f-%.0f s)", self.state.port or "port",
+                            self.last_open_error, self.cfg.reconnect_min_s, self.cfg.reconnect_max_s)
+            else:
+                log.debug("open failed: %s", e)
             return False
+        if self.open_fail_streak:
+            log.info("%s is back after %d failed opens", self.state.port or "port", self.open_fail_streak)
+        self.open_fail_streak = 0
+        self.last_open_error = None
+        self.retry_in_s = None
         self._decoder = self.codec.new_decoder()
         self._broken.clear()
         with self._lock:
@@ -568,6 +601,7 @@ class SerialLink:
                 if self._transport is not None:
                     self._close_transport()
                 if not self._connect():
+                    self.retry_in_s = backoff
                     self._sleep(backoff)
                     backoff = min(backoff * 2, self.cfg.reconnect_max_s)
                     continue
@@ -584,7 +618,15 @@ class SerialLink:
             now = self.clock()
             self.state.stats.bytes_rx += len(data)
             self.state.last_rx_at = now
-            for item in self._decoder.feed(data):
+            if self.wire_logger is not None and hasattr(self._decoder, "feed_wire"):
+                items = []
+                for item, wire in self._decoder.feed_wire(data):
+                    if wire:
+                        self._wire(wire, "rx", now)
+                    items.append(item)
+            else:
+                items = self._decoder.feed(data)
+            for item in items:
                 try:
                     self._handle(item, now)
                 except Exception:

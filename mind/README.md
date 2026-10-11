@@ -123,13 +123,17 @@ kilo flash                   # build body/, size harness, reset, avrdude, verify
 kilo flash --no-build        # flash the last build
 kilo flash --legacy          # flash mind/firmware/opencat-legacy.hex
 kilo vbody                   # virtual body on a pty; prints the pty path
-kilo run [--behaviour]       # the daemon: owns the port, serves the socket (normally systemd)
-kilo daemon [status] | daemon stop
+kilo monitor --percepts      # ... plus percept flags and live percept events (tap, pet, near, startle...)
+kilo run [--behaviour] [--kilolog]   # the daemon: owns the port, serves the socket (normally systemd)
+kilo daemon [status] | daemon stop   # status: port/link state, holds, behaviour, percepts, logs
+kilo log summary|replay|plot FILE ...   # log tools (same as python -m kilo.logs; see Logs)
+kilo --kilolog status        # any command: raw wire frames to ~/kilo-logs/kilo-<time>.kilolog.gz
 ```
 
 Global options: `--port`, `--baud`, `--log` / `--log-file FILE` (JSON-lines
 log of every frame and event, written by a background thread),
-`--timeout`, `-v`/`-vv`, `--socket PATH`, `--direct`.
+`--kilolog [FILE]` (the raw wire frames, see Logs), `--timeout`,
+`-v`/`-vv`, `--socket PATH`, `--direct`.
 
 Every command first tries the daemon's socket and, when no daemon listens,
 opens the port itself (the "direct" path, which the hardware-test docs use with
@@ -145,10 +149,30 @@ watchdog, so it ends the hold itself (see below).
 
 `kilo run` is one process that owns the serial port, the `SerialLink` and the
 `BodyClient`, and serves a Unix socket. The socket path comes from one
-resolver (`kilo.remote.socket_path()`) used by both sides: `--socket`, else
-`$KILO_SOCKET`, else `/run/kilo/kilo.sock` for root, else
-`$XDG_RUNTIME_DIR/kilo/kilo.sock` (`/run/user/1000/kilo/kilo.sock` for joe on the
-Pi), else `~/.kilo/kilo.sock`.
+resolver (`kilo.remote.socket_candidates()`) used by both sides: `--socket`,
+else `$KILO_SOCKET`, else `/run/kilo/kilo.sock` for root, else
+`$XDG_RUNTIME_DIR/kilo/kilo.sock`, then `/run/user/<uid>/kilo/kilo.sock` when
+`/run/user/<uid>` exists, then `~/.kilo/kilo.sock`. The daemon listens on the
+first; a client without `--socket`/`$KILO_SOCKET` tries them in order and
+uses the first daemon that answers. The `/run/user/<uid>` step matters on the
+Pi: a non-login SSH shell (`ssh kilo kilo status`) has no `$XDG_RUNTIME_DIR`,
+while the systemd user service listens on `/run/user/1000/kilo/kilo.sock`;
+before, such a command silently fell back to opening the port directly. The
+daemon logs the socket it serves at startup, and `kilo daemon` lists every
+path it tried when none answers.
+
+**Port hot-plug.** The daemon starts whether or not the port exists (robot
+unplugged, adapter not enumerated yet): `kilo daemon` then shows
+`connected=False` and a `link` line (`device MISSING`, the last open error,
+the retry period). The link keeps trying to open it, after 2 s and backing
+off to every 10 s, so a body plugged in later is picked up within 10 s. A
+USB replug makes the next read fail; the daemon closes the port, logs it and
+reopens it the same way, and `kilo daemon` counts `reconnects`/`disconnects`.
+Every change goes out on the `connection` stream as `{connected, alive, port,
+error}`. With `KILO_PORT` (or `--port`) the daemon waits for that exact
+node; without, it re-runs the port rules on every attempt. A USB adapter can
+come back under another name (`ttyACM1`) if something still holds the old
+node; `KILO_PORT=/dev/serial/by-id/usb-...` pins it by serial number.
 
 **Protocol.** JSON lines. Request `{"id": 7, "op": "param_get", "args": {"id":
 "WD_LIMP_S"}}`, reply `{"id": 7, "ok": true, "result": ...}` or `{"id": 7, "ok":
@@ -161,10 +185,12 @@ Ops: `daemon` (pid, port, clients, holds, behaviour), `ping`, `alive`,
 queries and commands, not goals), `call` (any other public BodyClient method
 with JSON-able arguments), `subscribe {rate_hz, kinds}` / `unsubscribe`,
 `release_port {lease_s}` / `reacquire_port`, `verify_hello` (for `kilo
-flash`), `shutdown`. After `subscribe`, the daemon streams `{"stream": kind,
-"t": ..., "data": ...}` lines without an id: `snapshot` (BodyState.snapshot()
-at `rate_hz`), `telemetry` (decimated to `rate_hz`), `event`, `hello`,
-`reboot`, `goals_cleared`, `connection`. The loop never blocks: body calls run
+flash`), `percepts` (flags, distance, recent percept events), `shutdown`.
+After `subscribe`, the daemon streams `{"stream": kind, "t": ..., "data":
+...}` lines without an id: `snapshot` (BodyState.snapshot() at `rate_hz`),
+`telemetry` (decimated to `rate_hz`), `event`, `hello`, `reboot`,
+`goals_cleared`, `connection`, `percepts` (`{events, flags}` whenever percept
+events happen; the daemon feeds its Percepts on every TELEMETRY). The loop never blocks: body calls run
 in a thread pool, and a client that does not read loses stream messages
 (counted, then one `dropped` line) instead of stalling anyone; one that does
 not read its replies is disconnected.
@@ -198,9 +224,20 @@ takes over (stop, REST, LIMP), close the port, remove the socket.
 `client` is the daemon's `BodyClient`, `state` its `BodyState`, `stop_event` a
 `threading.Event` set at shutdown (return promptly once set), `log_dir` a
 `pathlib.Path` (`--log-dir`, default `~/kilo-logs`). An `async def` runner is
-awaited on the daemon's loop instead (same arguments). The daemon stamps the
-link's liveness itself; the runner only sets goals. If the import fails the
-daemon logs it and runs without.
+awaited on the daemon's loop instead (same arguments). When the function
+also takes a `percepts` keyword, the daemon passes its own `SharedPercepts`,
+so the runner and `kilo monitor --percepts` see the same percepts. The
+daemon stamps the link's liveness itself; the runner only sets goals. If the
+import fails the daemon logs it and runs without. The packaged runner writes
+`<log-dir>/behaviour-<time>.jsonl` (see Behaviour) and stops within 0.1 s of
+SIGTERM; `$KILO_PERSONALITY` (in `~/.config/kilo/env`) picks another
+personality file.
+
+**Logs of the daemon.** `kilo run` writes its own log to
+`<log-dir>/daemon.log` (`~/kilo-logs/daemon.log`, rotating at 1 MB, 3 old
+files kept; `--daemon-log FILE|none`) as well as to stderr, which systemd
+sends to the journal. `--log` adds the JSON-lines frame log and `--kilolog`
+the raw `.kilolog.gz` (both in the log dir).
 
 **systemd: a user service.** `mind/systemd/kilo.service` runs `kilo run --log`
 as joe's *user* service, with lingering so it starts at boot without a login.
@@ -217,17 +254,39 @@ mind/systemd/install.sh          # idempotent: unit -> ~/.config/systemd/user/, 
                                  # from env.example if missing, lingering, daemon-reload, enable
 mind/systemd/install.sh --start  # ... and (re)start it now
 systemctl --user status kilo
-journalctl --user -u kilo -f     # the daemon's log (frames go to ~/kilo-logs/kilo-*.jsonl)
-kilo daemon                      # pid, port, clients, holds
+tail -f ~/kilo-logs/daemon.log   # the daemon's own log: always there
+journalctl --user -u kilo -f     # the same through the journal, when it is readable (below)
+kilo daemon                      # pid, port and link state, clients, holds, behaviour, percepts
 systemctl --user stop kilo       # before `kilo monitor --passive` or the hardware-test steps
 ```
+
+**On the Pi: the behaviour runner under systemd.**
+
+```sh
+cd ~/OpenCat && git pull                       # pip install -e: the update is live
+nano ~/.config/kilo/env                        # KILO_PORT=/dev/ttyACM0
+                                               # KILO_RUN_ARGS=--behaviour --kilolog
+systemctl --user restart kilo
+kilo daemon                                    # behaviour running, link up, raw log path
+kilo monitor --percepts                        # percept flags and events, through the daemon
+tail -f ~/kilo-logs/daemon.log                 # daemon log (socket, port, reconnects, runner)
+tail -f ~/kilo-logs/behaviour-*.jsonl          # what the runner chose and why
+kilo log summary ~/kilo-logs/kilo-*.kilolog.gz # after a session: rates, attitude, modes, events
+systemctl --user stop kilo                     # SIGTERM: runner stops, goals dropped, port closed
+```
+
+`journalctl --user -u kilo` answers "No journal files were found" when the
+user journal is volatile or joe may not read it (not in `systemd-journal`).
+`~/kilo-logs/daemon.log` does not depend on either. To get the journal too:
+`journalctl _SYSTEMD_USER_UNIT=kilo.service` (joe is in `adm`), or
+`sudo usermod -aG systemd-journal joe` and, for a journal that survives
+reboots, `sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald`.
 
 `~/.config/kilo/env` (systemd `EnvironmentFile` syntax) sets `KILO_PORT`
 (`/dev/ttyACM0`, the CH343 adapter in a Pi USB port, for now; `/dev/ttyAMA0`
 once the Pi sits on the NyBoard header) and `KILO_RUN_ARGS` (e.g.
-`--behaviour`). `--kilo PATH` points the unit at another `kilo` executable than
-`~/OpenCat/.venv/bin/kilo`. If `journalctl --user` shows nothing (volatile
-journal), use `journalctl _SYSTEMD_USER_UNIT=kilo.service` (joe is in `adm`).
+`--behaviour --kilolog`). `--kilo PATH` points the unit at another `kilo`
+executable than `~/OpenCat/.venv/bin/kilo`.
 
 ### Watching the body on its own (passive)
 
@@ -459,6 +518,16 @@ side up = +roll, degrees (the spec.toml field comments say the opposite).
 
 All thresholds are fields of `UltrasonicConfig` and `ImuConfig`.
 
+`SharedPercepts` (`shared.py`) wraps one `Percepts` in a lock for several
+threads: the daemon feeds it on every TELEMETRY, the behaviour runner calls
+`update(state)` each tick and `notify_self_motion()` before each move it
+starts (a sample already seen is skipped, so nothing is counted twice).
+`kilo monitor --percepts` shows the flags in the table (or a `percepts` list
+in each JSON line) and prints each percept event as it happens
+(`{"time": ..., "percept": "tap", ...}` in JSON mode); direct it runs its own
+`SharedPercepts`, through the daemon it reads the daemon's (`percepts` op and
+stream).
+
 ## Logs
 
 `kilo --log` (or `--log-file F`) writes JSON lines (`kilo/log.py`): `rx`/`tx`
@@ -468,10 +537,12 @@ records with the frame type, seq, payload hex and decoded `fields`, plus
 the raw `.kilolog` format below:
 
 ```sh
-python -m kilo.logs summary ~/kilo-logs/kilo-20261010-213000.jsonl [--json]
-python -m kilo.logs replay FILE [--json] [--with-body-events]   # percept events the log would produce
-python -m kilo.logs plot FILE --fields pitch,roll,dist,batt [--out x.png|x.csv] [--csv]
+kilo log summary ~/kilo-logs/kilo-20261010-213000.jsonl [--json]
+kilo log replay FILE [--json] [--with-body-events]   # percept events the log would produce
+kilo log plot FILE --fields pitch,roll,dist,batt [--out x.png|x.csv] [--csv]
 ```
+
+(`kilo log ...` is `python -m kilo.logs ...`.)
 
 `summary` gives duration, telemetry rate, tick gaps, pitch/roll/gyro stats,
 battery, distance echo rate, the mode timeline and the body's events.
@@ -484,8 +555,13 @@ balance corrections are not in TELEMETRY.
 header (version, proto, start times, tick_hz), then per frame
 `u8 dir | u32 t_ms | u8 n | n bytes` of the wire frame as sent (COBS +
 0x00). ≈3.5 MB/h of 25 Hz telemetry, ≈1 MB/h as `.kilolog.gz` (read and
-written transparently). `KilologWriter.write_wire()` is ready for the link
-to call; nothing writes it yet.
+written transparently). `kilo --kilolog [FILE] COMMAND` (direct) and `kilo run
+--kilolog [FILE]` (the daemon; flushed every 5 s, so a killed daemon leaves a
+readable file) hand a `KilologWriter` to the link, which calls `write_wire()`
+for every frame it writes and every frame its decoder completes (the
+decoder's `feed_wire()` returns each frame with its wire bytes). The default
+file is `~/kilo-logs/kilo-<time>.kilolog.gz` (the daemon: in `--log-dir`).
+Through a daemon, `kilo --kilolog CMD` notes that the daemon does the logging.
 
 ## Behaviour
 
@@ -572,7 +648,33 @@ otherwise). In code: `Runner(body, cfg, percepts=fn, clock=..., sleep=...,
 seed=..., log_path=...)` then `await runner.run(duration)`; `stop()` and
 `request_shutdown()` end it. `percepts()` returns a dict (`face`, `face_pan`,
 `pet`, `startle`, `stimulus_pan`, `shutdown`, `battery_critical`); `near` and
-`approaching` come from the snapshot's ultrasonic fields.
+`approaching` come from the snapshot's ultrasonic fields (personality
+`percepts` thresholds) unless the source provides them.
+
+**Under the daemon** (`kilo run --behaviour`): `run_behaviour(client,
+state, stop_event, log_dir)` builds `BodyAdapter(client, percepts=...)` and a
+`PerceptFeed` that calls `Percepts.update(state)` each tick and maps the
+result to the behaviour percepts the selector terms read. `python -m
+kilo.behaviour` uses the same feed. The mapping:
+
+| behaviour percept | from `Percepts` | used by |
+|---|---|---|
+| `face` | always False (no camera yet) | terms `face`, `alone`; greet |
+| `pet` | `pet` (gentle rocking) | terms `pet`, `alone`; greet; sociability |
+| `near` | `near` (< 150 mm, hysteresis) | term `near` |
+| `approaching` | `approaching` (closing > 100 mm/s) | term `approaching`; arousal |
+| `alone` | derived by the selector: not (`face` or `pet`) | term `alone` |
+| `startle` | 1.0 while `startle` is held (1 s), or on a new fall | arousal; startle |
+| `tap`, `tilted`, `picked_up`, `clear` | the flags of the same name | log only (no term yet) |
+| `percept_events` | names of this tick's PerceptEvents | log |
+
+The adapter calls `notify_self_motion()` before every posture change (0.5 s),
+head look and trick it starts, so Kilo's own moves are not read as a tap or
+a pickup. Body events: the runner has no BodyClient callback yet, so
+`BodyEvents` (`body_events.py`) diffs successive snapshots (epoch, the last
+8 EVENTs, connected/alive) and the runner logs `body_event` records (epoch
+change, FELL, WATCHDOG, LOW_BATTERY, BOOT, LINK_RESTORED, connection) and
+calls `on_body_event`.
 
 **Behaviour log**: `~/kilo-logs/behaviour-YYYYmmdd-HHMMSS.jsonl` by default,
 written by `kilo.log.JsonlLogger` (queue + writer thread, never blocking the
@@ -622,7 +724,14 @@ daemon against direct (same output). `test_settle.py` checks the post-flash
 settle against a model of the line (tty core, cdc-acm, HUPCL, a line-coding
 glitch), flash verification, `kilo flash` with a fake avrdude direct and
 through the daemon, and `kilo monitor --rate`. `test_systemd.py` runs
-install.sh against fake systemctl/loginctl. The suite takes about a minute.
+install.sh against fake systemctl/loginctl. `test_wiring.py` checks the
+pieces together: socket candidates, the daemon waiting for a missing port and
+surviving a replug (a vbody behind a symlink that appears, goes and comes
+back), the real behaviour runner under the daemon (behaviour log, posture
+goals, body events, clean stop), `kilo run --behaviour --kilolog` end to end
+with `kilo monitor --percepts` through it and `kilo log summary|replay` on
+the result, a direct `--kilolog` round trip, and wire-byte capture in the
+codec and link. The suite takes about a minute and a half.
 
 ## Layout
 
@@ -637,11 +746,12 @@ kilo/link/serial_link.py    SerialLink: reader/writer threads, goals, commands
 kilo/body/state.py          BodyState
 kilo/body/client.py         BodyClient: postures, calibration, params, stats
 kilo/log.py                 JSON-lines logger thread
-kilo/perception/            ultrasonic + IMU detectors, Percepts aggregator, ring buffer
-kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (python -m kilo.logs)
+kilo/perception/            ultrasonic + IMU detectors, Percepts aggregator, SharedPercepts, ring buffer
+kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (kilo log, python -m kilo.logs)
 kilo/tricks/                trick model, legacy importer, library/*.json (generated)
-kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner
+kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner (run_behaviour)
 kilo/cli.py                 the `kilo` command
+kilo/cli_tools.py           `kilo log`, `--kilolog`, `monitor --percepts`, `kilo daemon` link lines
 kilo/daemon.py              `kilo run`: owns the port, serves the socket, holds, port release
 kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody (BodyClient over the socket)
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
