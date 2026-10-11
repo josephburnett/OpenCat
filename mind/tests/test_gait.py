@@ -230,10 +230,22 @@ def test_vbody_gait_ends_on_epoch_bump_and_limp():
         e0 = s.vb.epoch
         if end == "watchdog":
             out = []
-            for _ in range(30):  # no heartbeat: stage 1 at 0.5 s
+            for _ in range(30):  # no heartbeat: stage 1 at 0.5 s (tick 25)
                 s.now += 0.02
                 s.vb._tick(s.now)
                 out += s.out()
+            # The watchdog's bump ramps the gait down (one period = 25 ticks)
+            # instead of cutting it: still walking, no GAIT_STOPPED yet, and
+            # stage 2's REST waits for it (the body's §3g behaviour).
+            assert s.vb.gait is not None and s.vb.gait.state == "stop"
+            assert not [m for t, m in out if t == M.EVENT and m.code == EV.GAIT_STOPPED]
+            for _ in range(60):  # ramp done at tick ~50; REST at 1.5 s (tick 75) after it
+                s.now += 0.02
+                s.vb._tick(s.now)
+                out += s.out()
+                if s.vb.gait is not None:
+                    assert s.vb.posture != "REST"
+            assert s.vb.posture == "REST"
         elif end == "fall":
             s.vb.trigger_fall(-1)
             out = s.out()

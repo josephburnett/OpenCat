@@ -32,9 +32,11 @@ both the same frames and compares the replies:
   accepted run=1 to the end: mode GAIT, flag GAIT, leg owner GAIT. A refresh
   updates the parameters; another pattern is a stop then a start (no
   GAIT_STOPPED in between). run=0: the stride ramps down over one period, then
-  posture STANCE, EVENT GAIT_STOPPED (arg 0) once, mode IDLE. An epoch bump
-  (watchdog stage 1, fall, LOW battery) or SET_POSTURE LIMP ends it at once
-  (GAIT_STOPPED with the new epoch). A trick owns the legs it moves (TRICK
+  posture STANCE, EVENT GAIT_STOPPED (arg 0) once, mode IDLE. The watchdog's
+  epoch bump (stage 1) ramps a running gait down like run=0 and stage 2's
+  REST waits for it (§3g: Kilo never lies down mid-stride); a fall, LOW
+  battery or SET_POSTURE LIMP ends it at once (a reflex took the legs). Either
+  way GAIT_STOPPED carries the new epoch. A trick owns the legs it moves (TRICK
   owner, mode TRICK) while the gait keeps its phase underneath and resumes
   after. SET_POSTURE while walking only changes the posture under the gait
   (the stop hands over to STANCE). SET_BODY_POSE: STALE, FALLEN, LOW_BATT (the
@@ -342,14 +344,32 @@ class VirtualBody:
         return ((self.balance_req or bool(self.balance["enable"])) and self.posture in BALANCE_POSTURES
                 and not self.reflex)
 
-    def _epoch_bump(self, trick_reason: int = TDR.PREEMPTED) -> None:
+    def _epoch_bump(self, trick_reason: int = TDR.PREEMPTED, gait_ramp: bool = False) -> None:
         self.epoch = (self.epoch + 1) & 0xFF
         self.goals.clear()
         self.balance_req = False  # the posture flag is a motion goal; SET_BALANCE settings stay
         self.head_until = None    # the head hold too
         self.pose = (0, 0, 0, 0)  # and the body pose
         self._trick_end(trick_reason)  # TRICK_DONE carries the new epoch
-        self._gait_end("stopped (epoch bump)")
+        # The body's bump stops the gait through its ramp (body_epoch_bump ->
+        # gait_stop); a reflex taking the legs on the same tick (fall, low
+        # battery) cuts it short. Only the watchdog leaves the legs to the gait.
+        if gait_ramp:
+            self._gait_stop("epoch bump")
+        else:
+            self._gait_end("stopped (epoch bump)")
+
+    def _gait_stop(self, why: str = "run=0") -> None:
+        """Stop through the ramp-down if the gait runs; at once if it has not
+        started (still moving to STANCE), like the body's gait_stop()."""
+        g = self.gait
+        if g is None:
+            return
+        g.restart = None
+        if g.state == "stance":
+            self._gait_end(f"stopped before starting ({why})")
+        else:
+            g.start_stop()
 
     def _gait_end(self, why: str = "stopped") -> None:
         """The gait is over: EVENT GAIT_STOPPED once (with the current epoch)."""
@@ -526,10 +546,11 @@ class VirtualBody:
             limp_s = REST_MOVE_S + self.params[P.ParamId.WD_LIMP_S]
             if self.wd_stage == 0 and silent >= stop_s:
                 self.wd_stage = 1
-                self._epoch_bump()
+                self._epoch_bump(gait_ramp=True)
                 self._event(EV.WATCHDOG, 0)
                 self._say("watchdog: stop")
-            if self.wd_stage == 1 and silent >= rest_s:
+            # Stage 2 also waits for the gait's ramp-down and landing.
+            if self.wd_stage == 1 and silent >= rest_s and self.gait is None:
                 self.wd_stage = 2
                 if self.posture != "LIMP":  # already limp stays limp
                     self.posture = "REST"

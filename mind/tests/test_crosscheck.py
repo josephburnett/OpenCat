@@ -445,8 +445,10 @@ def test_gait_goal(harness):
     hb = lambda seq: wire("HEARTBEAT", seq)
     play(harness, [
         wire("SET_GAIT", 1, epoch=0, run=1, **{**g, "period_ms": 200}),   # BAD_ARG
-        ("advance", 60),
-        wire("SET_GAIT", 2, epoch=9, run=1, **g),                          # STALE
+        # The body's GOAL_REFUSED rate limit is one per goal type per second
+        # of link_tick(), which the C harness never runs: the STALE check
+        # therefore uses the other P2 goal type.
+        wire("SET_BODY_POSE", 2, epoch=9, pitch=0, roll=0, dheight_mm=0, xshift_mm=0),  # STALE
         wire("SET_POSTURE", 3, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),
         ("tick", 20), hb(4),
         wire("SET_GAIT", 5, epoch=0, run=1, **g),
