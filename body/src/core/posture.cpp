@@ -40,10 +40,10 @@ KILO_NOINLINE int16_t posture_angle(uint8_t id, uint8_t k) {
 
 int16_t posture_pitch(uint8_t id) {
   int8_t r = row_of(id);
-  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].pitch) * (16 * LEGACY_PITCH_SIGN));
+  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].pitch) * 16);
 }
 
 int16_t posture_roll(uint8_t id) {
   int8_t r = row_of(id);
-  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].roll) * (16 * LEGACY_ROLL_SIGN));
+  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].roll) * 16);
 }

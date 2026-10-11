@@ -14,11 +14,15 @@ Kilo can tell is whether the conventions the host tests assume are the real
 ones: which way the IMU is mounted, and which way each joint moves the body.
 
 **Conventions under test.**
-- Kilo reports **nose up as +pitch** and **left side up as +roll** (P0).
-- The legacy skills and gains were written for nose **down** = +pitch, so the
-  firmware negates legacy pitch numbers (`LEGACY_PITCH_SIGN = -1`) and keeps
-  roll (`LEGACY_ROLL_SIGN = +1`), both in `body/src/core/posture.h`. If a leg
-  answers the wrong way in step 4, those two constants are what to flip.
+- Kilo reports **nose down as +pitch** and **right side up as +roll**: the
+  legacy `ypr` convention, measured on 2026-10-10 (nose up read −74°, left
+  side up −88°). The P0 doc had both backwards.
+- The posture references are the legacy header bytes verbatim (`sit`
+  expects pitch −30°, nose up). The legacy pitch gains are used as they are
+  (`LEGACY_PITCH_SIGN = +1`); the legacy roll gains assume left-up = +roll,
+  so roll is negated before them (`LEGACY_ROLL_SIGN = -1`), both in
+  `body/src/core/balance.h`. If a leg answers the wrong way in step 4, those
+  two constants are what to flip.
 
 **Before you start:**
 - The battery is charged (USB alone cannot power the servos).
@@ -65,10 +69,10 @@ Kilo is limp on the stand; tilt the whole stand slowly:
 
 | Tilt | `pitch/roll` row | `rates` row (first two: pitch, roll) while moving |
 |---|---|---|
-| nose up | pitch goes **positive** | pitch rate positive while tilting up |
-| nose down | pitch negative | pitch rate negative |
-| left side up | roll goes **positive** | roll rate positive while tilting |
-| right side up | roll negative | roll rate negative |
+| nose up | pitch goes **negative** | pitch rate negative while tilting up |
+| nose down | pitch positive | pitch rate positive |
+| left side up | roll goes **negative** | roll rate negative while tilting |
+| right side up | roll positive | roll rate positive |
 
 The rate must have the sign of the change of the angle (the host checked the
 maths, this checks the gyro). **If any row is the other way round, stop here
@@ -92,10 +96,10 @@ Tilt the stand about 15° each way, hold 2 s, and come back to level:
 
 | Tilt (what `kilo` prints) | Legs should | Why |
 |---|---|---|
-| nose up (pitch +15) | **front legs fold** (shorter), **back legs straighten** (longer); the head tilts down | lower the nose |
-| nose down (pitch −15) | front legs straighten, back legs fold; head tilts up | raise the nose |
-| left side up (roll +15) | all four legs bend a little (the body crouches), the **left pair clearly more** than the right; the tail swings | lower the left side |
-| right side up (roll −15) | all four bend, the **right pair more** | lower the right side |
+| nose up (pitch −15) | **front legs fold** (shorter), **back legs straighten** (longer); the head tilts down | lower the nose |
+| nose down (pitch +15) | front legs straighten, back legs fold; head tilts up | raise the nose |
+| left side up (roll −15) | all four legs bend a little (the body crouches), the **left pair clearly more** than the right; the tail swings | lower the left side |
+| right side up (roll +15) | all four bend, the **right pair more** | lower the right side |
 | level | everything returns to STAND within about a second | dead band 1° |
 
 Roll is a crouch with only a 20% left/right difference (legacy behaviour,
@@ -104,10 +108,12 @@ further. At Kp 0.9 and 15° the knees move ≈ 10°, the shoulders ≈ 7°.
 
 Sign check summary: the legs must always act to bring the raised end or side
 **down**. If pitch is the wrong way round (nose up makes the front legs
-straighten), flip `LEGACY_PITCH_SIGN` in `body/src/core/posture.h`; if roll is
+straighten), flip `LEGACY_PITCH_SIGN` in `body/src/core/balance.h`; if roll is
 (left side up makes the right pair bend further), flip `LEGACY_ROLL_SIGN`.
-Re-run `body/tools/host_tests.sh` (the posture checks follow the constants),
-`kilo -v flash`, and repeat this step.
+Such a flip also means the host plant in `body/test/test_balance.cpp` (which
+models the leg-to-body physics from the posture tables) is wrong for that
+axis and fails: report it rather than just flipping, then fix the plant,
+re-run `body/tools/host_tests.sh`, `kilo -v flash`, and repeat this step.
 
 Ctrl-C ends the hold; the watchdog then lays Kilo down.
 
@@ -153,9 +159,9 @@ show `balance_active` drop **at the watchdog stop** (0.5 s; the epoch bump
 clears the posture flag) and stay off through REST and LIMP.
 
 Also: `kilo balance on --posture sit --for 10` on the stand. SIT expects
-+30° (nose up), the stand holds the body level, so the correction runs to
+−30° (nose up), the stand holds the body level, so the correction runs to
 its clamp (15°) and the legs move toward a deeper sit: that is expected on a
-stand. Do the real SIT test on the floor: the body should settle near +30°
+stand. Do the real SIT test on the floor: the body should settle near −30°
 and hold it when the board tilts.
 
 ## 7. Tuning

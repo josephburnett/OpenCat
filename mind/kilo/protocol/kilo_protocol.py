@@ -1678,8 +1678,8 @@ class Telemetry:
     MAX_LEN: ClassVar[int] = 26
     _FMT: ClassVar[struct.Struct] = struct.Struct('<HhhhhhHHBBHBBBBBB')
     tick: int = 0  # tick; wraps every 21.8 min
-    pitch: int = 0  # deg x 0.0625; nose up +, legacy reflection
-    roll: int = 0  # deg x 0.0625; left side up +
+    pitch: int = 0  # deg x 0.0625; nose down + (legacy ypr), legacy reflection
+    roll: int = 0  # deg x 0.0625; right side up + (legacy ypr)
     rate_pitch: int = 0  # deg/s x 0.0625
     rate_roll: int = 0  # deg/s x 0.0625
     rate_yaw: int = 0  # deg/s x 0.0625

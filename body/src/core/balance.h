@@ -4,8 +4,11 @@
 //   e    = deadband(measured - ref, DB)                 DB default 2 deg
 //   u    = Kp*e + Kd*rate                               rate = DMP gyro on that axis
 //   corr = clamp(slew(lowpass(-u, 1/4), 1 deg/tick), +-max)   max default 15 deg
-// corr follows §3d: positive corr_pitch raises the nose, positive corr_roll
-// raises the left side. Nose high (e > 0) gives corr < 0: negative feedback.
+// Convention (measured 2026-10-10, = legacy ypr): nose DOWN = +pitch, RIGHT
+// side up = +roll. corr is in the same frame: positive corr_pitch lowers the
+// nose (raises the measured pitch), positive corr_roll raises the right side.
+// Nose high (pitch < ref, e < 0) gives corr > 0, which lowers the nose:
+// negative feedback.
 // (-u is also saturated at +-max before the low-pass, so the filter state
 // cannot wind up past what the clamp lets out.)
 //
@@ -31,6 +34,23 @@
 #define BAL_MAX_DEG 15
 #define BAL_MAX_DEG_LIMIT 30  // SET_BALANCE max_corr_deg / deadband_deg above this: BAD_ARG
 #define BAL_SLEW_A16 16       // 1 deg per tick
+
+// Sign of the deviation fed to the legacy gains (balance_map), relative to
+// Kilo's attitude. Kilo reads nose DOWN = +pitch and RIGHT side up = +roll
+// (measured 2026-10-10; identical to legacy ypr).
+//  - Pitch, +1: the legacy pitch gains move the legs away from SIT (front
+//    folds, back extends: nose down) on a negative (nose-up) deviation, so
+//    they are negative feedback in this convention as they stand.
+//  - Roll, -1: the legacy roll term crouches every leg and the LEFT pair
+//    1.2x harder on a positive deviation, which lowers the left side; that
+//    corrects a LEFT-side-up tilt, i.e. the legacy roll gains assume
+//    left-up = +roll, the opposite of ypr (a right-handed sensor cannot give
+//    nose-down +pitch and left-up +roll at once; on stock legacy the weak
+//    20% roll differential was wrong-signed). So Kilo negates roll before
+//    applying them. These two constants are the only place the convention
+//    meets the gains; the posture references (posture.h) are verbatim.
+#define LEGACY_PITCH_SIGN 1
+#define LEGACY_ROLL_SIGN (-1)
 
 enum BalAxisId : uint8_t { BAL_ROLL = 0, BAL_PITCH = 1 };
 

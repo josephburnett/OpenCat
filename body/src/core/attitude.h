@@ -15,8 +15,8 @@
 #define DMP_PACKET_SIZE 28
 
 struct Attitude {
-  int16_t pitch;  // a16, nose up + (legacy sign, incl. reflection)
-  int16_t roll;   // a16
+  int16_t pitch;  // a16, nose DOWN + (legacy ypr, incl. reflection; measured)
+  int16_t roll;   // a16, RIGHT side up + (legacy ypr; measured)
   int16_t rate_pitch, rate_roll, rate_yaw;  // a16/s from the raw gyro
   int16_t gz;     // gravity z, Q14 (negative = upside down), for reflexes
 };

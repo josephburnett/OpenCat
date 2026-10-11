@@ -56,3 +56,7 @@ on the charger. The second half ran at 20:20 with the pack at 8.43 V.
    stages; REST shows as owners REFLEX/REFLEX and LIMP as `-servos_powered`.
 10. LIMP comes 12.5 s after the link drops (1.5 s + 1 s REST move + 10 s);
     the vbody counts from 11.5 s. Align the vbody in P1.
+11. Attitude convention measured 2026-10-10: nose down = +pitch, right side
+    up = +roll (legacy ypr); the P0 doc had both backwards. (Tilted by hand
+    with `kilo monitor`: nose up read pitch −74°, left side up roll −88°,
+    level on the desk +0.9° / −2.7°.)

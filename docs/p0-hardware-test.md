@@ -208,7 +208,8 @@ diff /tmp/kilo-eeprom-legacy.txt /tmp/after.txt && echo "legacy EEPROM intact"
 ```
 
 Live view (Ctrl-C to quit). Tilt the stand gently: pitch and roll follow.
-Nose up is +pitch, left side up is +roll.
+Nose **down** is +pitch, **right** side up is +roll (the legacy `ypr`
+convention; measured 2026-10-10, this line had both backwards before).
 
 ```sh
 kilo monitor

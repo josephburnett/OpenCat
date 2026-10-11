@@ -119,8 +119,8 @@ int main() {
     CHECK(i != std::string::npos);
     std::vector<int> v = numbers(inst.substr(i + key.size(), inst.find("};", i) - i - key.size()));
     CHECK(v.size() == 20 && v[0] == 1);
-    // Expected roll/pitch: the header bytes, converted to Kilo's convention.
-    CHECKF(posture_roll(p.id) == v[1] * 16 * LEGACY_ROLL_SIGN && posture_pitch(p.id) == v[2] * 16 * LEGACY_PITCH_SIGN,
+    // Expected roll/pitch: the header bytes verbatim (Kilo's attitude is ypr).
+    CHECKF(posture_roll(p.id) == v[1] * 16 && posture_pitch(p.id) == v[2] * 16,
            "%s expected roll/pitch", p.name);
     static const int J[11] = {0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15};
     for (int k = 0; k < 11; k++)

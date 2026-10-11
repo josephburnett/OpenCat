@@ -608,8 +608,8 @@ drop_order = 3
 doc = "Body state, 25 Hz by default."
 fields = [
   { name = "tick", type = "u16", unit = "tick", note = "wraps every 21.8 min" },
-  { name = "pitch", type = "i16", unit = "deg", scale = 0.0625, note = "nose up +, legacy reflection" },
-  { name = "roll", type = "i16", unit = "deg", scale = 0.0625, note = "left side up +" },
+  { name = "pitch", type = "i16", unit = "deg", scale = 0.0625, note = "nose down + (legacy ypr), legacy reflection" },
+  { name = "roll", type = "i16", unit = "deg", scale = 0.0625, note = "right side up + (legacy ypr)" },
   { name = "rate_pitch", type = "i16", unit = "deg/s", scale = 0.0625 },
   { name = "rate_roll", type = "i16", unit = "deg/s", scale = 0.0625 },
   { name = "rate_yaw", type = "i16", unit = "deg/s", scale = 0.0625 },

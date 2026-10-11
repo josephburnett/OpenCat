@@ -113,7 +113,7 @@ int main() {
   int16_t ry[4] = {(int16_t)std::lround(16384 * std::cos(M_PI / 12)), 0,
                    (int16_t)std::lround(16384 * std::sin(M_PI / 12)), 0};
   CHECK(attitude_from_quat(ry, a) && std::abs(a.pitch - (-30 * 16)) <= 1 && a.roll == 0);
-  // Upside down, nose slightly up: the legacy reflection (pitch near 180).
+  // Upside down (180 deg about x): roll reads +-180.
   int16_t inv[4] = {0, 16384, 0, 0};
   CHECK(attitude_from_quat(inv, a) && std::abs(std::abs(a.roll) - 2880) <= 1);
   // Non-unit quaternions (misaligned FIFO bytes) are rejected.

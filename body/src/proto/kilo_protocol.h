@@ -630,8 +630,8 @@ KILO_STATIC_ASSERT(offsetof(kilo_hello_t, epoch) == 15, kilo_sa_hello_epoch);
 #define KILO_TELEMETRY_LEN 26u
 typedef struct KILO_PACKED kilo_telemetry_s {
     uint16_t tick; /* tick; wraps every 21.8 min */
-    int16_t pitch; /* deg x 0.0625; nose up +, legacy reflection */
-    int16_t roll; /* deg x 0.0625; left side up + */
+    int16_t pitch; /* deg x 0.0625; nose down + (legacy ypr), legacy reflection */
+    int16_t roll; /* deg x 0.0625; right side up + (legacy ypr) */
     int16_t rate_pitch; /* deg/s x 0.0625 */
     int16_t rate_roll; /* deg/s x 0.0625 */
     int16_t rate_yaw; /* deg/s x 0.0625 */

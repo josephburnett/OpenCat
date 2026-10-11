@@ -154,16 +154,19 @@ static void test_legacy_mapping() {
 static int sgn(int v) { return (v > 0) - (v < 0); }
 
 static void test_directions() {
-  // +corr_pitch raises the nose: from STAND, the knees and back shoulders
-  // move toward SIT (nose up, back folded, front extended).
+  // Measured convention: nose DOWN = +pitch, RIGHT side up = +roll. A
+  // positive correction must raise the measured value on its axis.
+  // +corr_pitch lowers the nose: from STAND, the knees and back shoulders
+  // move AWAY from SIT (SIT = nose up: back folded, front extended), i.e.
+  // the front folds and the back extends. -corr_pitch: toward SIT.
   for (int k : {5, 6, 7, 8, 9, 10}) {
     int toward = sgn(posture_angle(POSTURE_SIT, (uint8_t)k) - posture_angle(POSTURE_STAND, (uint8_t)k));
-    CHECKF(toward != 0 && sgn(balance_map((uint8_t)k, 0, 80)) == toward, "+pitch corr, joint %d", KJ[k]);
-    CHECKF(sgn(balance_map((uint8_t)k, 0, -80)) == -toward, "-pitch corr, joint %d", KJ[k]);
+    CHECKF(toward != 0 && sgn(balance_map((uint8_t)k, 0, 80)) == -toward, "+pitch corr, joint %d", KJ[k]);
+    CHECKF(sgn(balance_map((uint8_t)k, 0, -80)) == toward, "-pitch corr, joint %d", KJ[k]);
   }
-  // +corr_roll raises the left side: every leg crouches toward REST, the
-  // right legs (9, 10, 13, 14) 1.2x as far as the left (8, 11, 12, 15).
-  // -corr_roll: the left legs crouch further.
+  // +corr_roll raises the right side: every leg crouches toward REST, the
+  // left legs (8, 11, 12, 15) 1.2x as far as the right (9, 10, 13, 14), so
+  // the left side drops. -corr_roll: the right legs crouch further.
   for (int sign : {1, -1}) {
     for (int k = 3; k < DRIVEN_COUNT; k++) {
       int toward = sgn(posture_angle(POSTURE_REST, (uint8_t)k) - posture_angle(POSTURE_STAND, (uint8_t)k));
@@ -173,7 +176,7 @@ static void test_directions() {
     for (auto& p : pairs) {
       int l = std::abs(balance_map((uint8_t)p[0], (int16_t)(160 * sign), 0));
       int r = std::abs(balance_map((uint8_t)p[1], (int16_t)(160 * sign), 0));
-      CHECKF(sign > 0 ? r > l : l > r, "roll corr %d: left %d right %d", sign, l, r);
+      CHECKF(sign > 0 ? l > r : r > l, "roll corr %d: left %d right %d", sign, l, r);
     }
   }
 }
@@ -248,7 +251,7 @@ static void test_shaping() {
   // Just outside: e = 1 deg past the band, corr = -Kp * 1 deg = -8 a16.
   for (int t = 0; t < 100; t++) balance_axis_step(bal, s, true, 48, 0, 0);
   CHECKF(s.corr == -8, "corr %d", s.corr);
-  // Relative to the reference (sit: +30 deg expected): 31 deg is in the band.
+  // Relative to a reference of 30 deg: 31 deg is in the band.
   s = {0, 0};
   for (int t = 0; t < 100; t++) balance_axis_step(bal, s, true, 31 * 16, 30 * 16, 0);
   CHECK(s.corr == 0);
@@ -326,7 +329,7 @@ static void tilt(double roll, double pitch) {
 static void test_gating() {
   reset_body();
   tick();
-  tilt(0, 10);  // nose up 10 deg
+  tilt(0, 10);  // nose down 10 deg (measured convention)
   // STAND without the flag: never balances.
   CHECK(body_goal_posture(b, b.epoch, POSTURE_STAND, 0, 0) == GOAL_OK);
   tick(80);
@@ -336,7 +339,7 @@ static void test_gating() {
   tick();
   CHECK(b.bal.active);
   tick(60);
-  CHECK(b.bal.ax[BAL_PITCH].corr == -64 && !at(POSTURE_STAND));  // -0.5 * (10 - 2) deg
+  CHECK(b.bal.ax[BAL_PITCH].corr == -64 && !at(POSTURE_STAND));  // -0.5 * (10 - 2) deg: raise the nose
   // During a transition (STAND -> SIT, 25 ticks): off, corrections zeroed.
   // The mover starts from the corrected pose, so nothing jumps.
   int16_t before[DRIVEN_COUNT];
@@ -348,8 +351,9 @@ static void test_gating() {
   tick(23);
   CHECK(!b.bal.active);
   tick(2);
-  CHECK(b.bal.active);  // settled in SIT; ref is +30 deg nose-up
-  tilt(0, 30);
+  CHECK(b.bal.active);  // settled in SIT; ref is -30 deg (nose up, legacy header verbatim)
+  CHECK(posture_pitch(POSTURE_SIT) == -30 * 16);
+  tilt(0, -30);
   tick(60);
   CHECK(b.bal.ax[BAL_PITCH].corr == 0 && at(POSTURE_SIT));
   // REST, CALIB, ZERO, LIMP: never.
@@ -400,8 +404,11 @@ static void test_gating() {
 }
 
 // Closed loop through body_tick: the body tilt follows the joints. The
-// plant reads the nose-raise and left-raise the legs produce from the
-// arbiter's output (mean knee travel, as the mapping defines it), lagged.
+// plant is physical, independent of the mapping's sign constants: it reads
+// from the arbiter's output how far the legs lower the nose (front knee
+// folding, back knee extending) and raise the right side (left knees
+// crouching further than the right), lagged, and reports them in the
+// measured convention: nose DOWN = +pitch, RIGHT side up = +roll.
 static double body_loop(bool pitch_axis, int meas_sign) {
   reset_body();
   tick();
@@ -424,11 +431,15 @@ static double body_loop(bool pitch_axis, int meas_sign) {
     double effect;
     auto dk = [](int k) { return (b.arb.out[k] - posture_angle(POSTURE_STAND, (uint8_t)k)) / 16.0; };
     if (pitch_axis) {
-      effect = (dk(7) + dk(9)) / 2 / 0.785;  // LF and RB knees: +0.785 deg per deg of nose raise
+      // Nose drop (= +pitch). Front knee LF (12) + = extend, back knee RB
+      // (14) + = fold (SIT, nose up, has both larger than STAND), each
+      // 0.785 deg per deg of correction.
+      effect = -(dk(7) + dk(9)) / 2 / 0.785;
     } else {
-      // Left raise = how much further the right legs crouched than the left
-      // (knees LF 12 / RF 13: -1.57 per deg of crouch, 1.2x on the right).
-      effect = (dk(7) - dk(8)) / (0.2 * 1.5708);
+      // Right raise (= +roll) = how much further the left legs crouched
+      // than the right. Front knees fold toward negative (REST -45 vs STAND
+      // 30): LF 12 / RF 13 move -1.57 per deg of crouch, 1.2x on one side.
+      effect = (dk(8) - dk(7)) / (0.2 * 1.5708);
     }
     x += (effect - x) * dt / tau;
   }

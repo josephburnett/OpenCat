@@ -26,16 +26,25 @@ static const int8_t GAIN[DRIVEN_COUNT][2] PROGMEM = {
 // and skill.h applies it as  servo = frame + adjust  (reaction.h's
 // "currentAng - currentAdjust" only undoes that to recover the frame).
 //
-// Here dR, dP are the legacy deviations in the legacy convention, expressed
-// through the corrections: with Kp = 1 and no Kd, corr = -e, so dR = -corr_roll
-// and dP = -corr_pitch, each times LEGACY_*_SIGN (posture.h) to convert
-// Kilo's convention (nose up = +pitch) into the one the legacy gains were
-// written for (nose down = +pitch). Physically, from the posture tables:
-//   - +corr_pitch moves the knees and back shoulders from STAND toward SIT
-//     (front knee +0.79 deg/deg, back knee +0.79, back shoulder -0.52):
-//     the back folds and the front extends, so the nose rises;
-//   - +corr_roll crouches every leg by |corr| (toward REST) and the right
-//     legs 1.2x as hard, so the right side drops relative to the left.
+// Here dR, dP are the legacy deviations, expressed through the corrections:
+// with Kp = 1 and no Kd, corr = -e, so dR = -corr_roll and dP = -corr_pitch,
+// each times LEGACY_*_SIGN (balance.h). Kilo's convention (measured): nose
+// DOWN = +pitch, RIGHT side up = +roll. Physically, from the posture tables:
+//   - +corr_pitch (dP < 0) moves the knees and back shoulders from STAND
+//     AWAY from SIT (front knee -0.79 deg/deg, back knee -0.79, back
+//     shoulder +0.52): the front folds and the back extends, so the nose
+//     drops and the measured pitch rises;
+//   - +corr_roll (dR < 0 after LEGACY_ROLL_SIGN) crouches every leg by
+//     |corr| (toward REST) and the LEFT legs 1.2x as hard, so the left side
+//     drops relative to the right: the right side rises, the measured roll
+//     rises.
+// So a positive correction raises the measured value on its axis, and
+// corr = -Kp*e is negative feedback. Worked through: nose up 10 deg
+// (pitch -10, ref 0) -> e = -8 after the 2 deg band -> corr_pitch = +4 at
+// Kp 0.5 -> dP = -4 -> front knees -3.1 deg, back knees -3.1, back shoulders
+// +2.1 (front folds, back extends) -> nose comes down. Right side up 10 deg
+// (roll +10) -> corr_roll = -4 -> dR = -(-4) * (-1) = -4 -> all legs
+// crouch 4 deg-worth, the RIGHT pair 1.2x -> the right side comes down.
 // test_balance.cpp checks both against the posture tables.
 //
 // Fixed point: num5 = 5 * (rollAdj - pF*dP) in a16 (the 5 makes 1.2 = 6/5

@@ -481,13 +481,14 @@ height `H_i` and stride `S_i`:
 - **Turning:** `S_left = S − turn`, `S_right = S + turn`. With `S = 0` Kilo
   turns in place.
 
-**Pose terms.** Signs are chosen so that a positive pitch raises the nose and a
-positive roll raises the left side. In both cases the legs on the raised end or
-side get longer (larger `H`, since z points down).
+**Pose terms.** Signs follow the measured attitude convention (3f, "Sign
+conventions"): a positive pitch lowers the nose (raises the back) and a
+positive roll raises the right side. In both cases the legs on the raised end
+or side get longer (larger `H`, since z points down).
 
 ```
 H_i = body_h + end_i·(Lb/2)·sin(pitch_total) + side_i·(W/2)·sin(roll_total)
-  end_i = +1 front, −1 back;  side_i = +1 left, −1 right
+  end_i = −1 front, +1 back;  side_i = −1 left, +1 right
   pitch_total = pose_pitch + corr_pitch;  roll_total = pose_roll + corr_roll   (corr from 3f)
   x0_i += pose_xshift
 ```
@@ -590,12 +591,12 @@ point throughout:
 ```
 e     = deadband(measured − ref, DB)            DB default 2°
 u     = Kp·e + Kd·rate                          rate = DMP gyro on that axis (a16/s)
-corr  = −u                                      negative feedback: nose too high → lower it
+corr  = −u                                      negative feedback: nose too high (e < 0) → corr > 0 lowers it
 corr  = clamp(slew(lowpass(corr, α=1/4), 1°/tick), ±15°)
 ```
 
 - `ref` is 0 for GAIT and STANCE, and the posture's or trick's expected
-  pitch/roll otherwise (table below; `sit` expects +30°, nose up).
+  pitch/roll otherwise (table below; `sit` expects −30°, nose up).
 - Defaults **(est.)**: Kp = 0.5 (`kp_q8` 128), Kd = 0.03 s (`kd_ms` 30),
   DB 2°, clamp 15°. Kp is Q8, so 255/256 is the largest; Kd·rate is computed
   as `rate·kd_ms·131 >> 17`.
@@ -604,9 +605,11 @@ corr  = clamp(slew(lowpass(corr, α=1/4), 1°/tick), ±15°)
   bits and settles exactly; a decaying correction reaches exactly 0.
 - There is no integral term: a sustained slope should change the pose, and an
   integrator would wind up.
-- `corr_pitch` and `corr_roll` enter the pose terms in 3d, where a positive
-  value raises the nose or left side. If Kilo is nose-high (`e > 0`), `corr` is
-  negative and the front legs shorten.
+- `corr_pitch` and `corr_roll` are in the attitude's own frame and enter the
+  pose terms in 3d, where a positive value lowers the nose (raises the
+  measured pitch) or raises the right side (raises the measured roll). If
+  Kilo is nose-high (pitch below ref, `e < 0`), `corr` is positive and the
+  front legs shorten.
 - Where it runs, and when it is off, is in 3c (layer 2).
 - Tuning is live through `SET_BALANCE` (enable, Kp, Kd, dead band, clamp;
   not persisted; dead band and clamp ≤ 30°, else `GOAL_REFUSED BAD_ARG`).
@@ -635,8 +638,8 @@ per 57.3° of tilt:
 
 They are applied exactly as legacy `adjust()` applied them to a posture
 (Appendix C3), with legacy's deviations expressed through the corrections
-(`dR = −corr_roll`, `dP = −corr_pitch`, each converted to the legacy sign
-convention below):
+(`dR = −corr_roll`, `dP = −corr_pitch`, each times `LEGACY_*_SIGN`, see
+"Sign conventions" below):
 
 ```
 roll term  = |dR|·rF·(1.2 on one side)    tilt and the legs: a symmetric crouch, 1.2× on one side
@@ -650,30 +653,37 @@ and the lowering side's legs 1.2× as far, so only a fifth of the roll gain is
 differential. With Kp at its maximum and Kd 0 the controller reproduces
 legacy `adjust()` (no damper) within 0.16° for every joint (host test). In
 physical terms, checked against the posture tables: +`corr_pitch` moves the
-knees and back shoulders from STAND toward SIT (the back folds, the front
-extends: nose up), and +`corr_roll` crouches the right legs further than the
-left (left side up).
+knees and back shoulders from STAND away from SIT (the front folds, the back
+extends: nose down, measured pitch up), and +`corr_roll` crouches the left
+legs further than the right (right side up, measured roll up). Worked
+through, Kp 0.5, DB 2°: nose up 10° reads pitch −10 → `e` = −8 → `corr_pitch`
+= +4 → `dP` = −4 → front and back knees −3.1°, back shoulders +2.1° (front
+folds, back extends) → the nose comes down. Right side up 10° reads roll +10
+→ `corr_roll` = −4 → `dR` = −(−4)·(−1) = −4 → every leg crouches, the right
+pair 1.2× → the right side comes down.
 
 **Expected attitude per posture** (the balance reference), from the legacy
 skill headers in `src/InstinctNybble.h` (frame count, expected roll, expected
-pitch, angle ratio), in Kilo's convention:
+pitch, angle ratio), used verbatim (Kilo's attitude is the legacy `ypr`):
 
 | Posture | Header roll, pitch (legacy) | Kilo `ref` roll, pitch | Balance |
 |---|---|---|---|
 | `rest` | 0, 0 | 0°, 0° | off (lying down) |
-| `sit` | 0, −30 | 0°, **+30°** (nose up) | on |
+| `sit` | 0, −30 | 0°, **−30°** (nose up) | on |
 | `up` (STAND, and `balance`) | 0, 0 | 0°, 0° | on |
-| `str` (stretch, a P1 trick) | 0, 15 | 0°, **−15°** (nose down) | with the trick's `BALANCE` flag |
+| `str` (stretch, a P1 trick) | 0, 15 | 0°, **+15°** (nose down) | with the trick's `BALANCE` flag |
 | `calib`, `zero` | 0, 0 | 0°, 0° | off |
 
 **Sign test.** Host closed-loop tests (`body/test/test_balance.cpp`) run a
-toy plant: body tilt = disturbance + x, where x follows the correction with a
+toy plant (in the measured convention: a positive correction raises the
+measured value, i.e. lowers the nose or raises the right side): body tilt = disturbance + x, where x follows the correction with a
 first-order lag (τ 0.15 s). A 10° step settles at 7.3° = (10 + Kp·DB)/(1 + Kp)
 with the defaults; flipping the actuation or the measurement sign drives it
 to 18°, and with a large rate gain (Kd 200 ms > τ) the flipped gyro sign
 oscillates (12° peak to peak) where the right sign settles. The same loop
 closed through `body_tick`, the arbiter and the joint outputs (the plant reads
-the knees) settles at 7.3° pitch / 7.4° roll and runs away to ≈18° with the
+the knees physically, front fold / back extend = nose down, left crouching
+further = right side up, independent of the sign constants) settles at 7.3° pitch / 7.4° roll and runs away to ≈18° with the
 sensor flipped. Both axes.
 
 **Sign conventions (verified in P1).**
@@ -686,27 +696,36 @@ sensor flipped. Both axes.
   firmware over 5000 random orientations within ±60° (any yaw): max error
   0.038° pitch, 0.038° roll (the §7 criterion is 1°). TELEMETRY `pitch`/`roll`
   are therefore exactly what the legacy firmware's `ypr` would read.
-- **On Kilo nose-up is +pitch and left-side-up is +roll** (P0, by tilting;
-  re-checked as step 1 of `docs/p1-hardware-test.md`).
+- **On Kilo nose-DOWN is +pitch and RIGHT-side-up is +roll**, i.e. the
+  legacy `ypr` convention. Measured on 2026-10-10 by tilting the whole cat
+  by hand with `kilo monitor` (build 975055a): nose up read pitch −74°, left
+  side up roll −88°, level +0.9° / −2.7°. (P0 had claimed the opposite on
+  both axes without measuring it.)
 - **Rates.** `rate_roll = +gyro_x`, `rate_pitch = −gyro_y` are the time
   derivatives of that roll and pitch: checked on the host against the
   quaternion kinematics (`q' = q·(1, ω dt/2)`, body-frame gyro) over 2000
   random orientations within 20° of level (6% worst error, from axis
-  cross-coupling at tilt). So Kd always damps in the direction Kp pushes.
-- **The legacy skills were written for nose-down = +pitch.** Every Nybble
-  skill header agrees: `sit` (nose up) expects −30, the hind-leg `stand` −60,
-  `lifted` −75; `buttUp` and `str` (nose down) +15, `dropped` +75. Legacy
-  `adjust()` agrees too: on +pitch deviation it moves the legs toward SIT,
-  which raises the nose, i.e. it corrects a nose-down error. On a body that
-  reads nose-up as +pitch both would be wrong-signed, so the firmware
-  negates legacy pitch numbers (`LEGACY_PITCH_SIGN = −1` in `core/posture.h`,
-  used for the reference and the gains) and keeps roll (`LEGACY_ROLL_SIGN =
-  +1`: legacy's extra crouch on the side of a positive roll deviation lowers
-  the raised left side). If the hardware test shows the legs answering the
-  wrong way, flip those two constants: they are the only place the
-  convention lives. (A right-handed sensor cannot have nose-down +pitch and
-  left-up +roll at once, so on stock legacy one of the two axes was
-  wrong-signed: the weak 20% roll differential is the likelier one.)
+  cross-coupling at tilt). So the nose rising gives a negative `rate_pitch`
+  and the left side rising a negative `rate_roll`, and Kd always damps in the
+  direction Kp pushes.
+- **Pitch: the legacy skills and gains match.** Every Nybble skill header
+  uses nose-down = +pitch: `sit` (nose up) expects −30, the hind-leg `stand`
+  −60, `lifted` −75; `buttUp` and `str` (nose down) +15, `dropped` +75.
+  Legacy `adjust()` agrees: on a negative (nose-up) pitch deviation it moves
+  the legs away from SIT (front folds, back extends), which lowers the nose.
+  So the posture references are the header bytes verbatim and the pitch
+  gains are used as they are (`LEGACY_PITCH_SIGN = +1` in `core/balance.h`).
+- **Roll: the legacy gains are wrong-signed for `ypr`.** Legacy `adjust()`
+  crouches every leg by |roll deviation| and the LEFT pair 1.2× harder when
+  the deviation is positive. That lowers the left side, which corrects a
+  left-side-up tilt, but `ypr` reads left-side-up as NEGATIVE roll. (A
+  right-handed sensor cannot have nose-down +pitch and left-up +roll at once;
+  on stock legacy the weak 20% roll differential was the wrong-signed axis.)
+  So Kilo negates roll before the gains (`LEGACY_ROLL_SIGN = −1`); expected
+  roll references stay verbatim (all 0 for the postures). These two
+  constants are the only place the convention meets the gains; the host
+  plant in `test_balance.cpp` is physical, so flipping either one fails the
+  direction and closed-loop tests.
 
 **Attitude without float.** The DMP quaternion is int32 Q30. The firmware takes
 the high 16 bits as Q14:
@@ -998,8 +1017,8 @@ marks a payload that starts with an epoch byte.
 | Off | Field | Type | Meaning |
 |---|---|---|---|
 | 0 | tick | u16 | Wraps every 21.8 min; the Pi unwraps it |
-| 2 | pitch | i16 a16 | Nose up +, with the legacy reflection |
-| 4 | roll | i16 a16 | Left side up + (confirmed in P1) |
+| 2 | pitch | i16 a16 | Nose down + (legacy `ypr`), with the legacy reflection |
+| 4 | roll | i16 a16 | Right side up + (legacy `ypr`; measured 2026-10-10) |
 | 6 | rate_pitch / rate_roll / rate_yaw | 3 × i16 a16/s | |
 | 12 | dist_mm | u16 | 0 = no echo |
 | 14 | batt_mv | u16 | Filtered |
@@ -1570,8 +1589,11 @@ it. Three independent clues:
 - **Dead band quirk:** the band is subtracted with the sign of the raw `ypr`,
   not of the deviation; the two differ only when the expected angle is non-zero
   (`sit`). The new firmware uses the sign of the deviation.
-- **Sign convention:** the skill headers and these gains assume nose-down =
-  +pitch; see 3f "Sign conventions".
+- **Sign convention:** the skill headers and the pitch gains assume
+  nose-down = +pitch, which is what `ypr` (and Kilo) reads. The roll gains
+  correct a left-side-up tilt on positive roll, but `ypr` reads that as
+  negative roll, so legacy roll balance was wrong-signed (weakly: only the
+  20% left/right differential); Kilo negates it. See 3f "Sign conventions".
 - **Rate:** the IMU is read on every 3rd joint write, so the rate depends on
   loop speed.
 - It is proportional-only, in joint space.
