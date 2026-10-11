@@ -46,7 +46,7 @@ operations notes and test tables. The main body links to them.
 | Head | `SET_HEAD` holds pan/tilt/tail slew-limited over IDLE/GAIT, without balance corrections; released by mode 0, 2 s without a refresh or an epoch bump. Implemented in P1. | 3c |
 | Watchdog | Armed by the first valid frame from the Pi. Two stages: stop motion at 0.5 s, REST at 1.5 s, LIMP 10 s later. | 3g |
 | Protocol | COBS + CRC-16/CCITT-FALSE at 250000 baud. Goals unacked and refreshed at 5 Hz; queries answered by their data reply; other commands acked and de-duplicated. | 4 |
-| IR remote | **Dropped.** | |
+| IR remote | **Relayed** (owner's request, 2026-10-11; was dropped). Received on the body: NEC decoded on D4 from a pin-change interrupt shared with the ultrasonic, no library (≈450 B flash, 17 B RAM); relayed as `EVENT IR_KEY`; mapped to actions on the mind (`kilo run --remote`, `kilo.ir`). | 3a, 4, 5 |
 | Buzzer | **Kept, Pi-driven.** A `BEEP` note queue plus built-in reflex chirps. ISR-toggled on D5. | 3a, 4 |
 | First tricks | Basics: sit, rest, stand, stretch, balance. Social: hi, wash face, check around, sniff, scratch, pee, push-up, butt-up. Athletic tricks (backflip, roll, jump) are not ported. Fall recovery stays a body reflex. | 5 |
 | Behaviour | An in-house behaviour tree under a utility selector over drives, ticked at 10 Hz. | 5 |
@@ -222,6 +222,26 @@ in STATS. Acceptance: under 12 ms over a 10-minute trot.
 to input with `PCINT22` enabled. The ISR timestamps both echo edges with
 `micros()`. No falling edge within 25 ms means "no echo" (`dist_mm = 0`).
 Appendix B has the step list and the error budget.
+
+**IR remote** (added 2026-10-11 at the owner's request: "receive on the body
+and just relay to the mind"). The NyBoard's on-board IR receiver is on D4 =
+PD4 = `PCINT20`, in the same pin-change group as the ultrasonic's D6, so the
+one `PCINT2_vect` (`hal/pcint2.cpp`) serves both: it reads `PIND` once, hands
+the level of D6 to the ultrasonic's state machine (which only acts on the
+edge it waits for) and detects D4's falling edges against the previous
+`PIND`. `PCINT20` stays enabled from boot; the ultrasonic sets and clears only
+its own `PCMSK2` bit and no longer clears `PCIFR` (that could drop an IR
+edge). D4 is a plain input (the receiver drives the line). The receiver's
+output idles high and goes low during a mark, so the NEC decoder
+(`core/ir_nec`, host-tested) works on the intervals between falling edges:
+leader 13.5 ms, bit 0 1.125 ms, bit 1 2.25 ms, repeat 11.25 ms, each with a
+tolerant window; an out-of-range interval or a 20 ms gap resets it. It runs
+inside the ISR (a few compares and a shift per edge, ≈20 µs), checks
+address/~address and command/~command, and leaves the key for
+`background()`, which pushes `EVENT IR_KEY` (arg = command, `| 0x100` for a
+held-key repeat, sent only within 150 ms of a valid frame or repeat). The
+legacy IRremote library (Timer2 at 20 kHz, ≈2 KB) is not used.
+`-DKILO_IR=0` drops it; HELLO caps bit 1 says it is built in.
 
 **Boot sequence**
 
@@ -1069,6 +1089,9 @@ the body is compiled); raising the P1 flash ceiling toward the P2 one
 **Measured with the boot epoch** (§3c): **22132 B flash** (+40 B),
 **1433 B globals** (+1 B `.noinit`, the epoch in the reset record), 2444 B
 under the P1 ceiling.
+**Measured with the IR receiver** (2026-10-11, 3a; from 22102 B / 1433 B):
+**22548 B flash** (+446 B), **1450 B globals** (+17 B: the decoder state and
+the previous `PIND`); `-DKILO_IR=0` gives the bytes back.
 
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
 use is reported through a painted canary (`stack_free_min` in STATS). RAM is
@@ -1580,7 +1603,9 @@ and `src/` are deleted after P2 is accepted.
   - the skill system and I2C-EEPROM skills;
   - setup-sketch paths, TaskQueue and ultrasonic reactions;
   - the RGB effects engine;
-  - the IR remote (≈2 KB, 147 B RAM, 20 kHz ISR);
+  - the IR remote library (≈2 KB, 147 B RAM, 20 kHz ISR); replaced
+    2026-10-11, at the owner's request, by a ≈450 B NEC decoder on the
+    shared pin-change interrupt that relays keys to the mind (`EVENT IR_KEY`, 3a);
   - HardwareSerial, Print, Wire and I2Cdev;
   - the float library, including float quaternion maths (≈1.3 KB) and
     `beep()` floats.
@@ -1990,7 +2015,7 @@ this table. Offsets are within the payload. `E` = epoch u8.
 
 | Type | Payload | B |
 |---|---|---|
-| 0x80 HELLO | `proto_major u8`, `proto_minor u8`, `fw_build u32`, `reset_cause u8` (0 COLD, 1 FLASHED, 2 REQUESTED, 3 WARM_UNEXPECTED), `last_alive_tick u16`, `caps u16` (bit 0 buzzer, 2 DMP, 3 ultrasonic, 4 eyes), `max_payload u8`, `trick_capacity u8` (0 in P0: no store; 32 from P1), `joint_count u8` (11), `config_state u8` (0 ok, 1 migrated, 2 defaulted), `epoch u8` | 16 |
+| 0x80 HELLO | `proto_major u8`, `proto_minor u8`, `fw_build u32`, `reset_cause u8` (0 COLD, 1 FLASHED, 2 REQUESTED, 3 WARM_UNEXPECTED), `last_alive_tick u16`, `caps u16` (bit 0 buzzer, 1 IR receiver, 2 DMP, 3 ultrasonic, 4 eyes), `max_payload u8`, `trick_capacity u8` (0 in P0: no store; 32 from P1), `joint_count u8` (11), `config_state u8` (0 ok, 1 migrated, 2 defaulted), `epoch u8` | 16 |
 | 0x81 TELEMETRY | §4 | 26 |
 | 0x82 JOINTS | `tick u16`, 11 × `i16` a16 (−32768 = limp) | 24 |
 | 0x83 IMU_RAW | `tick u16`, 6 × `i16` | 14 |
@@ -2025,6 +2050,7 @@ this table. Offsets are within the payload. `E` = epoch u8.
 | 15 | CONFIG_DEFAULTED (reason) |
 | 16 | EEPROM_SAVED |
 | 17 | TX_DROPPED (rate-limited) |
+| 18 | IR_KEY (NEC command byte \| 0x100 for a held-key repeat; proto 1.3) |
 
 **Params** (`[[params]]` in spec.toml; stable ids, appended, never
 renumbered; each id < 16 has a persisted slot in the config block, 0x7FFF =

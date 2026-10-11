@@ -292,10 +292,10 @@ the side at the same spot for both firmwares.
 
 ```sh
 body/tools/host_tests.sh                   # ends "host tests: ALL PASSED" (incl. "keyframe ... 0 failed")
-body/tools/size_check.sh                   # flash ~22.1 KB of 24576, globals 1433 of 1540, PASS
+body/tools/size_check.sh                   # flash ~22.5 KB of 24576, globals 1450 of 1540, PASS
 (cd mind && python -m pytest -q)
 kilo -v flash
-kilo status                                # `proto 1.2`
+kilo status                                # `proto 1.3`
 kilo trick list                            # 13 tricks, no body needed
 kilo trick show hi                         # header, notes, keyframes
 ```
@@ -544,3 +544,49 @@ board: the legs correct, the held head does not move.
 - F4: whether the speeds and the return look right, and any buzzing at the
   hold.
 - `kilo status` at the end: overruns, max tick, **stack free**.
+
+## IR remote
+
+Added 2026-10-11 (the owner's request): the body decodes the Petoi remote
+on D4 and relays each key as `EVENT IR_KEY`; the daemon's `--remote` maps
+keys to actions (`mind/README.md` has the map). Point the remote at the
+NyBoard's receiver from about 1 m. Take your time at each step; answer when
+you are done.
+
+1. **Rendering, daemon stopped.** `systemctl --user stop kilo`, then
+   `kilo monitor --passive`. Press each of the 21 keys once. Expected, one
+   line per press, for example:
+
+   ```
+   EVENT IR_KEY CH- (0xA2, rest) tick=... epoch=...
+   EVENT IR_KEY 2 (0x18, sit) tick=... epoch=...
+   ```
+
+   Every key should show its own label (`? (0x..)` means a code the table
+   does not know: note it). Also note any press that shows nothing, or two
+   lines for one short press.
+2. **Held key.** Still in the passive monitor, hold `2` for about two
+   seconds: one `IR_KEY 2 (0x18, sit)` line, then `... repeat` lines about
+   nine per second until you let go. Ctrl-C the monitor.
+3. **The ultrasonic still works.** `kilo monitor` (live): the distance row
+   follows your hand while you press keys now and then.
+4. **Through the daemon.** `kilo run --remote` in terminal A (or add
+   `--remote` to `KILO_RUN_ARGS` in `~/.config/kilo/env` and
+   `systemctl --user restart kilo`; its log is `~/kilo-logs/daemon.log`).
+   Press, waiting for each move to finish: `>>|` (stand), `2` (sit),
+   `CH-` (rest), `-` (limp), `>>|` (stand), `CH+` (balance on: tilt the
+   board, the legs correct; `CH+` again: off), `3` stretch, `4` hi, `5`
+   push-up, `6` pee, `7` wash face, `8` butt-up (each trick from STAND;
+   the first press of each uploads it, so it may start a moment later).
+   Then `CH`, `1`, `+`: nothing moves and the log says "walking comes in
+   P2"; `EQ`, `9`: nothing. Expected: the posture each key set is still
+   held a minute later (no idle LIMP); a key pressed during a trick stops
+   it and does its own action; holding a key does not repeat the action.
+5. **A client wins.** With the daemon still running `--remote`, run
+   `kilo posture stand --for 10` and press `2` meanwhile: Kilo stays
+   standing (the log says the key was ignored); after the command ends,
+   REST, and `2` works again.
+
+Report: anything unexpected in steps 1-5, missing or doubled presses, and
+whether the decode felt reliable from across the room.
+
