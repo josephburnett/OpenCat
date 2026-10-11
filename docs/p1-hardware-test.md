@@ -39,7 +39,11 @@ cd ~/OpenCat
 git pull                                   # the branch with the balance layer
 export PATH="$HOME/OpenCat/.venv/bin:$PATH" KILO_PORT=/dev/ttyACM0
 ~/OpenCat/.venv/bin/pip install -e mind    # picks up the new `kilo balance`
+systemctl --user stop kilo 2>/dev/null     # if the daemon is installed: these steps run direct
 ```
+
+With the daemon stopped every `kilo` command opens the port itself, as these
+steps assume (`kilo daemon` must say "no daemon listening").
 
 ## 1. Host checks
 
@@ -58,6 +62,22 @@ kilo status
 
 `verified: HELLO ...` with the new build, then `config OK`, `balance off`,
 `overruns 0`. Kilo lies down, then limps (the P0 watchdog timeline).
+
+**No reset after the flash** (the post-flash DTR settle, mind/README.md "DTR
+and resets"). Run the flash verbose and read the uptime twice:
+
+```sh
+kilo -v flash --no-build                   # prints "settled /dev/ttyACM0: 3 open/close cycles ..."
+                                           # and one line per cycle (HUPCL was set / clear, DTR 1 RTS 1)
+kilo status | grep uptime                  # right after: uptime continuing (≥ 2 s), not 0
+sleep 5; kilo status | grep -E 'uptime|reset'   # uptime ≈ 5 s more, reset cause unchanged
+```
+
+`kilo status` right after `kilo flash` must show the uptime continuing from the
+verify's boot, not 0 (0 means the status open reset the body: the settle did
+not take; note what the per-cycle lines said). If it fails, try
+`kilo -v flash --no-build --settle-cycles 5` and report which cycle first shows
+`HUPCL was clear`.
 
 ## 3. Attitude and rate signs (stand, no motion needed)
 

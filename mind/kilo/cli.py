@@ -1,19 +1,23 @@
 """The `kilo` command line (docs/architecture.md Appendix G), P0 subset.
 
     kilo [--port P] [--log | --log-file FILE] [-v] status [--json]
-    kilo monitor [--rate HZ] [--duration S] [--passive]
+    kilo monitor [--rate HZ] [--duration S] [--json] [--passive]
     kilo posture {limp,rest,stand,sit,balance,...} [--transition TICKS] [--for S [--then-watch T]]
     kilo balance on|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand|sit] [--for S]
     kilo cal show | set JOINT DEGREES | save | revert
     kilo param list | get ID | set ID VALUE [--persist]
-    kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none]
+    kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S]
     kilo vbody [--fall-after S] [--no-keys]
+    kilo run [--port P] [--socket PATH] [--log] [--behaviour]
+    kilo daemon [status|stop]
 
-The CLI opens the port directly. (The daemon socket /run/kilo/kilo.sock in
-Appendix G arrives with the daemon.) Because goals are only held while the
-mind is alive, ``kilo posture`` keeps running and holding the posture until
-Ctrl-C or ``--for``; when it exits the body's watchdog takes over (stop, then
-REST after 1.5 s).
+Every command first tries the daemon socket (``kilo run``, kilo.daemon; path
+from kilo.remote.socket_path()); when no daemon listens, or ``--direct`` is
+given, or ``--port`` names another port than the daemon's, it opens the port
+itself. Because goals are only held while the mind is alive, ``kilo posture``
+keeps running and holding the posture until Ctrl-C or ``--for``; when it exits
+the body's watchdog takes over (stop, then REST after 1.5 s), or, through the
+daemon, the daemon ends the hold (REST at once, LIMP 10 s later).
 
 Every command but ``monitor --passive`` feeds the body's link watchdog while
 it runs. ``monitor --passive`` writes nothing at all to the port (the body
@@ -46,6 +50,7 @@ from kilo.link.ports import detect_port
 from kilo.link.serial_link import CommandError, LinkError, SerialLink
 from kilo.link.transport import DEFAULT_BAUD, open_port
 from kilo.protocol import kilo_protocol as P
+from kilo.remote import DaemonError
 
 EXIT_OK, EXIT_ERR, EXIT_USAGE = 0, 1, 2
 
@@ -61,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-file", metavar="FILE", help="write the JSON-lines log to FILE")
     p.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for the body")
     p.add_argument("-v", "--verbose", action="count", default=0)
+    p.add_argument("--socket", metavar="PATH",
+                   help="daemon socket (default $KILO_SOCKET, $XDG_RUNTIME_DIR/kilo/kilo.sock, "
+                        "/run/kilo/kilo.sock as root, else ~/.kilo/kilo.sock)")
+    p.add_argument("--direct", action="store_true", help="never use the daemon: open the port directly")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     s = sub.add_parser("status", help="HELLO, state and link statistics")
@@ -68,8 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-stats", action="store_true", help="do not request STATS from the body")
 
     s = sub.add_parser("monitor", help="live telemetry table")
-    s.add_argument("--rate", type=float, default=10.0, help="refresh rate in Hz")
+    s.add_argument("--rate", type=float, default=10.0, help="refresh rate in Hz (table and JSON lines)")
     s.add_argument("--duration", type=float, default=None, help="stop after S seconds")
+    s.add_argument("--json", action="store_true",
+                   help="JSON lines instead of the table (the default when stdout is not a terminal)")
     s.add_argument("--passive", action="store_true",
                    help="send nothing (no HELLO, heartbeat or goal; the body's watchdog is not fed) "
                         "and print a timeline: events and mode/epoch/owner/flag changes as they "
@@ -143,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"GPIO4 low time in ms (default {P.RESET_PULSE_MS})")
     s.add_argument("--no-size-check", action="store_true")
     s.add_argument("--no-verify", action="store_true", help="skip the HELLO FLASHED check")
+    s.add_argument("--verify-timeout", type=float, default=8.0, metavar="S",
+                   help="seconds to wait for the HELLO after flashing (default 8)")
+    s.add_argument("--settle-cycles", type=int, default=3, metavar="N",
+                   help="open/close cycles that settle DTR/HUPCL after avrdude (default 3)")
     s.add_argument("--dry-run", action="store_true", help="print the commands only")
 
     s = sub.add_parser("vbody", help="run a virtual body on a pty")
@@ -150,6 +165,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="simulate a fall S seconds after start")
     s.add_argument("--no-keys", action="store_true", help="do not read keys from the terminal")
     s.add_argument("--quiet", action="store_true")
+
+    s = sub.add_parser("run", help="run the daemon: own the port, serve the socket (normally via systemd)")
+    # Repeated here (SUPPRESS: only set when given) so `kilo run --port P` works too.
+    s.add_argument("--port", "-p", default=argparse.SUPPRESS, help="serial port")
+    s.add_argument("--socket", default=argparse.SUPPRESS, metavar="PATH", help="socket path")
+    s.add_argument("--log", action="store_true", default=argparse.SUPPRESS,
+                   help="write the JSON-lines frame log to --log-dir")
+    s.add_argument("--log-dir", default=None, metavar="DIR",
+                   help="telemetry/behaviour log dir (default ~/kilo-logs)")
+    s.add_argument("--behaviour", action="store_true",
+                   help="start kilo.behaviour.runner.run_behaviour if it is installed")
+    s.add_argument("--idle-posture", choices=("rest", "limp", "none"), default="rest",
+                   help="what the daemon latches when a client's hold ends (default rest, then limp)")
+    s.add_argument("--idle-limp", type=float, default=10.0, metavar="S",
+                   help="seconds in the idle REST before LIMP (default 10)")
+
+    s = sub.add_parser("daemon", help="status of a running daemon, or stop it")
+    s.add_argument("action", choices=("status", "stop"), nargs="?", default="status")
+    s.add_argument("--json", action="store_true")
     return p
 
 
@@ -164,9 +198,46 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 # ---- helpers ---------------------------------------------------------------------
-def _setup_logging(verbose: int) -> None:
+def _setup_logging(verbose: int, daemon: bool = False) -> None:
     level = logging.WARNING if verbose == 0 else logging.INFO if verbose == 1 else logging.DEBUG
-    logging.basicConfig(level=level, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
+    if daemon:
+        level = min(level, logging.INFO)
+        if os.environ.get("JOURNAL_STREAM"):  # under systemd: the journal adds the time
+            fmt = "%(name)s %(levelname)s %(message)s"
+    logging.basicConfig(level=level, format=fmt)
+
+
+def _daemon_for(args: argparse.Namespace) -> Any:
+    """A DaemonConnection when a daemon serves this command's port, else None.
+
+    ``--direct`` never uses the daemon; an explicit ``--port`` other than the
+    daemon's opens that port directly."""
+    if getattr(args, "direct", False):
+        return None
+    from kilo.remote import DaemonError, connect
+
+    try:
+        conn = connect(args.socket)
+    except DaemonError as e:
+        print(f"warning: {e}; opening the port directly", file=sys.stderr)
+        return None
+    if conn is None:
+        return None
+    if args.port and os.path.realpath(args.port) != os.path.realpath(conn.info.get("port") or ""):
+        conn.close()
+        return None
+    if args.verbose:
+        print(f"daemon pid {conn.info.get('pid')} on {conn.path}, port {conn.info.get('port')}", file=sys.stderr)
+    return conn
+
+
+def _refuse_port_busy(args: argparse.Namespace, conn: Any, what: str) -> int:
+    print(f"kilo {args.cmd}: {what} needs the serial port to itself, but the daemon (`kilo run`, pid "
+          f"{conn.info.get('pid')}) holds {conn.info.get('port')} and feeds the body's watchdog. Stop it "
+          f"first (`kilo daemon stop`, or `systemctl --user stop kilo` under systemd), or pass --port "
+          f"for another port.", file=sys.stderr)
+    return EXIT_ERR
 
 
 def _resolve_port(args: argparse.Namespace) -> str:
@@ -302,25 +373,36 @@ def cmd_monitor(args: argparse.Namespace, client: BodyClient) -> int:
               + (f"; {args.duration:g} s" if args.duration is not None else "; Ctrl-C to quit"),
               flush=True)
         return watch_timeline(client, t0, args.duration)
-    tty_out = sys.stdout.isatty()
+    table = sys.stdout.isatty() and not args.json
     period = 1.0 / max(args.rate, 0.5)
     end = None if args.duration is None else time.monotonic() + args.duration
-    last_line = 0.0
+    next_at = time.monotonic()
     try:
         while end is None or time.monotonic() < end:
             client.link.mark_alive()
             snap = client.state.snapshot()
-            if tty_out:
+            if table:
                 sys.stdout.write("\x1b[H\x1b[2J" + render_monitor(snap) + "\n(Ctrl-C to quit)\n")
                 sys.stdout.flush()
-            elif time.monotonic() - last_line >= 1.0:
-                last_line = time.monotonic()
-                print(json.dumps({k: snap[k] for k in ("tick", "mode", "epoch", "pitch_deg",
-                                                      "roll_deg", "balance", "batt_mv", "alive")}), flush=True)
-            time.sleep(period)
+            else:
+                print(json.dumps(monitor_record(snap)), flush=True)
+            # fixed-rate schedule: the snapshot and print time do not stretch the period
+            next_at += period
+            delay = next_at - time.monotonic()
+            if delay < 0:
+                next_at, delay = time.monotonic(), 0.0
+            time.sleep(delay)
     except KeyboardInterrupt:
         pass
     return EXIT_OK
+
+
+MONITOR_JSON_KEYS = ("tick", "mode", "epoch", "pitch_deg", "roll_deg", "balance", "batt_mv", "alive")
+
+
+def monitor_record(snap: dict[str, Any]) -> dict[str, Any]:
+    """One `kilo monitor --json` line: wall time plus the main fields."""
+    return {"time": round(time.time(), 3), **{k: snap[k] for k in MONITOR_JSON_KEYS}}
 
 
 def cmd_posture(args: argparse.Namespace, client: BodyClient) -> int:
@@ -454,34 +536,76 @@ def cmd_eeprom(args: argparse.Namespace, client: BodyClient) -> int:
 
 
 def cmd_flash(args: argparse.Namespace) -> int:
-    from kilo.tools.flash import (DEFAULT_BUILD_DIR, DEFAULT_SKETCH, FlashError, FlashOptions, flash,
-                                  reset_method, verify_hello)
+    from kilo.tools.flash import (DEFAULT_BUILD_DIR, DEFAULT_SKETCH, FlashError, FlashOptions, VerifyResult,
+                                  flash, is_usb_port, verify_hello)
 
-    port = _resolve_port(args)
+    conn = None if args.dry_run else _daemon_for(args)
+    port = conn.info["port"] if conn is not None else _resolve_port(args)
     opts = FlashOptions(
         port=port, legacy=args.legacy, build=not (args.no_build or args.hex), hex_path=args.hex,
         sketch=args.sketch or DEFAULT_SKETCH, build_dir=args.build_dir or DEFAULT_BUILD_DIR,
         reset=args.reset, reset_ms=args.reset_ms, size_check=not args.no_size_check,
-        verify=not args.no_verify, dry_run=args.dry_run)
+        verify=not args.no_verify, dry_run=args.dry_run, verify_timeout=args.verify_timeout,
+        settle_cycles=args.settle_cycles, baud=args.baud, verbose=bool(args.verbose))
+    # Over a USB adapter the settle reset (DTR) makes the HELLO say WARM_UNEXPECTED.
+    any_cause = is_usb_port(port)
     holder: dict[str, SerialLink] = {}
 
-    def verify(since: float, expected_build: int | None) -> bool:
+    def verify(since: float, expected_build: int | None, timeout: float) -> Any:
+        if conn is not None:
+            r = conn.call("verify_hello", timeout=timeout + 10, since=since, expected_build=expected_build,
+                          any_cause=any_cause, wait_s=timeout)
+            return VerifyResult(bool(r["ok"]), r.get("hello"))
         link = SerialLink(lambda: open_port(port, args.baud), port_name=port)
         holder["link"] = link
         link.mark_alive()
         link.start()
-        return verify_hello(link, since, expected_build,
-                            any_cause=reset_method(port, args.reset) == "dtr")
+        return verify_hello(link, since, expected_build, timeout=timeout, any_cause=any_cause)
 
+    lease = DaemonPortLease(conn, port) if conn is not None else None
     try:
-        flash(opts, verify=verify)
+        flash(opts, link=lease, verify=verify)
     except FlashError as e:
         print(f"kilo flash: {e}", file=sys.stderr)
         return EXIT_ERR
     finally:
         if "link" in holder:
             holder["link"].stop()
+        if conn is not None:
+            if lease.released:
+                try:
+                    lease.start()
+                except Exception:
+                    pass
+            conn.close()
     return EXIT_OK
+
+
+class DaemonPortLease:
+    """flash()'s ``link`` when a daemon owns the port: stop() asks it to
+    release the port (with a lease, so a crashed flash cannot keep it; the
+    daemon also reacquires when this connection drops), start() to reacquire."""
+
+    LEASE_S = 300.0
+
+    def __init__(self, conn: Any, port: str):
+        self.conn = conn
+        self.port = port
+        self.released = False
+
+    @property
+    def running(self) -> bool:
+        return not self.released
+
+    def stop(self) -> None:
+        self.conn.call("release_port", lease_s=self.LEASE_S)
+        self.released = True
+        print(f"daemon released {self.port}", flush=True)
+
+    def start(self) -> None:
+        self.conn.call("reacquire_port")
+        self.released = False
+        print(f"daemon reacquired {self.port}", flush=True)
 
 
 def cmd_vbody(args: argparse.Namespace) -> int:
@@ -529,18 +653,79 @@ def cmd_vbody(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    from kilo.daemon import run_daemon
+
+    return run_daemon(args)
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    from kilo.remote import DaemonError, connect, socket_path
+
+    path = socket_path(args.socket)
+    try:
+        conn = connect(path)
+    except DaemonError as e:
+        print(f"kilo daemon: {e}", file=sys.stderr)
+        return EXIT_ERR
+    if conn is None:
+        print(f"no daemon listening on {path}")
+        return EXIT_ERR if args.action == "status" else EXIT_OK
+    with conn:
+        info = conn.info
+        if args.action == "stop":
+            conn.call("shutdown")
+            end = time.monotonic() + 10
+            while path.exists() and time.monotonic() < end:
+                time.sleep(0.1)
+            print(f"stopped daemon pid {info.get('pid')}" if not path.exists()
+                  else f"daemon pid {info.get('pid')} did not stop within 10 s")
+            return EXIT_OK if not path.exists() else EXIT_ERR
+    if args.json:
+        print(json.dumps(info, indent=2))
+        return EXIT_OK
+    print(f"daemon      pid {info['pid']}  kilo {info['version']}  up {info['uptime_s']:.0f} s  "
+          f"clients {info['clients']}")
+    print(f"socket      {info['socket']}")
+    print(f"port        {info['port']}  " + ("RELEASED (flashing)" if info["port_released"] else
+                                             f"connected={info['connected']} alive={info['alive']}"))
+    print(f"holds       {', '.join(info['held_goals']) or '-'}  idle {info['idle'] or '-'}")
+    print(f"behaviour   {info['behaviour']}")
+    print(f"frame log   {info['log_file'] or '-'}")
+    return EXIT_OK
+
+
 LINK_COMMANDS = {"status": cmd_status, "monitor": cmd_monitor, "posture": cmd_posture, "balance": cmd_balance,
                  "cal": cmd_cal, "param": cmd_param, "pca": cmd_pca, "eeprom": cmd_eeprom}
+# Commands that manage the port (or the daemon) themselves: cmd(args).
+PORT_COMMANDS = {"flash": cmd_flash, "vbody": cmd_vbody, "run": cmd_run, "daemon": cmd_daemon}
+# Link-command modes that must send nothing, so they cannot share the daemon's port.
+SILENT_MODES = {"monitor": ("passive", "--passive"), "posture": ("then_watch", "--then-watch")}
+
+
+def _silent_mode(args: argparse.Namespace) -> str | None:
+    attr, flag = SILENT_MODES.get(args.cmd, (None, None))
+    return flag if attr is not None and getattr(args, attr, None) not in (None, False) else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    _setup_logging(args.verbose)
-    if args.cmd == "flash":
-        return cmd_flash(args)
-    if args.cmd == "vbody":
-        return cmd_vbody(args)
-    link, client = open_link(args, passive=args.cmd == "monitor" and args.passive)
+    _setup_logging(args.verbose, daemon=args.cmd == "run")
+    if args.cmd in PORT_COMMANDS:
+        return PORT_COMMANDS[args.cmd](args)
+    conn = _daemon_for(args)
+    if conn is not None:
+        silent = _silent_mode(args)
+        if silent is not None:
+            conn.close()
+            return _refuse_port_busy(args, conn, f"`kilo {args.cmd} {silent}`")
+        from kilo.remote import RemoteBody
+
+        if args.log or args.log_file:
+            print("note: through the daemon, frames are logged by the daemon (`kilo run --log`)", file=sys.stderr)
+        link, client = None, RemoteBody(conn)
+    else:
+        link, client = open_link(args, passive=args.cmd == "monitor" and args.passive)
     try:
         return LINK_COMMANDS[args.cmd](args, client)
     except ProtocolMismatch as e:
@@ -552,8 +737,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (LinkError, KeyError, ValueError) as e:
         print(f"kilo {args.cmd}: {e}", file=sys.stderr)
         return EXIT_ERR
+    except DaemonError as e:
+        print(f"kilo {args.cmd}: daemon: {e}", file=sys.stderr)
+        return EXIT_ERR
     finally:
-        close_link(link)
+        if link is not None:
+            close_link(link)
+        else:
+            client.close()
 
 
 if __name__ == "__main__":

@@ -26,6 +26,39 @@ Petoi documents them; unconfirmed items are flagged at the end.
 - No Petoi Raspberry Pi OS image exists; use stock Raspberry Pi OS or Ubuntu.
 - The IR receiver is on PD4 and does not conflict with Pi serial, but IR and Pi commands fight for the single command slot in the firmware. The MU camera uses Grove G1 (I2C) on the head; it shares the I2C bus the switch arbitrates.
 
+## Kilo mind service (the daemon under systemd)
+
+Kilo's own mind (not Petoi's token protocol) runs as `kilo run`, a daemon that
+owns the serial port and serves `kilo` commands over a Unix socket. Details:
+mind/README.md "Daemon and systemd". On the Pi (joe, mind venv in
+`~/OpenCat/.venv`, see mind/README.md "Install on the Pi"):
+
+```sh
+sudo usermod -aG dialout joe               # once; log out and in
+cd ~/OpenCat && git pull
+mind/systemd/install.sh                    # user unit, ~/.config/kilo/env, lingering, enable (not started)
+nano ~/.config/kilo/env                    # KILO_PORT=/dev/ttyACM0 for now
+systemctl --user start kilo                # or: mind/systemd/install.sh --start
+kilo daemon                                # pid, port, clients
+kilo status                                # goes through the daemon
+journalctl --user -u kilo -f               # its log; frame logs in ~/kilo-logs
+systemctl --user stop kilo                 # before the hardware-test docs (they run direct)
+```
+
+- It is a **user service** (`~/.config/systemd/user/kilo.service`) with
+  lingering (`loginctl enable-linger joe`, done by install.sh) so it starts at
+  boot without a login: no sudo to manage it, joe's groups and venv, and the
+  socket lands in `/run/user/1000/kilo/kilo.sock`, which joe's shells find
+  without configuration.
+- **Port.** `/dev/ttyACM0` (the CH343 adapter in one of the Pi's USB ports)
+  for now; `/dev/ttyAMA0` (the PL011 on the header) once the Pi sits on the
+  NyBoard. Set it in `~/.config/kilo/env`; never both at once (they share the
+  328P's RX line).
+- `systemctl --user stop kilo` (SIGTERM) drops the goals and goes silent: the
+  body's watchdog takes over (stop, REST, LIMP) before the port closes.
+- `kilo flash` works with the service running: it asks the daemon to release
+  the port for avrdude and to reacquire it afterwards.
+
 ## Power budget
 
 - Battery: ZCF503060 Li-ion, 1000 mAh, 7.4 Wh (2S, ~7.4 V nominal), charged at 5 V 1 A. Standby "several hours", running "less than 0.5 hours". https://docs.petoi.com/technical-support/battery
