@@ -5,6 +5,13 @@
 // rotationDirection[], middleShift[], angleLimit[]). Limits are whole degrees
 // and fit int8. Rows 3-7 are the unused 12-DoF slots: kept so the legacy
 // EEPROM arrays can be cross-checked in full, never driven.
+//
+// Exception: the tail (row 2) is dir +1, the Nybble value up to
+// N_240702. Upstream commit b152455 ("support robotic arm", N_240907) flipped
+// the shared rotationDirection[2] to -1 for Bittle's arm clip, and Nybble
+// inherited it. Kilo's EEPROM (test/test_kilo_eeprom.cpp) says +1, and the
+// legacy firmware drives with the EEPROM value, so +1 is what the hardware
+// was calibrated and run with.
 struct JointRow {
   uint8_t ch;
   int8_t dir;
@@ -16,7 +23,7 @@ struct JointRow {
 static const JointRow JOINTS[JOINT_COUNT] PROGMEM = {
     {12, 1, 0, -120, 120},    // 0 head pan
     {11, -1, 15, -80, 45},    // 1 head tilt
-    {4, -1, 0, -120, 120},    // 2 tail
+    {4, 1, 0, -120, 120},     // 2 tail (+1: see note above)
     {3, 1, 0, -120, 120},     // 3 unused
     {13, 1, -45, -90, 60},    // 4 unused
     {10, -1, -45, -90, 60},   // 5 unused

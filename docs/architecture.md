@@ -266,7 +266,7 @@ needs an ISP programmer. That is not planned.
 |---|---|---|---|---|---|
 | 0 | head pan | 12 | +1 | 0 | -120..120 |
 | 1 | head tilt | 11 | −1 | 15 | -80..45 |
-| 2 | tail | 4 | −1 | 0 | -120..120 |
+| 2 | tail | 4 | +1 | 0 | -120..120 |
 | 3-7 | unused (12-DoF slots) | 3,13,10,5,2 | | | never driven |
 | 8 | LF shoulder | 14 | +1 | 10 | -100..80 |
 | 9 | RF shoulder | 9 | −1 | 10 | -100..80 |
@@ -277,7 +277,11 @@ needs an ISP programmer. That is not planned.
 | 14 | RB knee | 7 | +1 | 30 | -120..60 |
 | 15 | LB knee | 0 | −1 | 30 | -120..60 |
 
-The values come from `src/OpenCat.h`. The leg order LF, RF, RB, LB is not
+The values come from `src/OpenCat.h`, except the tail `dir`: current
+`src/OpenCat.h` says −1 because upstream commit b152455 (N_240907, Bittle
+robot arm) flipped the shared `rotationDirection[2]`; Nybble firmware up to
+N_240702, and Kilo's own EEPROM, say +1, and the legacy firmware drives with
+the EEPROM value. The leg order LF, RF, RB, LB is not
 written down in the code; it is inferred from it (Appendix C).
 
 - The canonical wire order for the 11 driven joints is
@@ -1433,6 +1437,7 @@ it. Three independent clues:
 | `CALIB` | 16 | 16 B |
 | `MID_SHIFT` | 32 | 16 B |
 | `ROTATION_DIRECTION` | 48 | 16 B |
+| `MPUCALIB` | 256 | int16 × 6: accel xyz, gyro xyz offset registers |
 
 **C5. Other legacy facts used.**
 - Battery: `LOW_VOLTAGE 650` and the `voltage/99` printout. Full (8.4 V) ≈ 832
