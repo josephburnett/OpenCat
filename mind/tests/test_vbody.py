@@ -305,17 +305,19 @@ def test_contract_d_goals():
     assert s.send("SET_POSTURE", epoch=0, posture=P.Posture.STAND) == []
     assert s.vb.posture == "STAND"
     assert events(s.send("SET_POSTURE", epoch=0, posture=7)) == [refused(M.SET_POSTURE, R.BAD_ARG)]
-    s.now += 1.1
-    assert events(s.send("SET_POSTURE", epoch=0, posture=P.Posture.STANCE)) == [refused(M.SET_POSTURE, R.BAD_ARG)]
+    assert s.send("SET_POSTURE", epoch=0, posture=P.Posture.STANCE) == []  # P2: the IK standing posture
+    assert s.vb.posture == "STANCE"
     s.now += 1.1
     assert events(s.send("SET_POSTURE", epoch=9, posture=P.Posture.SIT)) == [refused(M.SET_POSTURE, R.STALE)]
     # rate limit: one GOAL_REFUSED per type per second
     assert s.send("SET_POSTURE", epoch=9, posture=P.Posture.SIT) == []
     assert s.send("SET_POSTURE", epoch=9, posture=P.Posture.REST) == []  # REST is never stale
     assert s.vb.posture == "REST"
-    for name, kw in (("SET_GAIT", {}), ("SET_BODY_POSE", {}), ("SET_EYES", {})):
-        cls = P.MESSAGES[M[name]]
-        assert events(s.raw(cls.ID, cls(**kw).pack())) == [refused(cls.ID, R.UNKNOWN_TYPE)], name
+    cls = P.MESSAGES[M.SET_EYES]
+    assert events(s.raw(cls.ID, cls().pack())) == [refused(cls.ID, R.UNKNOWN_TYPE)]
+    # P2: SET_GAIT checks its ranges (period 0 is BAD_ARG); SET_BODY_POSE is accepted
+    assert events(s.raw(M.SET_GAIT, P.SetGait().pack())) == [refused(M.SET_GAIT, R.BAD_ARG)]
+    assert events(s.raw(M.SET_BODY_POSE, P.SetBodyPose().pack())) == []
     assert s.send("BEEP", notes=[P.Note(note=12, dur_10ms=10)]) == []
     # SET_BALANCE (P1): accepted silently, BAD_ARG out of range, never stale.
     assert s.send("SET_BALANCE", enable=1, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=15) == []

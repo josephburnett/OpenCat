@@ -39,7 +39,9 @@ def harness(tmp_path_factory):
     out = tmp_path_factory.mktemp("harness") / "link_harness"
     subprocess.run(["bash", str(BUILD_SCRIPT), str(out)], check=True, capture_output=True, timeout=300)
     proc = subprocess.Popen([str(out)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    yield Harness(proc)
+    h = Harness(proc)
+    h.p2 = h.implements_gait()
+    yield h
     proc.stdin.close()
     proc.wait(5)
 
@@ -47,6 +49,17 @@ def harness(tmp_path_factory):
 class Harness:
     def __init__(self, proc: subprocess.Popen):
         self.proc = proc
+        self.p2 = True
+
+    def implements_gait(self) -> bool:
+        """Whether this firmware has the P2 goals: a body without them refuses
+        SET_GAIT UNKNOWN_TYPE, and the vbody then plays the P1 body (p2=False)."""
+        self.cmd("reset 0 0")
+        out = self.cmd("rx " + wire("SET_GAIT", 1, epoch=0, run=0, pattern=1, period_ms=500, duty=140,
+                                    stride_mm=0, turn_mm=0, step_h_mm=10, body_h_mm=80, flags=0).hex())
+        unknown = (P.MsgId.SET_GAIT << 8) | P.GoalRefusedReason.UNKNOWN_TYPE
+        return not any(t == P.MsgId.EVENT and P.decode_payload(t, p).code == P.EventCode.GOAL_REFUSED
+                       and P.decode_payload(t, p).arg == unknown for t, p in out)
 
     def cmd(self, line: str) -> list[tuple[int, bytes]]:
         self.proc.stdin.write(line + "\n")
@@ -64,10 +77,10 @@ class Harness:
 class VB:
     """A VirtualBody driven synchronously with a frozen clock."""
 
-    def __init__(self, config_state: int, batt_level: int):
+    def __init__(self, config_state: int, batt_level: int, p2: bool = True):
         self.now = 1000.0
         self.vb = VirtualBody(None, config_state=config_state, batt_level=batt_level,
-                              clock=lambda: self.now)
+                              clock=lambda: self.now, p2=p2)
         self.vb.take_sent()
 
     def rx(self, wire: bytes) -> list[tuple[int, bytes]]:
@@ -132,7 +145,7 @@ def play(harness: Harness, steps: list, config_state: int = P.ConfigState.OK,
     Returns everything the C body sent."""
     sent = []
     harness.cmd(f"reset {int(config_state)} {int(batt_level)}")
-    vb = VB(config_state, batt_level)
+    vb = VB(config_state, batt_level, harness.p2)
     for i, step in enumerate(steps):
         if isinstance(step, tuple) and step[0] == "save":
             c, v = harness.cmd("save"), vb.save()
@@ -216,9 +229,9 @@ def test_goals(harness):
         wire("SET_POSTURE", 2, epoch=7, posture=S.SIT, transition_ticks=0, flags=0),     # STALE
         wire("SET_POSTURE", 3, epoch=7, posture=S.SIT, transition_ticks=0, flags=0),     # rate-limited
         wire("SET_POSTURE", 4, epoch=7, posture=S.REST, transition_ticks=0, flags=0),    # never stale
-        wire("SET_POSTURE", 5, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),  # BAD_ARG (P2)
+        wire("SET_POSTURE", 5, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),  # P1: BAD_ARG
         wire("SET_GAIT", 6, epoch=0, run=1, pattern=1, period_ms=500, duty=140, stride_mm=10,
-             turn_mm=0, step_h_mm=10, body_h_mm=80, flags=0),                              # UNKNOWN_TYPE
+             turn_mm=0, step_h_mm=10, body_h_mm=80, flags=0),                              # P1: UNKNOWN_TYPE
         wire("BEEP", 7, notes=[{"note": 12, "dur_10ms": 10}]),
         wire("HEARTBEAT", 8),
         raw(P.MsgId.SET_POSTURE, 9, b"\x00\x03\x00"),                                     # BAD_LEN
@@ -419,3 +432,26 @@ def test_head_goal(harness):
         wire("SET_HEAD", 1, epoch=0, **hold),                              # LOW_BATT
         wire("SET_HEAD", 2, epoch=0, **release),
     ], batt_level=P.BatteryLevel.LOW)
+
+
+def test_gait_goal(harness):
+    """P2 (§3d): refusals, the start, the stop's one-period ramp-down and
+    GAIT_STOPPED on the same tick. Skipped against a firmware without the
+    gait generator (until the P2 body is merged)."""
+    if not harness.p2:
+        pytest.skip("this firmware has no gait generator (SET_GAIT is UNKNOWN_TYPE)")
+    S = P.Posture
+    g = dict(pattern=1, period_ms=500, duty=140, stride_mm=20, turn_mm=0, step_h_mm=10, body_h_mm=80, flags=7)
+    hb = lambda seq: wire("HEARTBEAT", seq)
+    play(harness, [
+        wire("SET_GAIT", 1, epoch=0, run=1, **{**g, "period_ms": 200}),   # BAD_ARG
+        ("advance", 60),
+        wire("SET_GAIT", 2, epoch=9, run=1, **g),                          # STALE
+        wire("SET_POSTURE", 3, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),
+        ("tick", 20), hb(4),
+        wire("SET_GAIT", 5, epoch=0, run=1, **g),
+        ("tick", 20), hb(6), ("tick", 20), hb(7),
+        wire("SET_GAIT", 8, epoch=0, run=0, **g),                          # ramp down over 25 ticks
+        ("tick", 20), hb(9), ("tick", 20), hb(10),                         # GAIT_STOPPED in here
+        wire("SET_GAIT", 11, epoch=9, run=0, **g),                         # a stop is never stale
+    ])
