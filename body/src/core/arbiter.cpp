@@ -5,22 +5,22 @@
 #include "params.h"
 
 // ---- Hooks for the owners of later phases --------------------------------
-// TRICK (P1, keyframe player) and GAIT (P2, gait generator + IK) plug in
-// here: return true from *_claims(k) while the owner is active and its mask
-// holds canonical joint k, and supply the angle from *_angle(k). The
-// crossfade, layers and safety stage below then apply to them unchanged.
-static inline bool trick_claims(uint8_t) { return false; }
-static inline int16_t trick_angle(uint8_t) { return 0; }
+// GAIT (P2, gait generator + IK) plugs in here: return true from
+// gait_claims(k) while it is active and its mask holds canonical joint k,
+// and supply the angle from gait_angle(k). TRICK (core/keyframe.h) is wired
+// the same way in arbiter_run. The crossfade, layers and safety stage then
+// apply to them unchanged.
 static inline bool gait_claims(uint8_t) { return false; }  // legs only: k >= 3
 static inline int16_t gait_angle(uint8_t) { return 0; }
 // Head layer (P1): Pi head target or gait bob/wag on k = 0..2.
 static inline int16_t head_layer(uint8_t, uint8_t, int16_t base) { return base; }
 // Balance layer (doc §3c layer 2, §3f): joint-space owners only. IDLE holds
-// the built-in postures; TRICK (keyframes with BALANCE) joins with the
-// keyframe player; GAIT and STANCE get geometric balance through the IK in
-// P2; REFLEX never balances.
+// the built-in postures and TRICK the keyframes (body.cpp runs the
+// controller only for frames with the balance bit while a trick plays, and
+// lets the corrections decay otherwise); GAIT and STANCE get geometric
+// balance through the IK in P2; REFLEX never balances.
 static inline int16_t balance_layer(uint8_t k, uint8_t own, int16_t base, const Balance* bal) {
-  if (!bal || own != OWN_IDLE) return base;
+  if (!bal || own == OWN_GAIT || own == OWN_REFLEX) return base;
   return (int16_t)(base + balance_joint(*bal, k));
 }
 // ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ void arbiter_init(Arbiter& a, const int16_t* warm) {
   a.reflex_active = 0;
   for (uint8_t k = 0; k < DRIVEN_COUNT; k++) {
     int16_t v = warm ? warm[k] : JOINT_OFF;
-    a.base[k] = a.out[k] = v;
+    a.out[k] = v;
     // Slew reference for a limp joint: REST, the most likely resting pose
     // of an unpowered cat (and where legacy started).
     a.last_on[k] = v == JOINT_OFF ? posture_angle(POSTURE_REST, k) : v;
@@ -83,7 +83,8 @@ void arbiter_reflex_release(Arbiter& a) { a.reflex_active = 0; }
 
 bool arbiter_reflex_settled(const Arbiter& a) { return a.reflex.i >= a.reflex.n; }
 
-void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal) {
+void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal,
+                 const Keyframe* kf) {
   // Unused channels (joints 3-7) stay full-off; driven ones are set below.
   for (uint8_t c = 0; c < JOINT_COUNT; c++) counts[c] = PCA_FULL_OFF;
   if (a.idle.i < a.idle.n) a.idle.i++;
@@ -93,35 +94,41 @@ void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], 
     uint8_t j = joint_id(k);
     // 1. Owner selection, highest priority first.
     uint8_t own;
-    int16_t raw;
-    if (a.reflex_active) {
+    if (a.reflex_active)
       own = OWN_REFLEX;
-      raw = mover_angle(a.reflex, k);
-    } else if (trick_claims(k)) {
+    else if (kf && kf_claims(*kf, k))
       own = OWN_TRICK;
-      raw = trick_angle(k);
-    } else if (gait_claims(k)) {
+    else if (gait_claims(k))
       own = OWN_GAIT;
-      raw = gait_angle(k);
-    } else {
+    else
       own = OWN_IDLE;
-      raw = mover_angle(a.idle, k);
-    }
-    // 2. Crossfade on a change of owner. TRICK and REFLEX start from the
-    //    current pose themselves, so they get none; everything else fades
-    //    from the last base over XFADE_TICKS.
+    // 2. Crossfade on a change of owner, from the last output. TRICK and
+    //    REFLEX start from the current pose themselves (the trick reads it
+    //    back from xsrc), so they get none; out of TRICK the player says how
+    //    long, everything else fades over XFADE_TICKS.
     if (own != a.owner[k]) {
+      uint8_t n = (uint8_t)PARAM(XFADE_TICKS);
+      if (a.owner[k] == OWN_TRICK && kf) n = kf->xfade;
+      if (own == OWN_TRICK || own == OWN_REFLEX) n = 0;
       a.owner[k] = own;
-      a.xsrc[k] = a.base[k];
-      a.xn[k] = (own == OWN_TRICK || own == OWN_REFLEX) ? 0 : (uint8_t)PARAM(XFADE_TICKS);
+      a.xsrc[k] = a.out[k];
+      a.xn[k] = n;
       a.xi[k] = 0;
     }
+    int16_t raw;
+    if (own == OWN_REFLEX)
+      raw = mover_angle(a.reflex, k);
+    else if (own == OWN_TRICK)
+      raw = kf_angle(*kf, k, a.xsrc[k]);
+    else if (own == OWN_GAIT)
+      raw = gait_angle(k);
+    else
+      raw = mover_angle(a.idle, k);
     int16_t b = raw;
     if (a.xi[k] < a.xn[k]) {
       a.xi[k]++;
       if (raw != JOINT_OFF && a.xsrc[k] != JOINT_OFF) b = lerp(a.xsrc[k], raw, fx_ease_cos(a.xi[k], a.xn[k]));
     }
-    a.base[k] = b;
     // 3. Layers. Never applied to a limp joint.
     if (b != JOINT_OFF) b = balance_layer(k, own, head_layer(k, own, b), bal);
     // 4. Safety: limits, then slew against the last powered output, then

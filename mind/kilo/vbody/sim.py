@@ -20,6 +20,15 @@ both the same frames and compares the replies:
   SET_BALANCE enable turns it on in SIT and STAND outside any reflex; TELEMETRY
   flags bit 0 mirrors that, and the simulated pitch/roll wobble shrinks. The
   controller itself is not simulated;
+- tricks (P1, docs §3e): the body's upload rules (TRICK_BEGIN / TRICK_FRAMES
+  in order / TRICK_COMMIT with the CRC, idempotent as the cache check), the
+  TRICK_PLAY gating (STALE, NO_TRICK, BAD_ARG, BUSY, LOW_BATT, UNCALIBRATED)
+  and the player's tick-exact timing (kilo.tricks.player, the same stepping
+  as core/keyframe.cpp), so EVENT TRICK_DONE(reason << 8 | id) arrives on the
+  same tick as on the body: DONE, STOPPED (TRICK_STOP, SET_POSTURE LIMP),
+  PREEMPTED (an epoch bump), FELL (the simulated fall). The posture becomes
+  the trick's end posture; TELEMETRY shows mode TRICK, the TRICK flag, the
+  frame and the TRICK owner. Joint angles are not simulated;
 - queries answer with their data reply only (ACK only on failure), never
   de-duplicated;
 - other commands get exactly one ACK; a repeat of the last executed
@@ -53,7 +62,9 @@ from kilo.link import consts
 from kilo.link.codec import Codec, DecodeError, default_codec
 from kilo.link.messages import Messages, default_messages
 from kilo.link.transport import FdTransport, Transport
+from kilo.protocol import kilo_link_codec as LC
 from kilo.protocol import kilo_protocol as P
+from kilo.tricks.player import Player
 
 EV = consts.EventCode
 
@@ -70,6 +81,35 @@ P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.Ms
 BALANCE_DEFAULTS = {"enable": 0, "kp_q8": 128, "kd_ms": 30, "deadband_deg": 2, "max_corr_deg": 15}
 BALANCE_MAX_DEG = 30
 BALANCE_POSTURES = ("SIT", "STAND")
+# Tricks (body/src/core/keyframe.cpp).
+TRICK_DRIVEN_MASK = 0xFF07          # joint ids 0-2 and 8-15
+TRICK_END_POSTURES = frozenset({P.Posture.REST, P.Posture.SIT, P.Posture.STAND, P.Posture.CALIB, P.Posture.ZERO})
+TRICK_FLAGS = int(P.TrickFlags.BALANCE | P.TrickFlags.FALL_OK)
+TDR = P.TrickDoneReason
+
+
+class TrickStore:
+    """The body's one-trick RAM store: header, frames as sent, running CRC."""
+
+    def __init__(self) -> None:
+        self.state = "empty"  # empty, loading, ready
+        self.hdr: Any = None
+        self.frames: list[Any] = []
+        self.crc = 0xFFFF
+        self.player: Player | None = None
+        self.mirror = False
+
+    @property
+    def running(self) -> bool:
+        return self.player is not None and self.player.running
+
+    def claims(self, joint: int) -> bool:
+        """The TRICK owner holds joint id ``joint`` (L/R swapped when mirrored)."""
+        if not self.running:
+            return False
+        if self.mirror and joint >= 8:
+            joint ^= 1
+        return bool(self.hdr.joint_mask >> joint & 1)
 
 
 def open_pty() -> tuple[FdTransport, str, int]:
@@ -146,6 +186,7 @@ class VirtualBody:
         self.balance: dict[str, int] = dict(BALANCE_DEFAULTS)  # SET_BALANCE (live, not persisted)
         self.refused_at: dict[int, float] = {}
         self.save_until: float | None = None
+        self.trick = TrickStore()
         self.booted_at = self.clock()
 
     # ---- derived state --------------------------------------------------------
@@ -159,6 +200,8 @@ class VirtualBody:
             return P.Mode.LOW_BATT
         if self.wd_stage:
             return P.Mode.LINK_LOST
+        if self.trick.running:
+            return P.Mode.TRICK
         return P.Mode.LIMP if self.posture == "LIMP" else P.Mode.IDLE
 
     @property
@@ -172,10 +215,21 @@ class VirtualBody:
         return ((self.balance_req or bool(self.balance["enable"])) and self.posture in BALANCE_POSTURES
                 and not self.reflex)
 
-    def _epoch_bump(self) -> None:
+    def _epoch_bump(self, trick_reason: int = TDR.PREEMPTED) -> None:
         self.epoch = (self.epoch + 1) & 0xFF
         self.goals.clear()
         self.balance_req = False  # the posture flag is a motion goal; SET_BALANCE settings stay
+        self._trick_end(trick_reason)  # TRICK_DONE carries the new epoch
+
+    def _trick_end(self, reason: int) -> None:
+        """End the playing trick: TRICK_DONE(reason << 8 | id), the end posture."""
+        tr = self.trick
+        if not tr.running:
+            return
+        tr.player = None
+        self.posture = POSTURE_NAMES[tr.hdr.end_posture]
+        self._event(EV.TRICK_DONE, (int(reason) << 8) | tr.hdr.trick_id)
+        self._say(f"trick {tr.hdr.trick_id} {TDR(reason).name.lower()}")
 
     def save_busy(self, now: float | None = None) -> bool:
         now = self.clock() if now is None else now
@@ -198,7 +252,7 @@ class VirtualBody:
             if self.fall_until is not None:
                 return
             self.fall_side = side
-            self._epoch_bump()
+            self._epoch_bump(TDR.FELL)
             self.fall_until = self.clock() + 1.0
             self._event(EV.FELL, side)
         self._say("fell")
@@ -264,7 +318,7 @@ class VirtualBody:
                    fw_build=self.fw_build, reset_cause=self.reset_cause,
                    last_alive_tick=self.last_alive_tick,
                    caps=int(P.HelloCaps.BUZZER | P.HelloCaps.DMP | P.HelloCaps.ULTRASONIC),
-                   max_payload=P.MAX_PAYLOAD, trick_capacity=0, joint_count=P.JOINT_COUNT,
+                   max_payload=P.MAX_PAYLOAD, trick_capacity=P.TRICK_CAPACITY, joint_count=P.JOINT_COUNT,
                    config_state=self.config_state, epoch=self.epoch)
 
     def _housekeeping(self, now: float) -> None:
@@ -311,6 +365,10 @@ class VirtualBody:
                 self.wd_stage = 3
                 self.posture = "LIMP"
                 self._say("watchdog: limp")
+        # the keyframe player steps after the reflexes, as in body_tick
+        if self.trick.running and self.trick.player.step():
+            self.trick.player.running = True  # _trick_end ends a running trick
+            self._trick_end(TDR.DONE)
         if self.tick % 500 == 0:
             self.batt_mv = max(6600, self.batt_mv - 1)
         if self.telem_div and self.tick % self.telem_div == 0:
@@ -336,11 +394,17 @@ class VirtualBody:
         if self.save_busy(now):
             flags |= F.EEPROM_PENDING
         owner = int(P.Owner.REFLEX if self.reflex else P.Owner.IDLE)
+        leg = head = owner
+        if self.trick.running:
+            flags |= F.TRICK
+            leg = int(P.Owner.TRICK) if self.trick.claims(8) else owner
+            head = int(P.Owner.TRICK) if self.trick.claims(0) else owner
         self._send("TELEMETRY", tick=self.tick, pitch=int(pitch * 16), roll=int(roll * 16),
                    rate_pitch=int(1.4 * math.cos(t * 0.7) * 16), rate_roll=int(1.6 * math.cos(t * 1.1) * 16),
                    rate_yaw=0, dist_mm=600 + int(100 * math.sin(t * 0.3)), batt_mv=self.batt_mv,
-                   mode=int(self.mode), owners=owner | owner << 4, flags=int(flags),
-                   last_rx_seq=self.last_rx_seq, trick_frame=0xFF, gait_phase=0, tick_load=31,
+                   mode=int(self.mode), owners=leg | head << 4, flags=int(flags),
+                   last_rx_seq=self.last_rx_seq,
+                   trick_frame=self.trick.player.frame if self.trick.running else 0xFF, gait_phase=0, tick_load=31,
                    rx_err=(self.rx_crc_err + self.rx_overflow) & 0xFF, epoch=self.epoch)
 
     # ---- rx ----------------------------------------------------------------------
@@ -442,6 +506,8 @@ class VirtualBody:
                 return self._refuse(type, R.UNCALIBRATED, now)
         self.goals[name] = payload
         self.balance_req = bool(msg.flags & P.PostureFlags.BALANCE)
+        if msg.posture == P.Posture.LIMP:
+            self._trick_end(TDR.STOPPED)  # LIMP is the emergency stop
         new = POSTURE_NAMES[msg.posture]
         if new != self.posture:
             self._say(f"posture {new}")
@@ -545,7 +611,69 @@ class VirtualBody:
                 self.params_saved[p.id] = msg.value
                 self._start_save(now)
             return S.OK
-        return S.UNKNOWN_TYPE  # TRICK_*: no trick store in P0
+        if t in (M.TRICK_BEGIN, M.TRICK_FRAMES, M.TRICK_COMMIT, M.TRICK_PLAY, M.TRICK_STOP):
+            return self._trick_command(t, msg)
+        return S.UNKNOWN_TYPE
+
+    def _trick_command(self, t: int, msg: Any) -> int:
+        """TRICK_* with the body's checks, in the body's order (core/keyframe.cpp, body.cpp)."""
+        M, S = P.MsgId, P.AckStatus
+        tr = self.trick
+        if t == M.TRICK_BEGIN:
+            if tr.running:
+                return S.BUSY
+            if (not 1 <= msg.n_frames <= P.TRICK_CAPACITY or msg.loop_end >= msg.n_frames
+                    or msg.loop_start > msg.loop_end or not msg.joint_mask or msg.joint_mask & ~TRICK_DRIVEN_MASK
+                    or msg.flags & ~TRICK_FLAGS or msg.end_posture not in TRICK_END_POSTURES):
+                return S.BAD_ARG
+            tr.hdr, tr.frames, tr.crc, tr.state = msg, [], 0xFFFF, "loading"
+            return S.OK
+        if t == M.TRICK_FRAMES:
+            if tr.running:
+                return S.BUSY
+            if tr.state != "loading":
+                return S.NO_TRICK
+            if msg.first != len(tr.frames) or msg.first + len(msg.frames) > tr.hdr.n_frames:
+                return S.BAD_ARG
+            if any(f.dur == 0 or (f.flags & 3) == 3 for f in msg.frames):
+                return S.BAD_ARG
+            for f in msg.frames:
+                tr.crc = LC.crc16(f.pack(), tr.crc)
+                tr.frames.append(f)
+            return S.OK
+        if t == M.TRICK_COMMIT:
+            if tr.state == "empty" or msg.trick_id != tr.hdr.trick_id:
+                return S.NO_TRICK
+            if len(tr.frames) != tr.hdr.n_frames:
+                return S.BAD_ARG
+            if msg.crc16 != tr.crc:
+                return S.CRC_MISMATCH
+            tr.state = "ready"
+            return S.OK
+        if t == M.TRICK_STOP:
+            self._trick_end(TDR.STOPPED)
+            return S.OK
+        # TRICK_PLAY
+        if msg.epoch != self.epoch:
+            return S.STALE
+        if tr.state != "ready" or msg.trick_id != tr.hdr.trick_id:
+            return S.NO_TRICK
+        if msg.speed_q6 < 16 or msg.flags & ~int(P.TrickPlayFlags.MIRROR):
+            return S.BAD_ARG
+        if tr.running:
+            return S.BUSY
+        if self.batt_level >= P.BatteryLevel.LOW:
+            return S.REFUSED_LOW_BATT
+        if self.reflex or self.posture in ("LIMP", "CALIB"):
+            return S.BUSY
+        if self.config_state == P.ConfigState.DEFAULTED:
+            return S.UNCALIBRATED
+        h = tr.hdr
+        tr.mirror = bool(msg.flags & P.TrickPlayFlags.MIRROR)
+        tr.player = Player([f.dur for f in tr.frames], [f.hold for f in tr.frames], h.loop_start, h.loop_end,
+                           h.repeats, msg.speed_q6)
+        self._say(f"trick {h.trick_id} play x{msg.speed_q6 / 64:g}" + (" mirrored" if tr.mirror else ""))
+        return S.OK
 
     # ---- tx ------------------------------------------------------------------------
     def _ack(self, seq: int, type: int, status: int) -> None:

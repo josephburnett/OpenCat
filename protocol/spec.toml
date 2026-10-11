@@ -36,7 +36,7 @@
 
 [meta]
 proto_major = 1
-proto_minor = 1
+proto_minor = 2
 
 # ---------------------------------------------------------------------------
 [link]
@@ -120,7 +120,7 @@ WATCHDOG = 7
 LINK_RESTORED = 8
 IMU_FAULT = 9
 IMU_OK = 10
-TRICK_DONE = 11         # arg = trick_id
+TRICK_DONE = 11         # arg = trick_id | (trick_done_reason << 8)
 GAIT_STOPPED = 12
 GOAL_REFUSED = 13       # arg = (type << 8) | goal_refused_reason
 CONFIG_MIGRATED = 14
@@ -180,6 +180,12 @@ DEFAULTED = 2
 WARN = 1
 LOW = 2
 CRITICAL = 3
+
+[enums.trick_done_reason]   # EVENT TRICK_DONE arg bits 8-15
+DONE = 0                # played to the end
+STOPPED = 1             # TRICK_STOP, or SET_POSTURE LIMP
+PREEMPTED = 2           # a reflex or an epoch bump (watchdog, low battery) took over
+FELL = 3                # the fall reflex took over
 
 [enums.easing]          # keyframe flags bits 0-1
 LINEAR = 0
@@ -241,7 +247,7 @@ fields = [
   { name = "dur", type = "u8", unit = "tick", range = [1, 255], note = "ticks from the previous frame" },
   { name = "hold", type = "u8", unit = "tick", note = "ticks to hold after arriving" },
   { name = "flags", type = "u8", flags = "keyframe_flags", note = "bits 0-1 easing (enum easing), bit 2 balance" },
-  { name = "ang", type = "i8", count = 11, unit = "deg", note = "canonical joint order; -128 = unchanged" },
+  { name = "ang", type = "i8", count = 11, unit = "deg", note = "canonical joint order; -128 = unchanged (the previous frame's angle by index; in frame 0 the pose at the start)" },
 ]
 
 [structs.note]          # 2 B
@@ -395,16 +401,18 @@ name = "TRICK_BEGIN"
 id = 0x20
 dir = "pi_to_body"
 kind = "command"
-doc = "Trick header; refused with BUSY while a trick plays."
+doc = "Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..32, loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE)."
 fields = [
   { name = "trick_id", type = "u8" },
   { name = "n_frames", type = "u8", range = [1, 32] },
   { name = "loop_start", type = "u8" },
   { name = "loop_end", type = "u8" },
-  { name = "repeats", type = "u8", note = "0 = once, 255 = until stopped" },
+  { name = "repeats", type = "u8", note = "total plays of loop_start..loop_end: 0 and 1 = once, 255 = until stopped" },
   { name = "joint_mask", type = "u16" },
   { name = "flags", type = "u8", flags = "trick_flags" },
   { name = "end_posture", type = "u8", enum = "posture" },
+  { name = "exp_roll", type = "i8", unit = "deg", note = "balance reference for frames with the balance bit (right side up +)" },
+  { name = "exp_pitch", type = "i8", unit = "deg", note = "balance reference (nose down +; legacy header byte)" },
 ]
 
 [[messages]]
@@ -412,7 +420,7 @@ name = "TRICK_FRAMES"
 id = 0x21
 dir = "pi_to_body"
 kind = "command"
-doc = "Up to 4 keyframes starting at index `first`."
+doc = "Up to 4 keyframes starting at index `first`, in order: first must equal the number of frames received since TRICK_BEGIN (else BAD_ARG), first + count <= n_frames, dur >= 1, easing != 3. NO_TRICK without a header; BUSY while a trick plays."
 fields = [
   { name = "first", type = "u8" },
   { name = "count", type = "u8" },
@@ -424,7 +432,7 @@ name = "TRICK_COMMIT"
 id = 0x22
 dir = "pi_to_body"
 kind = "command"
-doc = "crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array; mismatch -> CRC_MISMATCH."
+doc = "crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array as sent; mismatch -> CRC_MISMATCH. NO_TRICK if no header or another trick_id, BAD_ARG if frames are missing. Idempotent: on a committed store it is the cache check (OK = the body holds exactly this trick)."
 fields = [
   { name = "trick_id", type = "u8" },
   { name = "crc16", type = "u16" },
@@ -436,7 +444,7 @@ id = 0x23
 dir = "pi_to_body"
 kind = "command"
 epoch = true
-doc = "Play with speed and mirror; epoch mismatch -> ACK STALE."
+doc = "Play the committed trick with speed (64 = 1x; scales dur and hold) and mirror (L/R swap, pan, tail and expected roll negated). STALE on an epoch mismatch, NO_TRICK if trick_id is not committed, BAD_ARG for speed < 16 or unknown flags, BUSY while a trick plays, under a reflex, or in LIMP or CALIB, REFUSED_LOW_BATT, UNCALIBRATED. Ends with EVENT TRICK_DONE."
 fields = [
   { name = "epoch", type = "u8" },
   { name = "trick_id", type = "u8" },
@@ -449,7 +457,7 @@ name = "TRICK_STOP"
 id = 0x24
 dir = "pi_to_body"
 kind = "command"
-doc = "Stop the playing trick."
+doc = "Stop the playing trick: crossfade over transition_ticks (0 = XFADE_TICKS) to its end posture, EVENT TRICK_DONE(STOPPED). OK also when nothing plays."
 fields = [
   { name = "transition_ticks", type = "u8", unit = "tick" },
 ]

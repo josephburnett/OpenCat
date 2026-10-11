@@ -287,11 +287,13 @@
     "repeats": 3,
     "joint_mask": 65287,
     "flags": 1,
-    "end_posture": 2
+    "end_posture": 2,
+    "exp_roll": 0,
+    "exp_pitch": 0
    },
-   "payload": "071602050307ff0102",
-   "decoded": "200e071602050307ff0102580b",
-   "wire": "0e200e071602050307ff0102580b00",
+   "payload": "071602050307ff01020000",
+   "decoded": "200e071602050307ff010200000707",
+   "wire": "0c200e071602050307ff01020103070700",
    "note": ""
   },
   {

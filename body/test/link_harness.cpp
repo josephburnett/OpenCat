@@ -9,6 +9,9 @@
 //   save                            finish a running config save (as main.cpp's
 //                                   background loop would) and flush events
 //   advance N                       move the tick on by N (de-dup windows)
+//   tick N                          run N body ticks (IMU fresh and level, no
+//                                   battery sample), then flush events: the
+//                                   keyframe player and the reflexes run
 //
 // After every command: one line per frame the body sent, "tx TYPE PAYLOADHEX"
 // (decimal type), then "end". A REBOOT that is acked OK is emulated like the
@@ -81,6 +84,17 @@ int main() {
       link_poll();
     } else if (cmd == "save") {
       while (config_busy(cfg)) config_writer_step(cfg);
+    } else if (cmd == "tick") {
+      int n = 0;
+      in >> n;
+      TickIn ti = TickIn();
+      ti.imu = IMU_FRESH;
+      ti.att.gz = 16384;
+      uint16_t counts[16];
+      for (int i = 0; i < n; i++) {
+        body_tick(g_body, ti, counts);
+        link_send_events();
+      }
     } else if (cmd == "advance") {
       int n = 0;
       in >> n;

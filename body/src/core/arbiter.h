@@ -6,17 +6,25 @@
 //   2. base   = that owner's angle; if the owner just changed, crossfade from
 //               the previous base so the hand-over never jumps
 //   3. layers = head (hook; P1) and balance (core/balance.h): joint-space
-//               owners (IDLE, later TRICK) add the balance correction
+//               owners (IDLE, TRICK) add the balance correction
 //   4. safety = clamp to joint limits, slew-limit, convert to PCA counts
 //
-// In P0 only IDLE (the built-in postures) and REFLEX (battery, link
-// watchdog, warm-boot hold) exist. TRICK and GAIT are hooks that never claim
-// a joint yet; see arbiter.cpp.
+// IDLE (the built-in postures), TRICK (the keyframe player, core/keyframe.h)
+// and REFLEX (battery, link watchdog, warm-boot hold) exist; GAIT is a hook
+// that never claims a joint yet (P2); see arbiter.cpp.
+//
+// Crossfades start from the joint's last OUTPUT (after balance, limits and
+// slew), so a hand-over never jumps even when the previous owner's angle was
+// beyond a limit or carried a balance correction. Into TRICK and REFLEX
+// there is none (their first segment starts from that output); out of
+// TRICK it lasts the player's xfade (TRICK_STOP transition_ticks, else
+// XFADE_TICKS), out of REFLEX XFADE_TICKS.
 #ifndef KILO_CORE_ARBITER_H
 #define KILO_CORE_ARBITER_H
 #include <stdint.h>
 #include "balance.h"
 #include "joints.h"
+#include "keyframe.h"
 
 enum Owner : uint8_t { OWN_IDLE = 0, OWN_GAIT = 1, OWN_TRICK = 2, OWN_REFLEX = 3 };
 
@@ -36,9 +44,9 @@ struct Arbiter {
   Mover idle, reflex;
   uint8_t reflex_active;
   uint8_t owner[DRIVEN_COUNT];  // owner on the previous tick
-  int16_t xsrc[DRIVEN_COUNT];   // crossfade source (previous base)
+  int16_t xsrc[DRIVEN_COUNT];   // crossfade source: the output when the owner changed
+                                // (also the TRICK start pose)
   uint8_t xn[DRIVEN_COUNT], xi[DRIVEN_COUNT];
-  int16_t base[DRIVEN_COUNT];   // base pose after crossfade (a16 or OFF)
   int16_t out[DRIVEN_COUNT];    // output after the safety stage (a16 or OFF)
   int16_t last_on[DRIVEN_COUNT];  // last powered output: slew reference
 };
@@ -67,7 +75,9 @@ inline bool arbiter_idle_moving(const Arbiter& a) { return a.idle.i < a.idle.n; 
 // One tick of steps 1-4. Writes all 16 channel counts (unused channels and
 // LIMP joints full-off). bal: the balance corrections to add to joints owned
 // by a joint-space owner (null = none). The caller decides when balance runs
-// (body.cpp); this only applies the current corrections.
-void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal);
+// (body.cpp); this only applies the current corrections. kf: the keyframe
+// player (null = no TRICK owner); call kf_step() first.
+void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal,
+                 const Keyframe* kf);
 
 #endif

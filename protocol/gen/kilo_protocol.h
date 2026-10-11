@@ -30,7 +30,7 @@ extern "C" {
 
 /* ---- Versions and link constants ---- */
 #define KILO_PROTO_MAJOR 1u
-#define KILO_PROTO_MINOR 1u
+#define KILO_PROTO_MINOR 2u
 #define KILO_BAUD 250000UL
 #define KILO_MAX_PAYLOAD 60u
 #define KILO_HEADER_BYTES 2u
@@ -235,6 +235,13 @@ enum kilo_battery_level {
     KILO_BATTERY_LEVEL_CRITICAL = 3,
 };
 
+enum kilo_trick_done_reason {
+    KILO_TRICK_DONE_REASON_DONE = 0,
+    KILO_TRICK_DONE_REASON_STOPPED = 1,
+    KILO_TRICK_DONE_REASON_PREEMPTED = 2,
+    KILO_TRICK_DONE_REASON_FELL = 3,
+};
+
 enum kilo_easing {
     KILO_EASING_LINEAR = 0,
     KILO_EASING_COSINE = 1,
@@ -286,7 +293,7 @@ typedef struct KILO_PACKED kilo_keyframe_s {
     uint8_t dur; /* tick; range 1..255; ticks from the previous frame */
     uint8_t hold; /* tick; ticks to hold after arriving */
     uint8_t flags; /* flags keyframe_flags; bits 0-1 easing (enum easing), bit 2 balance */
-    int8_t ang[11]; /* deg; canonical joint order; -128 = unchanged */
+    int8_t ang[11]; /* deg; canonical joint order; -128 = unchanged (the previous frame's angle by index; in frame 0 the pose at the start) */
 } kilo_keyframe_t;
 #define KILO_KEYFRAME_SIZE 14u
 KILO_STATIC_ASSERT(sizeof(kilo_keyframe_t) == 14, kilo_sa_keyframe_size);
@@ -427,19 +434,21 @@ KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, kd_ms) == 2, kilo_sa_set_balance
 KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, deadband_deg) == 3, kilo_sa_set_balance_deadband_deg);
 KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, max_corr_deg) == 4, kilo_sa_set_balance_max_corr_deg);
 
-/* 0x20 TRICK_BEGIN: command. Trick header; refused with BUSY while a trick plays. */
-#define KILO_TRICK_BEGIN_LEN 9u
+/* 0x20 TRICK_BEGIN: command. Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..32, loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE). */
+#define KILO_TRICK_BEGIN_LEN 11u
 typedef struct KILO_PACKED kilo_trick_begin_s {
     uint8_t trick_id;
     uint8_t n_frames; /* range 1..32 */
     uint8_t loop_start;
     uint8_t loop_end;
-    uint8_t repeats; /* 0 = once, 255 = until stopped */
+    uint8_t repeats; /* total plays of loop_start..loop_end: 0 and 1 = once, 255 = until stopped */
     uint16_t joint_mask;
     uint8_t flags; /* flags trick_flags */
     uint8_t end_posture; /* enum posture */
+    int8_t exp_roll; /* deg; balance reference for frames with the balance bit (right side up +) */
+    int8_t exp_pitch; /* deg; balance reference (nose down +; legacy header byte) */
 } kilo_trick_begin_t;
-KILO_STATIC_ASSERT(sizeof(kilo_trick_begin_t) == 9, kilo_sa_trick_begin_size);
+KILO_STATIC_ASSERT(sizeof(kilo_trick_begin_t) == 11, kilo_sa_trick_begin_size);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, trick_id) == 0, kilo_sa_trick_begin_trick_id);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, n_frames) == 1, kilo_sa_trick_begin_n_frames);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, loop_start) == 2, kilo_sa_trick_begin_loop_start);
@@ -448,8 +457,10 @@ KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, repeats) == 4, kilo_sa_trick_beg
 KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, joint_mask) == 5, kilo_sa_trick_begin_joint_mask);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, flags) == 7, kilo_sa_trick_begin_flags);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, end_posture) == 8, kilo_sa_trick_begin_end_posture);
+KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, exp_roll) == 9, kilo_sa_trick_begin_exp_roll);
+KILO_STATIC_ASSERT(offsetof(kilo_trick_begin_t, exp_pitch) == 10, kilo_sa_trick_begin_exp_pitch);
 
-/* 0x21 TRICK_FRAMES: command. Up to 4 keyframes starting at index `first`. */
+/* 0x21 TRICK_FRAMES: command. Up to 4 keyframes starting at index `first`, in order: first must equal the number of frames received since TRICK_BEGIN (else BAD_ARG), first + count <= n_frames, dur >= 1, easing != 3. NO_TRICK without a header; BUSY while a trick plays. */
 #define KILO_TRICK_FRAMES_MIN_LEN 16u
 #define KILO_TRICK_FRAMES_MAX_LEN 58u
 #define KILO_TRICK_FRAMES_LEN_FOR(n) (2u + 14u * (uint8_t)(n))
@@ -463,7 +474,7 @@ KILO_STATIC_ASSERT(offsetof(kilo_trick_frames_t, first) == 0, kilo_sa_trick_fram
 KILO_STATIC_ASSERT(offsetof(kilo_trick_frames_t, count) == 1, kilo_sa_trick_frames_count);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_frames_t, frames) == 2, kilo_sa_trick_frames_frames);
 
-/* 0x22 TRICK_COMMIT: command. crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array; mismatch -> CRC_MISMATCH. */
+/* 0x22 TRICK_COMMIT: command. crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array as sent; mismatch -> CRC_MISMATCH. NO_TRICK if no header or another trick_id, BAD_ARG if frames are missing. Idempotent: on a committed store it is the cache check (OK = the body holds exactly this trick). */
 #define KILO_TRICK_COMMIT_LEN 3u
 typedef struct KILO_PACKED kilo_trick_commit_s {
     uint8_t trick_id;
@@ -473,7 +484,7 @@ KILO_STATIC_ASSERT(sizeof(kilo_trick_commit_t) == 3, kilo_sa_trick_commit_size);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_commit_t, trick_id) == 0, kilo_sa_trick_commit_trick_id);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_commit_t, crc16) == 1, kilo_sa_trick_commit_crc16);
 
-/* 0x23 TRICK_PLAY: command, epoch. Play with speed and mirror; epoch mismatch -> ACK STALE. */
+/* 0x23 TRICK_PLAY: command, epoch. Play the committed trick with speed (64 = 1x; scales dur and hold) and mirror (L/R swap, pan, tail and expected roll negated). STALE on an epoch mismatch, NO_TRICK if trick_id is not committed, BAD_ARG for speed < 16 or unknown flags, BUSY while a trick plays, under a reflex, or in LIMP or CALIB, REFUSED_LOW_BATT, UNCALIBRATED. Ends with EVENT TRICK_DONE. */
 #define KILO_TRICK_PLAY_LEN 4u
 typedef struct KILO_PACKED kilo_trick_play_s {
     uint8_t epoch;
@@ -487,7 +498,7 @@ KILO_STATIC_ASSERT(offsetof(kilo_trick_play_t, trick_id) == 1, kilo_sa_trick_pla
 KILO_STATIC_ASSERT(offsetof(kilo_trick_play_t, speed_q6) == 2, kilo_sa_trick_play_speed_q6);
 KILO_STATIC_ASSERT(offsetof(kilo_trick_play_t, flags) == 3, kilo_sa_trick_play_flags);
 
-/* 0x24 TRICK_STOP: command. Stop the playing trick. */
+/* 0x24 TRICK_STOP: command. Stop the playing trick: crossfade over transition_ticks (0 = XFADE_TICKS) to its end posture, EVENT TRICK_DONE(STOPPED). OK also when nothing plays. */
 #define KILO_TRICK_STOP_LEN 1u
 typedef struct KILO_PACKED kilo_trick_stop_s {
     uint8_t transition_ticks; /* tick */
@@ -833,7 +844,7 @@ static inline uint8_t kilo_payload_len_check(uint8_t type, const uint8_t *payloa
     static const uint8_t t[KILO_MAX_MSG_ID + 1u] KILO_TABLE_ATTR = {
         0xFF, 0, 0, 2, 3, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x00 */
         4, 11, 10, 7, 5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x10 */
-        9, 0x80, 3, 4, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x20 */
+        11, 0x80, 3, 4, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x20 */
         4, 0x81, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 3, 0, 0, 13, 1, 4, 3,  /* 0x30 */
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x40 */
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  /* 0x50 */
@@ -1080,6 +1091,8 @@ static const kilo_field_info_t kilo_field_table[] = {
     {KILO_MSG_TRICK_BEGIN, "joint_mask", 5, 2, 0, 1},
     {KILO_MSG_TRICK_BEGIN, "flags", 7, 1, 0, 1},
     {KILO_MSG_TRICK_BEGIN, "end_posture", 8, 1, 0, 1},
+    {KILO_MSG_TRICK_BEGIN, "exp_roll", 9, 1, 1, 1},
+    {KILO_MSG_TRICK_BEGIN, "exp_pitch", 10, 1, 1, 1},
     {KILO_MSG_TRICK_FRAMES, "first", 0, 1, 0, 1},
     {KILO_MSG_TRICK_FRAMES, "count", 1, 1, 0, 1},
     {KILO_MSG_TRICK_COMMIT, "trick_id", 0, 1, 0, 1},
@@ -1198,7 +1211,7 @@ static const kilo_msg_info_t kilo_msg_table[] = {
     {KILO_MSG_SET_HEAD, "SET_HEAD", KILO_KIND_GOAL, 10, 0, 0, 0, 255},
     {KILO_MSG_SET_BODY_POSE, "SET_BODY_POSE", KILO_KIND_GOAL, 7, 0, 0, 0, 255},
     {KILO_MSG_SET_BALANCE, "SET_BALANCE", KILO_KIND_GOAL, 5, 0, 0, 0, 255},
-    {KILO_MSG_TRICK_BEGIN, "TRICK_BEGIN", KILO_KIND_COMMAND, 9, 0, 0, 0, 255},
+    {KILO_MSG_TRICK_BEGIN, "TRICK_BEGIN", KILO_KIND_COMMAND, 11, 0, 0, 0, 255},
     {KILO_MSG_TRICK_FRAMES, "TRICK_FRAMES", KILO_KIND_COMMAND, 2, 14, 1, 4, 1},
     {KILO_MSG_TRICK_COMMIT, "TRICK_COMMIT", KILO_KIND_COMMAND, 3, 0, 0, 0, 255},
     {KILO_MSG_TRICK_PLAY, "TRICK_PLAY", KILO_KIND_COMMAND, 4, 0, 0, 0, 255},

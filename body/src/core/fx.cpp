@@ -109,7 +109,7 @@ uint16_t fx_isqrt32(uint32_t n) {
   return (uint16_t)res;
 }
 
-uint16_t fx_ease_cos(uint8_t i, uint8_t n) {
+uint16_t fx_ease_cos(uint16_t i, uint16_t n) {
   if (i >= n) return Q14_ONE;
   int16_t s = fx_sin((int16_t)(((uint32_t)A16_90 * i + n / 2) / n));  // rounded
   return (uint16_t)(((uint32_t)((int32_t)s * s) + 8192) >> 14);

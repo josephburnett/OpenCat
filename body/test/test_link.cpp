@@ -122,12 +122,12 @@ static const std::map<std::string, Expect> EXPECT = {
     {"set_head_hold", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
     {"set_body_pose", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
     {"set_balance", {NOTHING, 0}},
-    {"trick_begin", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
-    {"trick_frames_1", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
-    {"trick_frames_4_max", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
-    {"trick_commit", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
-    {"trick_play_mirror", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
-    {"trick_stop", {ACK, KILO_ACK_STATUS_UNKNOWN_TYPE}},
+    {"trick_begin", {ACK, KILO_ACK_STATUS_OK}},
+    {"trick_frames_1", {ACK, KILO_ACK_STATUS_NO_TRICK}},  // no TRICK_BEGIN yet
+    {"trick_frames_4_max", {ACK, KILO_ACK_STATUS_NO_TRICK}},
+    {"trick_commit", {ACK, KILO_ACK_STATUS_NO_TRICK}},
+    {"trick_play_mirror", {ACK, KILO_ACK_STATUS_STALE}},  // epoch 3, body at 0
+    {"trick_stop", {ACK, KILO_ACK_STATUS_OK}},  // nothing playing is not an error
     {"set_eyes_left_green", {REFUSED, KILO_GOAL_REFUSED_REASON_UNKNOWN_TYPE}},
     {"beep_1", {NOTHING, 0}},
     {"beep_8_max", {NOTHING, 0}},
@@ -229,7 +229,7 @@ static void test_hello_and_queries(void) {
   std::memcpy(&h, out[0].payload.data(), sizeof h);
   CHECK(h.proto_major == KILO_PROTO_MAJOR && h.proto_minor == KILO_PROTO_MINOR && h.fw_build == 0xC0FFEE01u);
   CHECK(h.reset_cause == RESET_FLASHED && h.last_alive_tick == 1234 && h.caps == KILO_HELLO_CAPS_DMP);
-  CHECK(h.max_payload == 60 && h.trick_capacity == 0 && h.joint_count == 11);
+  CHECK(h.max_payload == 60 && h.trick_capacity == 32 && h.joint_count == 11);
   CHECK(h.config_state == CFG_MIGRATED && h.epoch == 7);
   // PING: PONG echoes the token, never an ACK; a repeat (same seq) is answered again.
   for (int i = 0; i < 2; i++) {

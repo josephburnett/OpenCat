@@ -184,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("daemon", help="status of a running daemon, or stop it")
     s.add_argument("action", choices=("status", "stop"), nargs="?", default="status")
     s.add_argument("--json", action="store_true")
+    __import__("kilo.cli_trick").cli_trick.add_parser(sub, LINK_COMMANDS)  # kilo trick (cli_trick.py)
     return p
 
 

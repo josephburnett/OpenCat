@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, ClassVar
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 1
+PROTO_MINOR = 2
 BAUD = 250000
 MAX_PAYLOAD = 60
 HEADER_BYTES = 2
@@ -223,6 +223,13 @@ class BatteryLevel(enum.IntEnum):
     CRITICAL = 3
 
 
+class TrickDoneReason(enum.IntEnum):
+    DONE = 0
+    STOPPED = 1
+    PREEMPTED = 2
+    FELL = 3
+
+
 class Easing(enum.IntEnum):
     LINEAR = 0
     COSINE = 1
@@ -296,7 +303,7 @@ class Keyframe:
     dur: int = 0  # tick; range 1..255; ticks from the previous frame
     hold: int = 0  # tick; ticks to hold after arriving
     flags: int = 0  # flags keyframe_flags; bits 0-1 easing (enum easing), bit 2 balance
-    ang: list[int] = field(default_factory=lambda: [0] * 11)  # deg; canonical joint order; -128 = unchanged
+    ang: list[int] = field(default_factory=lambda: [0] * 11)  # deg; canonical joint order; -128 = unchanged (the previous frame's angle by index; in frame 0 the pose at the start)
 
     def _fixed_values(self) -> list:
         v: list = []
@@ -876,7 +883,7 @@ class SetBalance:
 
 @dataclass
 class TrickBegin:
-    """0x20 TRICK_BEGIN (command). Trick header; refused with BUSY while a trick plays."""
+    """0x20 TRICK_BEGIN (command). Trick header; empties the store. BUSY while a trick plays; BAD_ARG for n_frames outside 1..32, loop_end >= n_frames, loop_start > loop_end, a joint_mask bit outside the 11 driven joints (or none), unknown flags, or an end_posture without angles (LIMP, STANCE)."""
     ID: ClassVar[int] = 0x20
     NAME: ClassVar[str] = 'TRICK_BEGIN'
     KIND: ClassVar[Kind] = Kind.COMMAND
@@ -884,17 +891,19 @@ class TrickBegin:
     HAS_EPOCH: ClassVar[bool] = False
     IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
-    MIN_LEN: ClassVar[int] = 9
-    MAX_LEN: ClassVar[int] = 9
-    _FMT: ClassVar[struct.Struct] = struct.Struct('<BBBBBHBB')
+    MIN_LEN: ClassVar[int] = 11
+    MAX_LEN: ClassVar[int] = 11
+    _FMT: ClassVar[struct.Struct] = struct.Struct('<BBBBBHBBbb')
     trick_id: int = 0
     n_frames: int = 0  # range 1..32
     loop_start: int = 0
     loop_end: int = 0
-    repeats: int = 0  # 0 = once, 255 = until stopped
+    repeats: int = 0  # total plays of loop_start..loop_end: 0 and 1 = once, 255 = until stopped
     joint_mask: int = 0
     flags: int = 0  # flags trick_flags
     end_posture: int = 0  # enum posture
+    exp_roll: int = 0  # deg; balance reference for frames with the balance bit (right side up +)
+    exp_pitch: int = 0  # deg; balance reference (nose down +; legacy header byte)
 
     def _fixed_values(self) -> list:
         v: list = []
@@ -906,6 +915,8 @@ class TrickBegin:
         v.append(self.joint_mask)
         v.append(self.flags)
         v.append(self.end_posture)
+        v.append(self.exp_roll)
+        v.append(self.exp_pitch)
         return v
 
     @classmethod
@@ -919,6 +930,8 @@ class TrickBegin:
         kw['joint_mask'] = v[5]
         kw['flags'] = v[6]
         kw['end_posture'] = v[7]
+        kw['exp_roll'] = v[8]
+        kw['exp_pitch'] = v[9]
         kw.update(extra)
         return cls(**kw)
 
@@ -937,7 +950,7 @@ class TrickBegin:
 
 @dataclass
 class TrickFrames:
-    """0x21 TRICK_FRAMES (command). Up to 4 keyframes starting at index `first`."""
+    """0x21 TRICK_FRAMES (command). Up to 4 keyframes starting at index `first`, in order: first must equal the number of frames received since TRICK_BEGIN (else BAD_ARG), first + count <= n_frames, dur >= 1, easing != 3. NO_TRICK without a header; BUSY while a trick plays."""
     ID: ClassVar[int] = 0x21
     NAME: ClassVar[str] = 'TRICK_FRAMES'
     KIND: ClassVar[Kind] = Kind.COMMAND
@@ -987,7 +1000,7 @@ class TrickFrames:
 
 @dataclass
 class TrickCommit:
-    """0x22 TRICK_COMMIT (command). crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array; mismatch -> CRC_MISMATCH."""
+    """0x22 TRICK_COMMIT (command). crc16 = CRC-16/CCITT-FALSE over the n_frames x 14 B frame array as sent; mismatch -> CRC_MISMATCH. NO_TRICK if no header or another trick_id, BAD_ARG if frames are missing. Idempotent: on a committed store it is the cache check (OK = the body holds exactly this trick)."""
     ID: ClassVar[int] = 0x22
     NAME: ClassVar[str] = 'TRICK_COMMIT'
     KIND: ClassVar[Kind] = Kind.COMMAND
@@ -1030,7 +1043,7 @@ class TrickCommit:
 
 @dataclass
 class TrickPlay:
-    """0x23 TRICK_PLAY (command). Play with speed and mirror; epoch mismatch -> ACK STALE."""
+    """0x23 TRICK_PLAY (command). Play the committed trick with speed (64 = 1x; scales dur and hold) and mirror (L/R swap, pan, tail and expected roll negated). STALE on an epoch mismatch, NO_TRICK if trick_id is not committed, BAD_ARG for speed < 16 or unknown flags, BUSY while a trick plays, under a reflex, or in LIMP or CALIB, REFUSED_LOW_BATT, UNCALIBRATED. Ends with EVENT TRICK_DONE."""
     ID: ClassVar[int] = 0x23
     NAME: ClassVar[str] = 'TRICK_PLAY'
     KIND: ClassVar[Kind] = Kind.COMMAND
@@ -1079,7 +1092,7 @@ class TrickPlay:
 
 @dataclass
 class TrickStop:
-    """0x24 TRICK_STOP (command). Stop the playing trick."""
+    """0x24 TRICK_STOP (command). Stop the playing trick: crossfade over transition_ticks (0 = XFADE_TICKS) to its end posture, EVENT TRICK_DONE(STOPPED). OK also when nothing plays."""
     ID: ClassVar[int] = 0x24
     NAME: ClassVar[str] = 'TRICK_STOP'
     KIND: ClassVar[Kind] = Kind.COMMAND
@@ -2426,7 +2439,7 @@ def payload_len_status(msg_type: int, payload: bytes) -> int:
     if msg_type == 0x14:
         return LEN_OK if n == 5 else LEN_BAD
     if msg_type == 0x20:
-        return LEN_OK if n == 9 else LEN_BAD
+        return LEN_OK if n == 11 else LEN_BAD
     if msg_type == 0x21:
         if not 16 <= n <= 58:
             return LEN_BAD

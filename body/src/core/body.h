@@ -13,6 +13,7 @@
 #include "battery.h"
 #include "config.h"
 #include "events.h"
+#include "keyframe.h"
 #include "notes.h"
 #include "params.h"
 
@@ -36,6 +37,8 @@ enum ReflexHolder : uint8_t { RH_NONE = 0, RH_WARM_HOLD = 1, RH_WATCHDOG = 2, RH
 enum GoalResult : uint8_t {
   GOAL_OK = 0,
   GOAL_BAD_ARG = 2,
+  GOAL_BUSY = 3,
+  GOAL_NO_TRICK = 6,
   GOAL_LOW_BATT = 7,
   GOAL_STALE = 10,
   GOAL_UNCALIBRATED = 11,  // STAND refused while CONFIG_DEFAULTED (doc §3b)
@@ -70,6 +73,7 @@ struct Body {
   uint8_t hold_ticks;
   uint8_t balance_req;  // SET_POSTURE flags bit 0; cleared by an epoch bump
   Balance bal;          // the balance layer: SET_BALANCE settings + controller
+  Keyframe kf;          // the trick store and player (TRICK owner)
   // IMU health
   uint8_t imu_fault;
   uint8_t imu_stale_run, imu_err_run;
@@ -95,11 +99,28 @@ GoalResult body_goal_balance(Body& b, const uint8_t p[5]);
 // eligible (doc §3c: IDLE SIT or STAND, settled, no REFLEX) and no IMU_FAULT.
 // TELEMETRY flags bit 0.
 inline bool body_balance_active(const Body& b) { return b.bal.active; }
+// TRICK_PLAY (payload: epoch, trick_id, speed_q6, flags). Returns the ACK
+// status: STALE, NO_TRICK, BAD_ARG, BUSY (a trick plays, a reflex holds the
+// joints, or the IDLE posture is LIMP or CALIB), LOW_BATT, UNCALIBRATED.
+uint8_t body_trick_play(Body& b, const uint8_t p[4]);
+// TRICK_STOP: crossfade to the end posture over `ticks` (0 = XFADE_TICKS),
+// EVENT TRICK_DONE(STOPPED). Always OK (nothing playing is not an error).
+void body_trick_stop(Body& b, uint8_t ticks);
+// End the playing trick (if any) for `reason` (KfEnd): EVENT TRICK_DONE,
+// IDLE adopts the end posture, the joints crossfade back over `ticks`
+// (0 = XFADE_TICKS). (A fall ends it through body_epoch_bump(b, KF_END_FELL).)
+void body_trick_end(Body& b, uint8_t reason, uint8_t ticks);
+// Fall detection must stay off: a FALL_OK trick is playing (for the fall
+// reflex, doc §3g).
+inline bool body_fall_suppressed(const Body& b) { return kf_fall_ok(b.kf); }
 // IMU re-initialised (hal finished a runtime DMP upload while LIMP).
 void body_imu_recovered(Body& b);
-// TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 7 LOW_BATT, 9 LINK_LOST.
+// TELEMETRY.mode (§4): 1 LIMP, 2 IDLE, 4 TRICK, 7 LOW_BATT, 9 LINK_LOST.
 uint8_t body_mode(const Body& b);
 
-void body_epoch_bump(Body& b);
+// A new goal epoch (doc §3c): clears the latched motion goals and ends a
+// playing trick with TRICK_DONE(trick_reason) carrying the new epoch. The
+// fall reflex passes KF_END_FELL; everything else is a preemption.
+void body_epoch_bump(Body& b, uint8_t trick_reason = KF_END_PREEMPTED);
 
 #endif

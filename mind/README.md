@@ -328,8 +328,9 @@ on stub HALs.
 ## Tricks
 
 `kilo/tricks/` holds the trick model, the importer for the legacy skill
-tables and the first-version library (architecture §3e, §5). Uploading and
-playing tricks from the CLI comes later.
+tables, the first-version library and the player timing model
+(architecture §3e, §5). `BodyClient` uploads and plays them and `kilo trick`
+drives that from the CLI (below).
 
 **Model** (`model.py`). A `Keyframe` has 16 joint slots in degrees (legacy
 numbering; `None` = not driven, sent as −128 "unchanged"; slots 3-7 are never
@@ -352,10 +353,39 @@ rejects it). A `Trick` has the frames, `loop_start`/`loop_end` (inclusive) and
   `protocol/spec.toml` via the generated `kilo_protocol.Keyframe`;
   `Trick.upload_messages(trick_id)` gives `TRICK_BEGIN`, the `TRICK_FRAMES`
   chunks (4 frames each) and `TRICK_COMMIT` with the CRC-16 of the frame
-  array; `Trick.from_wire()` rebuilds a trick (expected roll/pitch are not on
-  the wire). Angles are rounded half away from zero.
+  array; `Trick.from_wire()` rebuilds a trick. `TRICK_BEGIN` also carries the
+  expected roll/pitch in whole degrees (the balance reference for frames with
+  the balance bit). Angles are rounded half away from zero. On the body −128
+  ("unchanged") becomes the previous frame's angle by index; in frame 0 it is
+  the joint's pose when the trick started.
 - `repeats` follows the legacy `loopCycle[2]`: the loop section is played
   `repeats` times in total, 0 and 1 both mean once, 255 until stopped.
+
+**Playing** (`kilo/body/client.py`, `kilo/tricks/player.py`, `kilo/cli_trick.py`).
+
+- `client.upload_trick(trick)` returns `(trick_id, uploaded)`. The body holds
+  one trick; `trick_id` is a 1..254 tag derived from the header and frames.
+  Cached: if this client committed it (no reboot since) nothing is sent;
+  otherwise `TRICK_COMMIT` alone asks the body (OK = it holds exactly this
+  trick; the body checks the CRC it computed while the frames arrived), and
+  only then the full upload goes out.
+- `await client.play(name_or_trick, mirror=False, speed=1.0)` uploads if
+  needed, releases the latched posture goal (the trick's end posture replaces
+  it), sends `TRICK_PLAY` (speed and mirror are applied by the body, so one
+  upload serves every variant) and resolves on `EVENT TRICK_DONE` with a
+  `TrickResult(reason, trick_id, elapsed_s, expected_ticks, epoch)`; reason is
+  DONE, STOPPED, PREEMPTED or FELL. Timeout: the expected duration plus 1 s
+  (none for `repeats` 255); on timeout it sends `TRICK_STOP` and raises.
+  A refusal is a `CommandError` (BUSY from LIMP, CALIB, under a reflex or
+  while playing; STALE; LOW_BATT; UNCALIBRATED). `client.stop_trick()` stops.
+- `kilo.tricks.player` is the body's player timing in Python: a phase of n
+  ticks takes ceil(n · 64 / speed_q6) ticks; TRICK_DONE comes the tick after
+  the last phase. The vbody plays with it, so its TRICK_DONE lands on the
+  body's tick (checked by `tests/test_crosscheck.py`).
+- CLI: `kilo trick list`, `kilo trick show NAME` (no body needed), `kilo
+  trick upload NAME [--force]`, `kilo trick play NAME [--mirror] [--speed X]
+  [--repeats N] [--for S] [--posture stand] [--then-watch T]`, `kilo trick
+  stop`. A trick cannot start from LIMP: `--posture stand` first.
 
 **Library layout.** One JSON file per trick in `kilo/tricks/library/`, named by
 the Kilo name. JSON because §5 specifies JSON keyframes, it is in the stdlib
@@ -639,8 +669,9 @@ kilo/body/client.py         BodyClient: postures, calibration, params, stats
 kilo/log.py                 JSON-lines logger thread
 kilo/perception/            ultrasonic + IMU detectors, Percepts aggregator, ring buffer
 kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (python -m kilo.logs)
-kilo/tricks/                trick model, legacy importer, library/*.json (generated)
+kilo/tricks/                trick model, legacy importer, library/*.json (generated), player timing
 kilo/behaviour/             behaviour tree, drives, utility selector, personality.yaml, runner
+kilo/cli_trick.py           `kilo trick` (registered by one line in cli.py)
 kilo/cli.py                 the `kilo` command
 kilo/daemon.py              `kilo run`: owns the port, serves the socket, holds, port release
 kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody (BodyClient over the socket)

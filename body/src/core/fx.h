@@ -32,6 +32,7 @@ uint16_t fx_isqrt32(uint32_t n);
 
 // Cosine easing (1 - cos(pi*i/n)) / 2 = sin^2(90deg * i/n), Q14.
 // 0 at i = 0, 16384 at i >= n: zero velocity at both ends of a move.
-uint16_t fx_ease_cos(uint8_t i, uint8_t n);
+// (u16 so the keyframe player can ease speed-scaled segments.)
+uint16_t fx_ease_cos(uint16_t i, uint16_t n);
 
 #endif

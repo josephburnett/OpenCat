@@ -1,19 +1,28 @@
-"""BodyClient: the mind's P0 API to the body (docs/architecture.md §5, §7 P0).
+"""BodyClient: the mind's API to the body (docs/architecture.md §5, §7).
 
 Thin and synchronous: goals go through ``SerialLink.set_goal`` (latched,
 refreshed at 5 Hz, epoch-stamped, cleared on an epoch change); commands go
 through ``SerialLink.request`` (seq, 50 ms wait, 3 retries; queries answered
 by their data reply, other commands by an ACK, de-dup safe). Message layouts
 and field names are the generated ones (protocol/spec.toml, Appendix E).
+
+Tricks (P1, §3e): ``upload_trick`` (cached by (trick_id, crc)),
+``await play(name_or_trick, mirror, speed)`` which resolves on EVENT
+TRICK_DONE, and ``stop_trick``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import binascii
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from kilo.link import consts
 from kilo.link.serial_link import LinkError, LinkTimeout, SerialLink
+from kilo.protocol import kilo_protocol as P
 
 
 class ProtocolMismatch(LinkError):
@@ -34,9 +43,44 @@ BALANCE_CLAMP = 15      # degrees
 BALANCE_MAX_DEG = 30    # dead band and clamp limit
 
 
+# Tricks: TRICK_PLAY speed_q6 range (0.25x .. 3.98x) and the play() timeout margin.
+SPEED_MIN, SPEED_MAX = 16 / 64, 255 / 64
+TRICK_DONE_MARGIN_S = 1.0
+
+
+class TrickError(LinkError):
+    pass
+
+
+@dataclass
+class TrickResult:
+    """How a play() ended: EVENT TRICK_DONE's reason (DONE, STOPPED,
+    PREEMPTED, FELL), the trick_id, seconds from TRICK_PLAY's ACK to the
+    event, and the ticks the player was expected to take (None: until stopped)."""
+    reason: str
+    trick_id: int
+    elapsed_s: float
+    expected_ticks: int | None
+    epoch: int
+
+
+def trick_id_for(trick: Any) -> int:
+    """A stable 1..254 tag for a trick's header and frames (the body caches one
+    trick; TRICK_COMMIT's CRC is the real identity check)."""
+    data = trick.begin(0).pack()[1:] + trick.encode_frames()
+    return binascii.crc_hqx(data, 0xFFFF) % 254 + 1
+
+
 class BodyClient:
     def __init__(self, link: SerialLink):
         self.link = link
+        # The trick the body holds, as far as this client knows: (trick_id,
+        # crc, reboots seen when it was committed). TRICK_COMMIT alone checks
+        # it on the body (another process may have replaced it).
+        self._trick_cached: tuple[int, int, int] | None = None
+        self._trick_lock = threading.Lock()
+        self._trick_done: list[tuple[float, Any]] = []
+        link.subscribe("event", self._on_event)
 
     @property
     def state(self):
@@ -259,6 +303,128 @@ class BodyClient:
     def reboot(self) -> None:
         """REBOOT (watchdog restart of the application)."""
         self.link.request("REBOOT", {"magic": consts.REBOOT_MAGIC})
+
+    # ---- tricks (commands; docs §3e) -----------------------------------------
+    def _on_event(self, msg: Any) -> None:
+        if msg.code == consts.EV["TRICK_DONE"]:
+            with self._trick_lock:
+                self._trick_done.append((self.link.clock(), msg))
+
+    def upload_trick(self, trick: Any, force: bool = False) -> tuple[int, bool]:
+        """Make the body hold ``trick``. Returns (trick_id, uploaded).
+
+        Cached: when the body is known to hold it (same id and CRC, no reboot
+        since) nothing is sent; otherwise TRICK_COMMIT alone asks the body
+        (OK = it has exactly this trick), and only then TRICK_BEGIN,
+        TRICK_FRAMES x ceil(n / 4) and TRICK_COMMIT go out. Raises
+        TrickError/CommandError if the body refuses.
+        """
+        self._check_drivable()
+        trick.validate()
+        tid, crc = trick_id_for(trick), trick.crc16()
+        reboots = self.state.reboots
+        if not force and self._trick_cached == (tid, crc, reboots):
+            return tid, False
+        if not force:
+            try:
+                self.link.request("TRICK_COMMIT", {"trick_id": tid, "crc16": crc})
+                self._trick_cached = (tid, crc, reboots)
+                return tid, False
+            except LinkError as e:
+                if getattr(e, "status", None) is None:
+                    raise
+        self._trick_cached = None
+        for m in trick.upload_messages(tid):
+            self.link.request(m.NAME, P.to_dict(m))
+        self._trick_cached = (tid, crc, self.state.reboots)
+        return tid, True
+
+    @staticmethod
+    def speed_q6(speed: float) -> int:
+        q = int(round(speed * 64))
+        if not 16 <= q <= 255:
+            raise ValueError(f"speed must be {SPEED_MIN:g}..{SPEED_MAX:.2f}")
+        return q
+
+    @staticmethod
+    def expected_ticks(trick: Any, speed: float = 1.0) -> int | None:
+        """Ticks from TRICK_PLAY to the last frame's end at ``speed`` (None: until stopped)."""
+        from kilo.tricks.player import total_ticks
+
+        return total_ticks([f.dur for f in trick.frames], [f.hold for f in trick.frames], trick.loop_start,
+                           trick.loop_end, trick.repeats, BodyClient.speed_q6(speed))
+
+    def start_trick(self, trick: Any, mirror: bool = False, speed: float = 1.0) -> tuple[int, int]:
+        """Upload (cached) and send TRICK_PLAY; returns (trick_id, done_count
+        before the play) for wait_trick(). The latched posture goal is
+        released: the trick's end posture replaces it on the body."""
+        if isinstance(trick, str):
+            from kilo.tricks import library
+
+            trick = library.load(trick)
+        q = self.speed_q6(speed)
+        tid, _ = self.upload_trick(trick)
+        self.link.clear_goal("SET_POSTURE")
+        epoch = self.state.epoch
+        if epoch is None:
+            raise TrickError("no epoch from the body yet (wait_ready first)")
+        with self._trick_lock:
+            n = len(self._trick_done)
+        fields = {"epoch": epoch, "trick_id": tid, "speed_q6": q,
+                  "flags": int(P.TrickPlayFlags.MIRROR) if mirror else 0}
+        try:
+            self.link.request("TRICK_PLAY", fields)
+        except LinkError as e:
+            if getattr(e, "status", None) != int(P.AckStatus.NO_TRICK):
+                raise
+            # Another process replaced the body's trick since we cached it.
+            self.upload_trick(trick, force=True)
+            self.link.request("TRICK_PLAY", fields)
+        return tid, n
+
+    def trick_done_since(self, n: int, trick_id: int) -> Any:
+        """The first TRICK_DONE for ``trick_id`` after the n-th one seen, or None."""
+        with self._trick_lock:
+            for _, m in self._trick_done[n:]:
+                if m.arg & 0xFF == trick_id:
+                    return m
+        return None
+
+    async def play(self, trick: Any, mirror: bool = False, speed: float = 1.0,
+                   timeout: float | None = None) -> TrickResult:
+        """Play a trick (a library name or a Trick) and resolve on its TRICK_DONE.
+
+        Timeout: the expected duration at ``speed`` plus TRICK_DONE_MARGIN_S
+        (none for a trick that loops until stopped, unless ``timeout`` is
+        given); on timeout the trick is stopped and TrickError raised. The
+        coroutine keeps the link's liveness stamp fresh while it waits.
+        """
+        if isinstance(trick, str):
+            from kilo.tricks import library
+
+            trick = library.load(trick)
+        ticks = self.expected_ticks(trick, speed)
+        if timeout is None and ticks is not None:
+            timeout = (ticks + 1) * P.TICK_MS / 1000.0 + TRICK_DONE_MARGIN_S
+        tid, n = self.start_trick(trick, mirror, speed)
+        t0 = self.link.clock()
+        while True:
+            self.link.mark_alive()
+            m = self.trick_done_since(n, tid)
+            if m is not None:
+                reason = P.TrickDoneReason((m.arg & 0xFFFF) >> 8).name
+                return TrickResult(reason, tid, self.link.clock() - t0, ticks, m.epoch)
+            if timeout is not None and self.link.clock() - t0 > timeout:
+                try:
+                    self.stop_trick()
+                except LinkError:
+                    pass
+                raise TrickError(f"no TRICK_DONE within {timeout:.2f} s")
+            await asyncio.sleep(0.02)
+
+    def stop_trick(self, transition_ticks: int = 0) -> None:
+        """TRICK_STOP: crossfade to the end posture (0 = XFADE_TICKS)."""
+        self.link.request("TRICK_STOP", {"transition_ticks": transition_ticks})
 
     def _count_events(self, name: str) -> int:
         code = consts.EV[name]
