@@ -411,14 +411,14 @@ KILO_STATIC_ASSERT(offsetof(kilo_set_body_pose_t, roll) == 3, kilo_sa_set_body_p
 KILO_STATIC_ASSERT(offsetof(kilo_set_body_pose_t, dheight_mm) == 5, kilo_sa_set_body_pose_dheight_mm);
 KILO_STATIC_ASSERT(offsetof(kilo_set_body_pose_t, xshift_mm) == 6, kilo_sa_set_body_pose_xshift_mm);
 
-/* 0x14 SET_BALANCE: goal. Enable, Kp, Kd, dead band, clamp. */
+/* 0x14 SET_BALANCE: goal. Balance enable and gains, live (not persisted; §3f). enable 1 balances eligible postures even without the SET_POSTURE flag. Out of range: GOAL_REFUSED BAD_ARG. */
 #define KILO_SET_BALANCE_LEN 5u
 typedef struct KILO_PACKED kilo_set_balance_s {
     uint8_t enable; /* range 0..1 */
-    uint8_t kp_q8; /* 1 x 0.00390625 */
-    uint8_t kd_ms; /* ms */
-    uint8_t deadband_deg; /* deg */
-    uint8_t max_corr_deg; /* deg */
+    uint8_t kp_q8; /* 1 x 0.00390625; default 128 = 0.5 */
+    uint8_t kd_ms; /* ms; default 30 */
+    uint8_t deadband_deg; /* deg; range 0..30; default 2 */
+    uint8_t max_corr_deg; /* deg; range 0..30; default 15 */
 } kilo_set_balance_t;
 KILO_STATIC_ASSERT(sizeof(kilo_set_balance_t) == 5, kilo_sa_set_balance_size);
 KILO_STATIC_ASSERT(offsetof(kilo_set_balance_t, enable) == 0, kilo_sa_set_balance_enable);

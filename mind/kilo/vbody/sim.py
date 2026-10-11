@@ -13,8 +13,13 @@ both the same frames and compares the replies:
   command, EVENT GOAL_REFUSED(type, BAD_LEN) for a goal; body→Pi types ignored;
 - goals are never acked. SET_POSTURE: BAD_ARG / STALE / (FALLEN, sim only) /
   LOW_BATT / UNCALIBRATED refusals, LIMP and REST never stale; BEEP accepted;
-  the other goals (gait, head, body pose, balance, eyes) are refused
-  UNKNOWN_TYPE in P0. At most one GOAL_REFUSED per goal type per second;
+  SET_BALANCE (P1) accepted (BAD_ARG if enable > 1 or a band/clamp > 30 deg);
+  the other goals (gait, head, body pose, eyes) are refused UNKNOWN_TYPE.
+  At most one GOAL_REFUSED per goal type per second;
+- balance (P1): the SET_POSTURE balance flag (cleared by an epoch bump) or
+  SET_BALANCE enable turns it on in SIT and STAND outside any reflex; TELEMETRY
+  flags bit 0 mirrors that, and the simulated pitch/roll wobble shrinks. The
+  controller itself is not simulated;
 - queries answer with their data reply only (ACK only on failure), never
   de-duplicated;
 - other commands get exactly one ACK; a repeat of the last executed
@@ -59,8 +64,12 @@ FW_BUILD = 0x5642_4F44  # "VBOD"
 POSTURE_NAMES = {int(p): p.name for p in P.Posture}
 CAL_LIMIT_A16 = 400
 EEPROM_SIZE = 1024
-# Goals the P0 body implements; every other goal is refused UNKNOWN_TYPE.
-P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP})
+# Goals the body implements; every other goal is refused UNKNOWN_TYPE.
+P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.MsgId.SET_BALANCE})
+# SET_BALANCE defaults (body/src/core/balance.h) and the posture it runs in.
+BALANCE_DEFAULTS = {"enable": 0, "kp_q8": 128, "kd_ms": 30, "deadband_deg": 2, "max_corr_deg": 15}
+BALANCE_MAX_DEG = 30
+BALANCE_POSTURES = ("SIT", "STAND")
 
 
 def open_pty() -> tuple[FdTransport, str, int]:
@@ -133,6 +142,8 @@ class VirtualBody:
         self.recover_until: float | None = None
         self.fall_side = 1
         self.goals: dict[str, bytes] = {}
+        self.balance_req = False  # SET_POSTURE flags bit 0
+        self.balance: dict[str, int] = dict(BALANCE_DEFAULTS)  # SET_BALANCE (live, not persisted)
         self.refused_at: dict[int, float] = {}
         self.save_until: float | None = None
         self.booted_at = self.clock()
@@ -149,6 +160,22 @@ class VirtualBody:
         if self.wd_stage:
             return P.Mode.LINK_LOST
         return P.Mode.LIMP if self.posture == "LIMP" else P.Mode.IDLE
+
+    @property
+    def reflex(self) -> bool:
+        return (self.wd_stage >= 2 or self.fall_until is not None or self.recover_until is not None
+                or self.batt_level >= P.BatteryLevel.LOW)
+
+    @property
+    def balance_active(self) -> bool:
+        """TELEMETRY flags bit 0, as the body gates it (§3c): requested, SIT or STAND, no reflex."""
+        return ((self.balance_req or bool(self.balance["enable"])) and self.posture in BALANCE_POSTURES
+                and not self.reflex)
+
+    def _epoch_bump(self) -> None:
+        self.epoch = (self.epoch + 1) & 0xFF
+        self.goals.clear()
+        self.balance_req = False  # the posture flag is a motion goal; SET_BALANCE settings stay
 
     def save_busy(self, now: float | None = None) -> bool:
         now = self.clock() if now is None else now
@@ -171,8 +198,7 @@ class VirtualBody:
             if self.fall_until is not None:
                 return
             self.fall_side = side
-            self.epoch = (self.epoch + 1) & 0xFF
-            self.goals.clear()
+            self._epoch_bump()
             self.fall_until = self.clock() + 1.0
             self._event(EV.FELL, side)
         self._say("fell")
@@ -183,8 +209,7 @@ class VirtualBody:
             prev, self.batt_level = self.batt_level, int(level)
             if level > prev:
                 if level >= P.BatteryLevel.LOW and prev < P.BatteryLevel.LOW:
-                    self.epoch = (self.epoch + 1) & 0xFF
-                    self.goals.clear()
+                    self._epoch_bump()
                     if self.posture != "LIMP":
                         self.posture = "REST"
                 self._event(EV.LOW_BATTERY, level)
@@ -274,8 +299,7 @@ class VirtualBody:
             limp_s = self.params[P.ParamId.WD_LIMP_S]
             if self.wd_stage == 0 and silent >= stop_s:
                 self.wd_stage = 1
-                self.epoch = (self.epoch + 1) & 0xFF
-                self.goals.clear()
+                self._epoch_bump()
                 self._event(EV.WATCHDOG, 0)
                 self._say("watchdog: stop")
             if self.wd_stage == 1 and silent >= rest_s:
@@ -296,10 +320,13 @@ class VirtualBody:
         t = now - self._start_time
         pitch = 2.0 * math.sin(t * 0.7)
         roll = 1.5 * math.sin(t * 1.1)
-        if self.fall_until is not None:
-            roll = 85.0 * self.fall_side
         F = P.TelemetryFlags
         flags = 0
+        if self.balance_active:
+            flags |= F.BALANCE_ACTIVE
+            pitch, roll = pitch * 0.25, roll * 0.25  # the body holds itself level
+        if self.fall_until is not None:
+            roll = 85.0 * self.fall_side
         if self.posture != "LIMP":
             flags |= F.SERVOS_POWERED
         if self.wd_armed and self.wd_stage == 0:
@@ -308,8 +335,7 @@ class VirtualBody:
             flags |= F.BATT_WARN
         if self.save_busy(now):
             flags |= F.EEPROM_PENDING
-        reflex = self.wd_stage >= 2 or self.fall_until is not None or self.recover_until is not None
-        owner = int(P.Owner.REFLEX if reflex else P.Owner.IDLE)
+        owner = int(P.Owner.REFLEX if self.reflex else P.Owner.IDLE)
         self._send("TELEMETRY", tick=self.tick, pitch=int(pitch * 16), roll=int(roll * 16),
                    rate_pitch=int(1.4 * math.cos(t * 0.7) * 16), rate_roll=int(1.6 * math.cos(t * 1.1) * 16),
                    rate_yaw=0, dist_mm=600 + int(100 * math.sin(t * 0.3)), batt_mv=self.batt_mv,
@@ -392,6 +418,15 @@ class VirtualBody:
         if type == P.MsgId.BEEP:
             self.goals[name] = payload
             return
+        if type == P.MsgId.SET_BALANCE:
+            if msg.enable > 1 or msg.deadband_deg > BALANCE_MAX_DEG or msg.max_corr_deg > BALANCE_MAX_DEG:
+                return self._refuse(type, R.BAD_ARG, now)
+            was = self.balance_active
+            self.balance = {k: int(getattr(msg, k)) for k in BALANCE_DEFAULTS}
+            self.goals[name] = payload
+            if self.balance_active != was:
+                self._say(f"balance {'on' if self.balance_active else 'off'}")
+            return
         # SET_POSTURE
         if msg.posture >= len(P.Posture) or msg.posture == P.Posture.STANCE:
             return self._refuse(type, R.BAD_ARG, now)
@@ -406,6 +441,7 @@ class VirtualBody:
             if msg.posture == P.Posture.STAND and self.config_state == P.ConfigState.DEFAULTED:
                 return self._refuse(type, R.UNCALIBRATED, now)
         self.goals[name] = payload
+        self.balance_req = bool(msg.flags & P.PostureFlags.BALANCE)
         new = POSTURE_NAMES[msg.posture]
         if new != self.posture:
             self._say(f"posture {new}")

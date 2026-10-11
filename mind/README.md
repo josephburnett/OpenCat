@@ -91,6 +91,8 @@ kilo monitor                 # live telemetry table; Ctrl-C to quit
 kilo monitor --passive --duration 20   # send nothing; timeline of events and changes
 kilo posture stand           # holds the posture until Ctrl-C (or --for SECONDS)
 kilo posture stand --for 2 --then-watch 15   # hold, go silent, print the watchdog timeline
+kilo posture balance --for 30   # STAND with the balance flag (docs/architecture.md §3f)
+kilo balance on --kp 0.6 --kd 0.05 --for 30   # SET_BALANCE gains (live, not persisted) + hold STAND; prints pitch/roll each second
 kilo cal [show] | cal set JOINT DEG | cal save | cal revert
 kilo param list | param get ID | param set ID VALUE [--persist]   # ID = number or name
 kilo pca                     # read back the 16 PCA9685 OFF counts

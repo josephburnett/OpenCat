@@ -381,13 +381,13 @@ name = "SET_BALANCE"
 id = 0x14
 dir = "pi_to_body"
 kind = "goal"
-doc = "Enable, Kp, Kd, dead band, clamp."
+doc = "Balance enable and gains, live (not persisted; §3f). enable 1 balances eligible postures even without the SET_POSTURE flag. Out of range: GOAL_REFUSED BAD_ARG."
 fields = [
   { name = "enable", type = "u8", range = [0, 1] },
-  { name = "kp_q8", type = "u8", unit = "1", scale = 0.00390625 },
-  { name = "kd_ms", type = "u8", unit = "ms" },
-  { name = "deadband_deg", type = "u8", unit = "deg" },
-  { name = "max_corr_deg", type = "u8", unit = "deg" },
+  { name = "kp_q8", type = "u8", unit = "1", scale = 0.00390625, note = "default 128 = 0.5" },
+  { name = "kd_ms", type = "u8", unit = "ms", note = "default 30" },
+  { name = "deadband_deg", type = "u8", unit = "deg", range = [0, 30], note = "default 2" },
+  { name = "max_corr_deg", type = "u8", unit = "deg", range = [0, 30], note = "default 15" },
 ]
 
 [[messages]]

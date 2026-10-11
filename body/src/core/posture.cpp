@@ -3,7 +3,8 @@
 
 // Whole degrees, canonical joint order [0,1,2,8,9,10,11,12,13,14,15]
 // (pan, tilt, tail, 4 shoulders LF RF RB LB, 4 knees LF RF RB LB), then the
-// expected roll and pitch: the InstinctNybble.h header bytes 1 and 2.
+// expected roll and pitch: the InstinctNybble.h header bytes 1 and 2, kept
+// verbatim in the legacy convention (posture_pitch/roll convert them).
 // Joints 3-7 of the legacy rows are dropped (never driven).
 // Note: legacy "sit" asks RB/LB shoulder for -90 deg, below their -80 deg
 // limit; the safety stage clamps it to -80, exactly as legacy calibratedPWM()
@@ -39,10 +40,10 @@ KILO_NOINLINE int16_t posture_angle(uint8_t id, uint8_t k) {
 
 int16_t posture_pitch(uint8_t id) {
   int8_t r = row_of(id);
-  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].pitch) * 16);
+  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].pitch) * (16 * LEGACY_PITCH_SIGN));
 }
 
 int16_t posture_roll(uint8_t id) {
   int8_t r = row_of(id);
-  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].roll) * 16);
+  return r < 0 ? 0 : (int16_t)(PGM_I8(&POSTURES[r].roll) * (16 * LEGACY_ROLL_SIGN));
 }

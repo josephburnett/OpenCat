@@ -11,6 +11,7 @@ void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok) {
   b.cfg = cfg;
   b.att.gz = Q14_ONE;  // upright until the first packet says otherwise
   b.imu_fault = imu_ok ? 0 : 1;
+  balance_init(b.bal);
   // Warm boot: the PCA9685 kept driving the servos through our reset; keep
   // exactly that pose until we know which way is up. Cold boot: the servo
   // pose is unknown, so stay limp until the Pi asks.
@@ -24,8 +25,10 @@ void body_epoch_bump(Body& b) {
   // A new epoch makes every goal the Pi sent before this moment stale, so
   // a goal re-sent from before a fall or a link loss cannot restart motion.
   // Clearing the latched motion goals (gait, head, body pose, trick) goes
-  // here once those exist (P1/P2). The IDLE posture is not a motion goal.
+  // here once those exist (P1/P2). The IDLE posture is not a motion goal,
+  // but its balance flag is: the Pi re-asserts it with the new epoch.
   b.epoch++;
+  b.balance_req = 0;
 }
 
 // Take the REFLEX owner for `who`, unless a more important reflex holds it.
@@ -181,8 +184,22 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   watchdog_step(b);
   if (in.batt_valid) battery_step(b, in.batt_counts);
   limp_timer_step(b, RH_BATTERY, &b.batt_limp_timer);
+  // Step 6's balance layer (doc §3c, §3f). It runs only for the IDLE SIT and
+  // STAND postures once their move has settled, never under REFLEX (which
+  // also covers the warm-boot hold) and never in LIMP, CALIB, ZERO or REST
+  // (lying on the belly there is nothing to balance). Outside those the
+  // corrections are zeroed at once: the reflex or the new posture's mover
+  // starts from the corrected output, so nothing jumps. Inside, a request
+  // turned off or an IMU_FAULT lets them decay through the filter and slew.
+  uint8_t p = arbiter_idle_posture(b.arb);
+  if (b.arb.reflex_active || arbiter_idle_moving(b.arb) || !(p == POSTURE_SIT || p == POSTURE_STAND)) {
+    balance_reset(b.bal);
+  } else {
+    bool want = (b.balance_req || b.bal.enable) && !b.imu_fault;
+    balance_step(b.bal, want, b.att, posture_roll(p), posture_pitch(p));
+  }
   // Steps 5-6: owners, crossfade, layers, limits, slew, counts.
-  arbiter_run(b.arb, b.cfg->img.cal, counts);
+  arbiter_run(b.arb, b.cfg->img.cal, counts, &b.bal);
 }
 
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags) {
@@ -196,6 +213,17 @@ GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ti
   if (b.holder == RH_WARM_HOLD) release_reflex(b, RH_WARM_HOLD);  // the Pi takes over
   if (posture == POSTURE_LIMP && b.holder != RH_NONE) arbiter_reflex(b.arb, POSTURE_LIMP, 0);
   arbiter_set_idle(b.arb, posture, ticks);
+  return GOAL_OK;
+}
+
+GoalResult body_goal_balance(Body& b, const uint8_t p[5]) {
+  if (p[0] > 1 || p[3] > BAL_MAX_DEG_LIMIT || p[4] > BAL_MAX_DEG_LIMIT) return GOAL_BAD_ARG;
+  Balance& s = b.bal;
+  s.enable = p[0];
+  s.kp_q8 = p[1];
+  s.kd_ms = p[2];
+  s.db_deg = p[3];
+  s.max_deg = p[4];
   return GOAL_OK;
 }
 

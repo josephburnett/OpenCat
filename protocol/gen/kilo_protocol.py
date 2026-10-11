@@ -824,7 +824,7 @@ class SetBodyPose:
 
 @dataclass
 class SetBalance:
-    """0x14 SET_BALANCE (goal). Enable, Kp, Kd, dead band, clamp."""
+    """0x14 SET_BALANCE (goal). Balance enable and gains, live (not persisted; §3f). enable 1 balances eligible postures even without the SET_POSTURE flag. Out of range: GOAL_REFUSED BAD_ARG."""
     ID: ClassVar[int] = 0x14
     NAME: ClassVar[str] = 'SET_BALANCE'
     KIND: ClassVar[Kind] = Kind.GOAL
@@ -836,10 +836,10 @@ class SetBalance:
     MAX_LEN: ClassVar[int] = 5
     _FMT: ClassVar[struct.Struct] = struct.Struct('<BBBBB')
     enable: int = 0  # range 0..1
-    kp_q8: int = 0  # 1 x 0.00390625
-    kd_ms: int = 0  # ms
-    deadband_deg: int = 0  # deg
-    max_corr_deg: int = 0  # deg
+    kp_q8: int = 0  # 1 x 0.00390625; default 128 = 0.5
+    kd_ms: int = 0  # ms; default 30
+    deadband_deg: int = 0  # deg; range 0..30; default 2
+    max_corr_deg: int = 0  # deg; range 0..30; default 15
 
     def _fixed_values(self) -> list:
         v: list = []

@@ -5,7 +5,8 @@
 //               REFLEX(3) > TRICK(2) > GAIT(1) > IDLE(0)
 //   2. base   = that owner's angle; if the owner just changed, crossfade from
 //               the previous base so the hand-over never jumps
-//   3. layers = head and balance (hooks; P1)
+//   3. layers = head (hook; P1) and balance (core/balance.h): joint-space
+//               owners (IDLE, later TRICK) add the balance correction
 //   4. safety = clamp to joint limits, slew-limit, convert to PCA counts
 //
 // In P0 only IDLE (the built-in postures) and REFLEX (battery, link
@@ -14,6 +15,7 @@
 #ifndef KILO_CORE_ARBITER_H
 #define KILO_CORE_ARBITER_H
 #include <stdint.h>
+#include "balance.h"
 #include "joints.h"
 
 enum Owner : uint8_t { OWN_IDLE = 0, OWN_GAIT = 1, OWN_TRICK = 2, OWN_REFLEX = 3 };
@@ -59,8 +61,13 @@ void arbiter_reflex_release(Arbiter& a);
 // True once the active mover has reached its target.
 bool arbiter_reflex_settled(const Arbiter& a);
 
+// True while the IDLE mover is still moving to its posture.
+inline bool arbiter_idle_moving(const Arbiter& a) { return a.idle.i < a.idle.n; }
+
 // One tick of steps 1-4. Writes all 16 channel counts (unused channels and
-// LIMP joints full-off).
-void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT]);
+// LIMP joints full-off). bal: the balance corrections to add to joints owned
+// by a joint-space owner (null = none). The caller decides when balance runs
+// (body.cpp); this only applies the current corrections.
+void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal);
 
 #endif

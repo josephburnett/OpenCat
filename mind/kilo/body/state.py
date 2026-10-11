@@ -249,6 +249,7 @@ class BodyState:
                 "mode": self.mode,
                 "owners": self.owners,
                 "flags": sorted(self.flags),
+                "balance": "balance_active" in self.flags,
                 "pitch_deg": self.pitch_deg,
                 "roll_deg": self.roll_deg,
                 "rates_dps": None if tel is None else tuple(
