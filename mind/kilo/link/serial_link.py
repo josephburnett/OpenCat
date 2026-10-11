@@ -33,7 +33,9 @@ streams TELEMETRY from boot at its TELEM_DIV rate and sends EVENTs and HELLO
 unprompted, so a silent link still sees everything the body does on its own;
 it just does not feed (or arm) the body's link watchdog. Every write holds
 ``_tx_lock`` and checks the flag under it, so once ``go_silent()`` returns no
-further byte is written.
+further byte is written (a write in progress finishes first and is the
+``last_tx`` it returns). A ``request()`` waiting for its reply is woken with
+``LinkError`` (its frame may have been dropped), not left to time out.
 
 Goals and the epoch rule (§3c, §4, §5):
 
@@ -148,6 +150,7 @@ class _Pending:
         self.status: int | None = None
         self.reply_msg: Any = None
         self.acked = False
+        self.silenced = False  # go_silent() ended the wait: its frame may never have gone out
 
 
 class SerialLink:
@@ -260,6 +263,12 @@ class SerialLink:
             self._silent = True
             with self._lock:
                 self._goals.clear()
+                # A request() waiting for its reply would otherwise sit out all
+                # its retries for a frame that is now dropped: wake it.
+                p = self._pending
+                if p is not None and not p.done.is_set():
+                    p.silenced = True
+                    p.done.set()
             while True:
                 try:
                     self._txq.get_nowait()
@@ -433,6 +442,11 @@ class SerialLink:
             ok = False
             for attempt in range(retries + 1):
                 with self._lock:
+                    # checked under the lock go_silent() wakes waiters under: a
+                    # request is either refused here or woken by go_silent()
+                    if self._silent:
+                        p.silenced = True
+                        break
                     if attempt == 0 or fresh_seq:
                         p.seq = self._next_seq()
                     self._pending = p
@@ -440,7 +454,7 @@ class SerialLink:
                         self._hello_solicited_at = self.clock()
                 self._txq.put((typ, p.seq, payload, name))
                 if p.done.wait(timeout):
-                    ok = True
+                    ok = not p.silenced
                     break
                 if attempt < retries:
                     self.state.stats.retries += 1
@@ -449,6 +463,9 @@ class SerialLink:
                 self._pending = None
                 if ok:
                     self._last_done = (p.seq, p.type)
+            if p.silenced:
+                self._log("cmd", name=name, seq=p.seq, result="silenced")
+                raise LinkError(f"{name}: the link went silent (sends nothing)")
             if not ok:
                 self.state.stats.timeouts += 1
                 self._log("cmd", name=name, seq=p.seq, result="timeout")

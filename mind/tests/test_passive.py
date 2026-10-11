@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -88,12 +89,128 @@ def test_go_silent_stops_everything_at_once():
         keep_alive(link, 0.5)
         assert vb.posture == "STAND"
         last = link.go_silent()
-        n = t.writes
+        n, rx = t.writes, len(vb.received)
         keep_alive(link, 0.5)  # the mind is alive, the goal was latched: still nothing goes out
         assert t.writes == n
         assert last is not None and last[2] in ("HEARTBEAT", "SET_POSTURE")
         assert link.goals() == {}
+        # The body's watchdog trips WD_STOP_MS after the last frame *it* took
+        # in, on one of its own ticks: that is up to WD_STOP_MS after
+        # go_silent() returned plus a tick (a silent vbody's loop sits in a
+        # 20 ms read), so wait for it, still alive and still sending nothing.
+        stop_s = vb.params[P.ParamId.WD_STOP_MS] / 1000
+        end = time.monotonic() + stop_s + 2.0
+        while vb.wd_stage < 1 and time.monotonic() < end:
+            keep_alive(link, 0.02)
         assert vb.wd_stage >= 1
+        assert t.writes == n and len(vb.received) == rx
+    finally:
+        link.stop()
+        vb.stop()
+
+
+class GateTransport(CountingTransport):
+    """Blocks the next write of frame type ``gate_type`` (inside the writer's
+    _tx_lock) until ``release`` is set."""
+
+    def __init__(self, inner, codec):
+        super().__init__(inner)
+        self.codec = codec
+        self.gate_type = None
+        self.blocked = threading.Event()
+        self.release = threading.Event()
+        self.types = []
+
+    def write(self, data):
+        typ = [f.type for f in self.codec.new_decoder().feed(data)][0]
+        self.types.append(typ)
+        if typ == self.gate_type:
+            self.gate_type = None
+            self.blocked.set()
+            self.release.wait(5)
+        super().write(data)
+
+
+def test_go_silent_during_a_goal_refresh_write():
+    """go_silent() while the writer is inside a goal refresh: it waits for the
+    frame on the wire, reports it as the last one, and the rest of that
+    refresh (and everything after) never goes out."""
+    a, b = loopback_pair()
+    vb = VirtualBody(b).start()
+    link = SerialLink(lambda: t, config=LinkConfig(**FAST), port_name="loopback")
+    t = GateTransport(a, link.codec)
+    link.mark_alive()
+    link.start()
+    try:
+        client = BodyClient(link)
+        client.wait_ready(2)
+        client.stand()
+        client.set_balance(False)  # a second goal, refreshed in the same batch after SET_POSTURE
+        keep_alive(link, 0.3)
+        t.gate_type = link.messages.type_of("SET_POSTURE")
+        alive = threading.Event()  # set: stop stamping liveness
+
+        def stamp():
+            while not alive.is_set():
+                link.mark_alive()
+                time.sleep(0.01)
+
+        pump = threading.Thread(target=stamp)
+        pump.start()
+        try:
+            assert t.blocked.wait(2)  # the writer is mid-refresh, holding _tx_lock
+            done = []
+            th = threading.Thread(target=lambda: done.append(link.go_silent()))
+            th.start()
+            th.join(0.1)
+            assert not done  # go_silent() waits for the write in progress
+            n = t.writes
+            t.release.set()
+            th.join(2)
+            assert done and done[0] is not None and done[0][2] == "SET_POSTURE"
+            assert t.writes == n + 1  # the frame that was mid-write, and nothing more
+            time.sleep(0.5)
+            assert t.writes == n + 1 and t.types[-1] == link.messages.type_of("SET_POSTURE")
+            assert link.state.stats.tx_silenced >= 1  # SET_BALANCE of the same refresh was dropped
+        finally:
+            alive.set()
+            pump.join()
+    finally:
+        t.release.set()
+        link.stop()
+        vb.stop()
+
+
+def test_go_silent_wakes_a_request_in_flight():
+    """A request() waiting for its reply when the link goes silent fails at
+    once with LinkError (its frame is dropped), not after every retry."""
+    a, b = loopback_pair()
+    vb = VirtualBody(b).start()
+    t = CountingTransport(a)
+    link = SerialLink(lambda: t, config=LinkConfig(**FAST, ack_timeout_s=1.0, retries=3), port_name="loopback")
+    link.mark_alive()
+    link.start()
+    try:
+        BodyClient(link).wait_ready(2)
+        a.drop_tx = lambda data: True  # the body never answers
+        err = []
+
+        def ask():
+            try:
+                link.request("HELLO_REQ", reply="HELLO")
+            except Exception as e:
+                err.append(e)
+
+        th = threading.Thread(target=ask)
+        th.start()
+        time.sleep(0.1)
+        t0 = time.monotonic()
+        link.go_silent()
+        th.join(2)
+        assert not th.is_alive() and time.monotonic() - t0 < 0.5
+        assert len(err) == 1 and type(err[0]) is LinkError and "silent" in str(err[0])
+        with pytest.raises(LinkError):
+            link.request("HELLO_REQ", reply="HELLO")
     finally:
         link.stop()
         vb.stop()
