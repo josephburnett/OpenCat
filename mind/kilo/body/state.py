@@ -74,6 +74,7 @@ class LinkStats:
     dup_acks: int = 0  # re-ACK of an already completed command (de-dup at work)
     unmatched_acks: int = 0
     tx_dropped: int = 0  # frames discarded while disconnected
+    tx_silenced: int = 0  # frames not sent because the link is silent (passive)
     open_failures: int = 0
     reconnects: int = 0
     disconnects: int = 0

@@ -1,8 +1,8 @@
 """The `kilo` command line (docs/architecture.md Appendix G), P0 subset.
 
     kilo [--port P] [--log | --log-file FILE] [-v] status [--json]
-    kilo monitor [--rate HZ] [--duration S]
-    kilo posture {limp,rest,stand,sit,balance,...} [--transition TICKS] [--for S]
+    kilo monitor [--rate HZ] [--duration S] [--passive]
+    kilo posture {limp,rest,stand,sit,balance,...} [--transition TICKS] [--for S [--then-watch T]]
     kilo cal show | set JOINT DEGREES | save | revert
     kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none]
@@ -13,6 +13,13 @@ Appendix G arrives with the daemon.) Because goals are only held while the
 mind is alive, ``kilo posture`` keeps running and holding the posture until
 Ctrl-C or ``--for``; when it exits the body's watchdog takes over (stop, then
 REST after 1.5 s).
+
+Every command but ``monitor --passive`` feeds the body's link watchdog while
+it runs. ``monitor --passive`` writes nothing at all to the port (the body
+streams TELEMETRY and EVENTs unprompted) and prints a timeline, so it shows
+what the body does on its own. ``posture --for S --then-watch T`` holds, then
+goes silent at once and prints the same timeline for T seconds, relative to
+the last frame it sent: the watchdog timeline (H5) in one command.
 """
 
 from __future__ import annotations
@@ -61,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("monitor", help="live telemetry table")
     s.add_argument("--rate", type=float, default=10.0, help="refresh rate in Hz")
     s.add_argument("--duration", type=float, default=None, help="stop after S seconds")
+    s.add_argument("--passive", action="store_true",
+                   help="send nothing (no HELLO, heartbeat or goal; the body's watchdog is not fed) "
+                        "and print a timeline: events and mode/epoch/owner/flag changes as they "
+                        "happen, a telemetry line every second")
 
     s = sub.add_parser("posture", help="hold a posture (until Ctrl-C or --for)")
     s.add_argument("name", choices=POSTURE_CHOICES)
@@ -70,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hold for S seconds, then exit")
     s.add_argument("--pca", action="store_true",
                    help="print the PCA9685 counts read back at the end of the hold (H2)")
+    s.add_argument("--then-watch", type=float, default=None, metavar="T",
+                   help="after the --for hold, stop sending at once (no heartbeat, no goal "
+                        "refresh) and print the passive timeline for T seconds, relative to the "
+                        "last frame sent (the watchdog timeline, H5)")
 
     s = sub.add_parser("cal", help="joint calibration")
     cs = s.add_subparsers(dest="cal_cmd", metavar="ACTION")
@@ -121,9 +136,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.cmd == "cal" and args.cal_cmd is None:
         args.cal_cmd = "show"
+    if args.cmd == "posture" and args.then_watch is not None and args.hold is None:
+        parser.error("--then-watch needs --for")
     return args
 
 
@@ -144,14 +162,15 @@ def _resolve_port(args: argparse.Namespace) -> str:
     return choice.port
 
 
-def open_link(args: argparse.Namespace) -> tuple[SerialLink, BodyClient]:
+def open_link(args: argparse.Namespace, passive: bool = False) -> tuple[SerialLink, BodyClient]:
     port = _resolve_port(args)
     logger = None
     if args.log or args.log_file:
         from kilo.log import JsonlLogger, default_path
 
         logger = JsonlLogger(args.log_file or default_path())
-    link = SerialLink(lambda: open_port(port, args.baud), logger=logger, port_name=port)
+    link = SerialLink(lambda: open_port(port, args.baud), logger=logger, port_name=port,
+                      passive=passive)
     link.mark_alive()
     link.start()
     return link, BodyClient(link)
@@ -232,7 +251,37 @@ def render_monitor(snap: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def _wall(t: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t % 1 * 1000):03d}"
+
+
+def watch_timeline(client: BodyClient, t0: float, duration: float | None) -> int:
+    """Print the passive timeline (kilo.body.timeline) until ``duration`` or Ctrl-C."""
+    from kilo.body.timeline import Timeline
+
+    st = client.link.state.stats
+    sent_before = st.frames_tx
+    tl = Timeline(client.link, t0)
+    end = None if duration is None else t0 + duration
+    try:
+        while end is None or client.link.clock() < end:
+            tl.poll()
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    print(f"done: {st.frames_tx - sent_before} frames sent while watching "
+          f"({st.frames_tx} in total)")
+    return EXIT_OK
+
+
 def cmd_monitor(args: argparse.Namespace, client: BodyClient) -> int:
+    if args.passive:
+        t0 = client.link.clock()
+        print(f"passive monitor on {client.state.port} from {_wall(time.time())} (t=0): sending "
+              f"nothing, the body's watchdog is not fed"
+              + (f"; {args.duration:g} s" if args.duration is not None else "; Ctrl-C to quit"),
+              flush=True)
+        return watch_timeline(client, t0, args.duration)
     tty_out = sys.stdout.isatty()
     period = 1.0 / max(args.rate, 0.5)
     end = None if args.duration is None else time.monotonic() + args.duration
@@ -267,10 +316,26 @@ def cmd_posture(args: argparse.Namespace, client: BodyClient) -> int:
                 print(f"posture goal cleared by the body (mode {st.mode}, epoch {st.epoch}); exiting")
                 return EXIT_ERR
     except KeyboardInterrupt:
-        pass
+        if args.then_watch is not None:
+            print("interrupted: not watching")
+        args.then_watch = None
     if args.pca:
         _print_pca(client.pca_counts())
-    return EXIT_OK
+    if args.then_watch is None:
+        return EXIT_OK
+    # Silence first, print after: nothing (no goal refresh, no heartbeat) goes
+    # out once go_silent() returns.
+    last = client.link.go_silent()
+    hb = client.link.last_heartbeat
+    if last is None:
+        t0 = client.link.clock()
+        print(f"silent from {_wall(time.time())} (t=0); nothing was sent", flush=True)
+    else:
+        t0, wall, name = last
+        print(f"silent: last frame {name} sent at {_wall(wall)} (t=0)"
+              + (f", last HEARTBEAT at {_wall(hb[1])} (t={hb[0] - t0:+.2f})" if hb else "")
+              + f"; watching {args.then_watch:g} s", flush=True)
+    return watch_timeline(client, t0, args.then_watch)
 
 
 def cmd_cal(args: argparse.Namespace, client: BodyClient) -> int:
@@ -428,7 +493,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_flash(args)
     if args.cmd == "vbody":
         return cmd_vbody(args)
-    link, client = open_link(args)
+    link, client = open_link(args, passive=args.cmd == "monitor" and args.passive)
     try:
         return LINK_COMMANDS[args.cmd](args, client)
     except ProtocolMismatch as e:

@@ -88,7 +88,9 @@ resets the body once.
 ```sh
 kilo status                  # HELLO, mode, attitude, battery, link stats (--json)
 kilo monitor                 # live telemetry table; Ctrl-C to quit
+kilo monitor --passive --duration 20   # send nothing; timeline of events and changes
 kilo posture stand           # holds the posture until Ctrl-C (or --for SECONDS)
+kilo posture stand --for 2 --then-watch 15   # hold, go silent, print the watchdog timeline
 kilo cal [show] | cal set JOINT DEG | cal save | cal revert
 kilo param list | param get ID | param set ID VALUE [--persist]   # ID = number or name
 kilo pca                     # read back the 16 PCA9685 OFF counts
@@ -107,6 +109,48 @@ There is no daemon yet, so each command opens the port itself. Goals are only
 held while the mind is alive: when `kilo posture` exits, heartbeats stop and
 the body's watchdog stops motion at 0.5 s and moves to REST at 1.5 s. That is
 by design (§4).
+
+### Watching the body on its own (passive)
+
+Every command keeps the body's link watchdog fed while it runs (HELLO_REQ on
+connect, heartbeats after 100 ms of silence, the 5 Hz goal refresh), and only
+one process can hold the port, so neither `kilo status` nor `kilo monitor`
+can watch the watchdog timeline. Two modes send nothing at all:
+
+- `kilo monitor --passive [--duration S]` opens the port and only listens.
+  The body needs nothing from the mind for its streams: TELEMETRY flows from
+  boot at the TELEM_DIV rate (25 Hz), and EVENTs and the boot HELLO are sent
+  unprompted. Not a single byte is written, so the watchdog is not fed and,
+  on a body nobody has talked to since boot, not even armed. Opening the port
+  can still reset the body over DTR (see "DTR and resets").
+- `kilo posture P --for S --then-watch T` holds P for S seconds, then stops
+  writing at once (`SerialLink.go_silent()`: latched goals and queued frames
+  are dropped, no final refresh, every later write is refused under the TX
+  lock) and prints the same timeline for T seconds. It prints the host time of
+  the last frame and the last HEARTBEAT it sent; t=0 is the last frame, which
+  is when the watchdog was last fed.
+
+Timeline lines carry seconds since t=0 at 0.1 s resolution: every EVENT, each
+change of TELEMETRY mode, epoch, owners and flags (DIST_FRESH and OVERRUN
+flicker and are left out), and a telemetry summary every second. The watchdog
+from a held STAND reads (on the virtual body with `WD_LIMP_S` 1):
+
+```
+silent: last frame HEARTBEAT sent at 18:44:39.249 (t=0), last HEARTBEAT at 18:44:39.249 (t=+0.00); watching 3.5 s
+   +0.0s  state: mode IDLE  epoch 0  owners IDLE/IDLE  flags link_ok,servos_powered
+   +0.5s  EVENT WATCHDOG arg=0 tick=68 epoch=1
+   +0.5s  mode IDLE -> LINK_LOST  (watchdog stage 1: stop)
+   +0.5s  epoch 0 -> 1
+   +0.5s  flags -link_ok
+   +1.5s  owners IDLE/IDLE -> REFLEX/REFLEX  (reflex took over: watchdog REST)
+   +2.5s  flags -servos_powered  (servos off: LIMP)
+```
+
+The mode stays LINK_LOST through REST and LIMP (the body reports LINK_LOST
+while any watchdog stage is active); REST shows as the REFLEX owner, LIMP as
+`servos_powered` going away. On the real body LIMP comes `WD_LIMP_S` after the
+1 s REST move ends (1.5 + 1 + 10 = 12.5 s by default); the virtual body
+starts the LIMP timer at the REST trip (11.5 s).
 
 ### Flashing
 
