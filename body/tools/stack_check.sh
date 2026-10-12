@@ -28,7 +28,7 @@ LDFLAGS="-Wl,--relax"
 PY="${PYTHON:-python3}"
 
 mkdir -p "$BUILD"
-LTRANS="$BUILD/ltrans"
+LTRANS="$BUILD.ltrans"  # outside the build dir: arduino-cli may wipe that
 rm -rf "$LTRANS"
 mkdir -p "$LTRANS"
 args=(compile --fqbn arduino:avr:uno --build-path "$BUILD"
