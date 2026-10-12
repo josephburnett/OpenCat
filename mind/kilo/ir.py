@@ -136,10 +136,14 @@ class RemoteControl:
     STANCE).
     """
 
-    def __init__(self, client: Any, settle_s: float = 1.0, sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, client: Any, settle_s: float = 1.0, sleep: Callable[[float], None] = time.sleep,
+                 balance_kp: float | None = None):
+        from kilo.body.client import BALANCE_KP
+
         self.client = client
         self.settle_s = settle_s  # the default posture move is 0.5 s
         self.sleep = sleep
+        self.balance_kp = BALANCE_KP if balance_kp is None else balance_kp  # CH+ on: the daemon's --balance Kp
         self.pattern = "trot"
         self.direction: str | None = None  # the walk the remote started, None when not walking
 
@@ -197,6 +201,6 @@ class RemoteControl:
             return f"trick {action.name}"
         if action.kind == "balance_toggle":
             on = not self.balance_enabled()
-            c.set_balance(on)
+            c.set_balance(on, kp=self.balance_kp)
             return f"balance {'on' if on else 'off'}"
         return action.kind

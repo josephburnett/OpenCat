@@ -127,7 +127,7 @@ kilo flash --no-build        # flash the last build
 kilo flash --legacy          # flash mind/firmware/opencat-legacy.hex
 kilo vbody                   # virtual body on a pty; prints the pty path
 kilo monitor --percepts      # ... plus percept flags and live percept events (tap, pet, near, startle...)
-kilo run [--behaviour] [--remote] [--kilolog]   # the daemon: owns the port, serves the socket (normally systemd)
+kilo run [--behaviour] [--remote] [--balance [KP]] [--kilolog]   # the daemon: owns the port, serves the socket (normally systemd)
 kilo daemon [status] | daemon stop   # status: port/link state, holds, behaviour, percepts, logs
 kilo log summary|replay|plot FILE ...   # log tools (same as python -m kilo.logs; see Logs)
 kilo --kilolog status        # any command: raw wire frames to ~/kilo-logs/kilo-<time>.kilolog.gz
@@ -282,7 +282,8 @@ something at least every 3 s (`RemoteBody` pings while `kilo posture` or
 ends the way `kilo posture --for` ends without a daemon, minus the 0.5 s stop
 stage: the daemon latches REST at once and LIMP 10 s later (`kilo run
 --idle-posture rest|limp|none`, `--idle-limp S`), and switches a balance
-enable off. With a behaviour runner, the daemon only drops the goal. The idle
+enable off (or back to on with `kilo run --balance [KP]`, below). With a
+behaviour runner, the daemon only drops the goal. The idle
 REST is latched whenever a hold that owned the posture (or a trick) ends and
 nobody else owns one, even if another client still holds `set_balance`; a
 balance-only hold that ends switches balance off and leaves the posture
@@ -367,7 +368,7 @@ keys through the daemon's own BodyClient:
 |---|---|---|---|
 | CH- | 0xA2 | rest | posture rest |
 | CH | 0x62 | forward | walk forward (the selected pattern's stride) |
-| CH+ | 0xE2 | gyro toggle | balance on/off (SET_BALANCE, default gains) |
+| CH+ | 0xE2 | gyro toggle | balance on/off (SET_BALANCE; Kp from `--balance`, else the default) |
 | \|<< | 0x22 | left | turn left in place (turn 20 mm) |
 | >>\| | 0x02 | stand | posture stand |
 | >\|\| | 0xC2 | right | turn right in place |
@@ -404,6 +405,18 @@ logged and ignored while the behaviour runner is active, while the port is
 released for flashing, and while a client holds the posture, a trick or a
 walk (the balance key: while a client holds SET_BALANCE). `kilo daemon` shows
 `remote on, last key ...`.
+
+**Balance by default.** `kilo run --balance [KP]` (off by default) latches
+SET_BALANCE on with the given Kp (default 0.5, the firmware's; 0.99 levels
+the whole slope and passed H13 on Kilo) at start, again after a port release
+for flashing, and whenever a client's balance hold ends (instead of switching
+balance off). Nobody owns it, like the idle latch, and it is not an epoch
+goal, so the link keeps sending it across a body reboot: Kilo wakes up
+balancing whenever it stands or sits, and walks with the gait's balance flag
+using the same gains. The remote's CH+ toggles it off and on again with that
+Kp; a client's `kilo balance off` holds it off until the client goes away.
+`kilo daemon` shows `balance on by default (Kp ...)`. On the Pi:
+`KILO_RUN_ARGS=--remote --balance 0.99` in `~/.config/kilo/env` (the owner's choice, 2026-10-11).
 
 **Logs of the daemon.** `kilo run` writes its own log to
 `<log-dir>/daemon.log` (`~/kilo-logs/daemon.log`, rotating at 1 MB, 3 old
@@ -444,6 +457,7 @@ systemctl --user stop kilo       # before `kilo monitor --passive` or the hardwa
 cd ~/OpenCat && git pull                       # pip install -e: the update is live
 nano ~/.config/kilo/env                        # KILO_PORT=/dev/ttyACM0
                                                # KILO_RUN_ARGS=--behaviour --kilolog
+                                               # (or --remote --balance: the remote, balance always on)
 systemctl --user restart kilo
 kilo daemon                                    # behaviour running, link up, raw log path
 kilo monitor --percepts                        # percept flags and events, through the daemon

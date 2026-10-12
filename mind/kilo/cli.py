@@ -10,7 +10,7 @@
     kilo param list | get ID | set ID VALUE [--persist]
     kilo flash [--legacy] [--no-build] [--hex FILE] [--reset auto|gpio|dtr|none] [--verify-timeout S] [--force]
     kilo vbody [--fall-after S] [--no-keys]
-    kilo run [--port P] [--socket PATH] [--log] [--kilolog [FILE]] [--behaviour] [--remote]
+    kilo run [--port P] [--socket PATH] [--log] [--kilolog [FILE]] [--behaviour] [--remote] [--balance [KP]]
     kilo daemon [status|stop]
     kilo log summary|replay|plot FILE ...
     kilo --kilolog [FILE] COMMAND ...    (also: kilo monitor --percepts; kilo.cli_tools)
@@ -198,6 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start kilo.behaviour.runner.run_behaviour if it is installed")
     s.add_argument("--remote", action="store_true",
                    help="act on the IR remote's keys (EVENT IR_KEY; key map in kilo.ir and mind/README.md)")
+    s.add_argument("--balance", nargs="?", const=BALANCE_KP, type=float, default=None, metavar="KP",
+                   help=f"balance on by default: latch SET_BALANCE with this Kp (default {BALANCE_KP}; "
+                        "0.99 levels the whole slope) at start, after a client's balance hold and after a "
+                        "port release; the remote's CH+ toggles it")
     s.add_argument("--idle-posture", choices=("rest", "limp", "none"), default="rest",
                    help="what the daemon latches when a client's hold ends (default rest, then limp)")
     s.add_argument("--idle-limp", type=float, default=10.0, metavar="S",
@@ -801,6 +805,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     print(f"behaviour   {info['behaviour']}")
     if "remote" in info:
         print(f"remote      {info['remote']}")
+    if info.get("balance_default") is not None:
+        print(f"balance     on by default (Kp {info['balance_default']:.2f}); off only via CH+ or a client")
     print(f"frame log   {info['log_file'] or '-'}")
     return EXIT_OK
 

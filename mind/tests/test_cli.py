@@ -12,6 +12,12 @@ def test_parse_status_and_globals():
     assert parse_args(["--log-file", "x.jsonl", "monitor"]).log_file == "x.jsonl"
 
 
+def test_parse_run_balance():
+    assert parse_args(["run"]).balance is None
+    assert parse_args(["run", "--balance"]).balance == 0.5
+    assert parse_args(["run", "--remote", "--balance", "0.99"]).balance == 0.99
+
+
 def test_parse_posture():
     a = parse_args(["posture", "stand", "--transition", "50", "--for", "2"])
     assert (a.name, a.transition, a.hold) == ("stand", 50, 2.0)

@@ -103,8 +103,9 @@ class FakeClient:
     def start_trick(self, t):
         self.calls.append(("start_trick", t.name))
 
-    def set_balance(self, on):
+    def set_balance(self, on, **gains):
         self.calls.append(("set_balance", on))
+        self.gains = gains
 
 
 @pytest.mark.parametrize("mode,expected", [
@@ -162,7 +163,10 @@ def test_remote_walking():
 def test_remote_balance_toggle(balance, on):
     c = FakeClient(balance=balance)
     ir.RemoteControl(c).perform(ir.action_for(0xE2))
-    assert c.calls == [("set_balance", on)]
+    assert c.calls == [("set_balance", on)] and c.gains == {"kp": 0.5}  # the firmware default Kp
+    c = FakeClient(balance=balance)
+    ir.RemoteControl(c, balance_kp=0.99).perform(ir.action_for(0xE2))  # kilo run --balance 0.99
+    assert c.gains == {"kp": 0.99}
 
 
 # ---- the daemon with --remote, keys injected by the virtual body -----------------------------
@@ -195,6 +199,22 @@ def test_daemon_remote_keys(start_daemon):  # noqa: F811
         vb.ir_key(0x18)
         body.spin(0.4)
         assert vb.posture == "STAND"
+    finally:
+        body.close()
+
+
+def test_daemon_remote_toggles_the_default_balance(start_daemon):  # noqa: F811
+    d, vb, path, sock = start_daemon(remote=True, balance_kp=0.99)
+    body = remote(sock)
+    try:
+        body.wait_ready(3)
+        assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253)
+        vb.ir_key(0xE2)  # CH+: off (stays off: the remote is not a client hold)
+        assert wait_for(lambda: vb.balance["enable"] == 0)
+        time.sleep(0.5)
+        assert vb.balance["enable"] == 0
+        vb.ir_key(0xE2)  # CH+: on again, with the daemon's default gains
+        assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253)
     finally:
         body.close()
 

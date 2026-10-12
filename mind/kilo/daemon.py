@@ -117,6 +117,16 @@ client goal. Keys are logged and ignored while the behaviour runner is
 active, while the port is released, and while a client holds the posture, a
 trick or the gait (the balance key: while a client holds SET_BALANCE).
 
+Balance by default (``--balance [KP]``, off by default; the owner's request
+2026-10-11: Kilo wakes up balancing). The daemon latches SET_BALANCE enable
+with the default gains (Kp as given, default kilo.body.client.BALANCE_KP)
+at start and after a port release, owned by nobody like the idle latch;
+SET_BALANCE is not an epoch goal, so the link keeps refreshing it across a
+body reboot. A client's balance hold that ends goes back to the default
+(on) instead of off; the remote's CH+ key toggles it off until the next
+CH+ or the next client hold that ends. ``daemon`` reports ``balance_default``
+(the Kp, or None).
+
 Gait (P2). ``walk {stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm,
 body_h_mm, bob, wag, balance, override}`` (BodyClient.walk; the session owns
 SET_GAIT like a posture, and the posture goal is dropped: the gait replaces
@@ -212,7 +222,7 @@ class Daemon:
                  idle_limp_s: float = 10.0, hold_lease_s: float = 3.0, behaviour: bool = False,
                  log_dir: Path | None = None, release_lease_s: float = 120.0, workers: int = 8,
                  wire_logger: Any = None, auto_port: bool = False, log_cap_bytes: int = LOG_DIR_MAX_BYTES,
-                 keep_logs: Any = (), remote: bool = False):
+                 keep_logs: Any = (), remote: bool = False, balance_kp: float | None = None):
         if idle_posture not in IDLE_POSTURES:
             raise ValueError(f"idle posture must be one of {IDLE_POSTURES}")
         self.port = port
@@ -234,6 +244,7 @@ class Daemon:
         self.remote = remote
         self._remote_lock = threading.Lock()  # one remote action at a time
         self.remote_last: str | None = None   # the last remote key acted on (op_daemon)
+        self.balance_kp = balance_kp          # --balance: SET_BALANCE on by default with this Kp (None = off)
         self.log_dir = Path(log_dir) if log_dir else Path.home() / "kilo-logs"
         self.release_lease_s = release_lease_s
         self.pool = concurrent.futures.ThreadPoolExecutor(workers, thread_name_prefix="kilo-daemon")
@@ -320,11 +331,12 @@ class Daemon:
         if self.remote:
             from kilo.ir import RemoteControl
 
-            self._remote_control = RemoteControl(self.client)
+            self._remote_control = RemoteControl(self.client, balance_kp=self.balance_kp)
             self.link.subscribe("event", self._on_ir_key)
         self.percepts.add_listener(self._percept_events)
         self.link.mark_alive("daemon")
         self.link.start()
+        self._latch_balance_default()
         self._server = await asyncio.start_unix_server(self._handle_client, path=str(self.socket_path),
                                                        limit=LINE_LIMIT)
         try:
@@ -532,6 +544,17 @@ class Daemon:
         except (LinkError, ValueError) as e:
             log.warning("idle %s: %s", name, e)
 
+    def _latch_balance_default(self) -> None:
+        """``--balance``: SET_BALANCE on with the default gains, owned by nobody."""
+        if self.balance_kp is None:
+            return
+        try:
+            f = self.client.set_balance(True, kp=self.balance_kp)
+            self.goal_owner["SET_BALANCE"] = None
+            log.info("balance on by default (Kp %.2f)", f["kp_q8"] / 256)
+        except (LinkError, ValueError) as e:
+            log.warning("balance default: %s", e)
+
     def _end_hold(self, s: Session) -> None:
         names = [n for n in s.goals if self.goal_owner.get(n) is s]
         s.goals.clear()
@@ -570,14 +593,17 @@ class Daemon:
                 link.clear_goal(n)
             return
         if "SET_BALANCE" in names:
-            g = link.goals().get("SET_BALANCE")
-            fields = dict(g.fields) if g is not None else {}
-            if fields:
-                fields["enable"] = 0
-                try:
-                    link.set_goal("SET_BALANCE", **fields)  # latched off, refreshed
-                except ValueError:
-                    link.clear_goal("SET_BALANCE")
+            if self.balance_kp is not None:
+                self._latch_balance_default()  # --balance: back to on with the default gains
+            else:
+                g = link.goals().get("SET_BALANCE")
+                fields = dict(g.fields) if g is not None else {}
+                if fields:
+                    fields["enable"] = 0
+                    try:
+                        link.set_goal("SET_BALANCE", **fields)  # latched off, refreshed
+                    except ValueError:
+                        link.clear_goal("SET_BALANCE")
         if "SET_POSTURE" in names:
             link.clear_goal("SET_POSTURE")
         for n in names:
@@ -851,6 +877,7 @@ class Daemon:
                 "clients": len(self.sessions), "port_released": self.port_released,
                 "behaviour": self.behaviour_state, "remote": ("off" if not self.remote else
                                                              f"on, last key {self.remote_last or '-'}"),
+                "balance_default": self.balance_kp,
                 "connected": st.connected, "alive": st.alive,
                 "port_present": bool(self.port) and os.path.exists(self.port),
                 "connected_for_s": round(now - st.connected_since, 1)
@@ -1094,6 +1121,7 @@ class Daemon:
         self.release_until = None
         self.link.mark_alive("daemon")
         self.link.start()
+        self._latch_balance_default()
         log.info("port %s reacquired", self.port)
 
     def _settle(self) -> None:
@@ -1250,7 +1278,8 @@ def run_daemon(args: Any) -> int:
     keep = [log_dir / "daemon.log"] if daemon_log != "none" and not daemon_log else []
     d = Daemon(choice.port, baud=args.baud, socket=args.socket, logger=logger,
                idle_posture=args.idle_posture, idle_limp_s=args.idle_limp, behaviour=args.behaviour,
-               remote=getattr(args, "remote", False), log_dir=log_dir, wire_logger=wire,
+               remote=getattr(args, "remote", False), balance_kp=getattr(args, "balance", None),
+               log_dir=log_dir, wire_logger=wire,
                auto_port=not explicit, keep_logs=keep)
     return d.run()
 

@@ -208,6 +208,51 @@ def test_hold_ends_when_the_client_disconnects(start_daemon):
     assert vb.wd_stage == 0
 
 
+def test_balance_on_by_default(start_daemon):
+    """kilo run --balance [KP]: SET_BALANCE latched on at start, owned by nobody;
+    a client's balance hold ending goes back to on; it survives a body reboot
+    and a port release."""
+    d, vb, path, sock = start_daemon(balance_kp=0.99)
+    body = remote(sock)
+    try:
+        body.wait_ready(3)
+        assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253)
+        info = body.conn.call("daemon")
+        assert info["balance_default"] == 0.99 and info["held_goals"] == []
+        # a client turns it off and holds that; when its hold ends, back to the default
+        body.set_balance(False, kp=0.3)
+        assert wait_for(lambda: vb.balance["enable"] == 0 and vb.balance["kp_q8"] == 77)
+        assert body.conn.call("daemon")["held_goals"] == ["SET_BALANCE"]
+        body.release()
+        assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253)
+        assert body.conn.call("daemon")["held_goals"] == []
+        # a body reboot: the goal is not an epoch goal, so the link keeps sending it
+        vb.reboot()
+        assert wait_for(lambda: vb.balance["enable"] == 0, 3)  # power-on state
+        assert wait_for(lambda: vb.balance["enable"] == 1, 5)
+        # a port release drops every goal; the reacquire latches the default again
+        body.conn.call("release_port", lease_s=30)
+        assert body.link.goals() == {}
+        body.conn.call("reacquire_port")
+        body.wait_ready(3)
+        assert wait_for(lambda: "SET_BALANCE" in d.link.goals(), 3)  # the daemon's own latch, not a client's
+        assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253, 3)
+    finally:
+        body.close()
+
+
+def test_balance_default_off_without_the_flag(start_daemon):
+    d, vb, path, sock = start_daemon()
+    body = remote(sock)
+    try:
+        body.wait_ready(3)
+        body.spin(0.5)
+        assert vb.balance["enable"] == 0 and body.link.goals() == {}
+        assert body.conn.call("daemon")["balance_default"] is None
+    finally:
+        body.close()
+
+
 def test_hold_lease_lapses_without_pings(start_daemon):
     d, vb, path, sock = start_daemon()
     body = remote(sock)
