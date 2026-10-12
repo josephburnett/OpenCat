@@ -14,13 +14,16 @@ from kilo.link.codec import DecodeError, Frame, KiloCodec
 from kilo.link.messages import KiloMessages
 from kilo.link.serial_link import LinkConfig, SerialLink
 from kilo.link.transport import loopback_pair
+from kilo.stepclock import StepClock
 
 
 class Peer:
     """Scripted body end: records frames, optional handler answers them."""
 
-    def __init__(self, end: Any, codec: Any = None, msgs: Any = None):
+    def __init__(self, end: Any, codec: Any = None, msgs: Any = None, clock: Callable[[], float] = time.monotonic):
         self.end = end
+        self.clock = clock  # frames are stamped with it (a StepClock in stepped tests)
+        self.consumed = 0  # bytes read and handled
         self.codec = codec or KiloCodec()
         self.msgs = msgs or KiloMessages()
         self.dec = self.codec.new_decoder()
@@ -44,9 +47,23 @@ class Peer:
                     continue
                 name = self.msgs.name_of(f.type)
                 with self._lock:
-                    self.frames.append((time.monotonic(), name, f.seq, f.payload))
+                    self.frames.append((self.clock(), name, f.seq, f.payload))
                 if self.handler:
                     self.handler(self, name, f)
+            with self._lock:
+                self.consumed += len(data)
+
+    def sync(self, timeout: float = 5.0) -> None:
+        """Return once every byte written to this end so far has been handled."""
+        written = self.end.rx_written
+        end = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if self.consumed >= written:
+                    return
+            if time.monotonic() > end:
+                raise TimeoutError("peer did not catch up")
+            time.sleep(0.0005)
 
     def send(self, name: str, **fields: Any) -> None:
         payload = self.msgs.pack(name, **fields)
@@ -93,6 +110,10 @@ class Peer:
         self.send("ACK", seq=seq, type=type, status=status)
 
 
+def count(peer: "Peer", name: str) -> int:
+    return len(peer.of(name))
+
+
 FAST = dict(liveness_window_s=0.3, hello_solicit_window_s=0.3, reconnect_min_s=0.02,
             reconnect_max_s=0.1)
 
@@ -101,14 +122,23 @@ FAST = dict(liveness_window_s=0.3, hello_solicit_window_s=0.3, reconnect_min_s=0
 def make_link():
     made: list[tuple[SerialLink, Peer]] = []
 
-    def factory(**cfg: Any) -> tuple[SerialLink, Peer]:
+    def factory(stepped: bool = False, **cfg: Any) -> tuple[SerialLink, Peer]:
+        """``stepped=True``: link and peer share a StepClock (``link.clock``);
+        time moves only on ``link.clock.step(dt)``, which returns once the
+        link's writer and the peer have caught up."""
         a, b = loopback_pair()
         conf = LinkConfig(**{**FAST, **cfg})
+        clock = StepClock() if stepped else time.monotonic
         link = SerialLink(lambda: a, codec=KiloCodec(), messages=KiloMessages(), config=conf,
-                          port_name="loopback")
-        peer = Peer(b)
+                          port_name="loopback", clock=clock)
+        peer = Peer(b, clock=clock)
         link.mark_alive()
         link.start()
+        if stepped:
+            clock.attach(link.sync)
+            clock.attach(peer.sync)
+            assert peer.wait_for(lambda: peer.of("HELLO_REQ"), 2)
+            clock.settle()  # the connect's HELLO_REQ (and first HEARTBEAT) are out and read
         made.append((link, peer))
         return link, peer
 
@@ -116,6 +146,47 @@ def make_link():
     for link, peer in made:
         link.stop()
         peer.stop()
+
+
+def stepped_alive(link: SerialLink, seconds: float, dt: float = 0.01,
+                  each: Callable[[], Any] | None = None) -> None:
+    """The stepped ``keep_alive``: the mind stamps liveness before every step."""
+    def tick() -> None:
+        link.mark_alive()
+        if each is not None:
+            each()
+    link.clock.run(seconds, dt, tick)
+
+
+class Background:
+    """Run ``fn()`` on a thread (a ``request()`` blocked on a StepClock while
+    the test steps time). ``result()`` joins and returns or re-raises;
+    ``ended_at`` is the link clock when it returned or raised."""
+
+    def __init__(self, fn: Callable[[], Any], clock: Callable[[], float]):
+        self.value: Any = None
+        self.error: BaseException | None = None
+        self.ended_at: float | None = None
+
+        def run() -> None:
+            try:
+                self.value = fn()
+            except BaseException as e:  # re-raised by result()
+                self.error = e
+            finally:
+                self.ended_at = clock()
+        self._t = threading.Thread(target=run, daemon=True)
+        self._t.start()
+
+    def done(self) -> bool:
+        return not self._t.is_alive()
+
+    def result(self, timeout: float = 2.0) -> Any:
+        self._t.join(timeout)
+        assert not self._t.is_alive(), "background call did not return"
+        if self.error is not None:
+            raise self.error
+        return self.value
 
 
 def keep_alive(link: SerialLink, seconds: float, period: float = 0.02) -> None:

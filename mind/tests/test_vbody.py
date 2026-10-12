@@ -1,5 +1,11 @@
 """Link + client against the virtual body (real codec and messages over a
-loopback), and the virtual body's P0 dispatch contract driven synchronously."""
+loopback), and the virtual body's P0 dispatch contract driven synchronously.
+
+``rig(stepped=True)``: the link and the virtual body share one StepClock;
+``link.clock.step(dt)`` returns once the link's writer has run at the new
+time and the virtual body has done its ticks and read what the link wrote.
+Stepped tests first step 10 ms so that later steps of 20 ms never land on
+the body's 50 Hz tick boundaries."""
 
 import time
 
@@ -11,9 +17,10 @@ from kilo.link.serial_link import CommandError, LinkConfig, SerialLink
 from kilo.link.transport import loopback_pair, open_port
 from kilo.protocol import kilo_link_codec as C
 from kilo.protocol import kilo_protocol as P
+from kilo.stepclock import StepClock
 from kilo.vbody.sim import VirtualBody, open_pty
 
-from conftest import FAST, keep_alive
+from conftest import FAST, keep_alive, stepped_alive
 
 EV = consts.EventCode
 S = P.AckStatus
@@ -24,13 +31,17 @@ R = P.GoalRefusedReason
 def rig():
     made = []
 
-    def make(**vb_kw):
+    def make(stepped=False, **vb_kw):
         a, b = loopback_pair()
-        vb = VirtualBody(b, **vb_kw).start()
-        link = SerialLink(lambda: a, config=LinkConfig(**FAST), port_name="loopback")
+        clock = StepClock() if stepped else time.monotonic
+        vb = VirtualBody(b, clock=clock, **vb_kw).start()
+        link = SerialLink(lambda: a, config=LinkConfig(**FAST), port_name="loopback", clock=clock)
         link.mark_alive()
         link.start()
         client = BodyClient(link)
+        if stepped:
+            clock.attach(link.sync)
+            clock.attach(vb.sync)
         made.append((link, vb))
         return client, vb
 
@@ -44,25 +55,50 @@ def _events(client, name):
     return [e for _, e in client.state.events if e.code == consts.EV[name]]
 
 
+def _until(link, pred, seconds, dt=0.02):
+    """The stepped ``wait_until``: step (mind alive) until ``pred()`` or
+    ``seconds`` of clock time; the link's reader gets a real-time grace."""
+    end = link.clock() + seconds
+    while not pred() and link.clock() < end:
+        link.mark_alive()
+        link.clock.step(dt)
+    return link.wait_until(pred, 0.5)
+
+
+def _ready_stepped(client):
+    """wait_ready on a stepped rig: HELLO comes at boot, telemetry needs ticks."""
+    link = client.link
+    hello = client.wait_ready(2, require_telemetry=False)
+    stepped_alive(link, 0.01)  # off the 20 ms tick grid from here on
+    stepped_alive(link, 0.04, 0.02)
+    assert link.wait_until(lambda: link.state.alive, 1)
+    return hello
+
+
 # ---- link + client against the running vbody ----------------------------------------
 
 def test_ready_telemetry_and_posture(rig):
-    client, vb = rig()
-    hello = client.wait_ready(2)
+    client, vb = rig(stepped=True)
+    hello = _ready_stepped(client)
     assert hello.reset_cause == P.ResetCause.COLD and client.state.reset_cause == "COLD"
     assert hello.proto_major == P.PROTO_MAJOR and hello.joint_count == P.JOINT_COUNT
-    keep_alive(client.link, 0.4)
-    n = len(client.state.history)
-    assert 6 <= n <= 14, n  # 25 Hz
+    k0 = vb.tick
+    stepped_alive(client.link, 0.4, 0.02)
+    k1 = vb.tick
+    assert k1 - k0 == 20  # 50 Hz ticks
+    assert client.link.wait_until(lambda: client.state.tick >= k1 - 1, 1)
+    n = len([m for _, m in client.state.history if k0 < m.tick <= k1])
+    assert n == 10, n  # TELEM_DIV 2: 25 Hz
+    link = client.link
     client.stand()
-    assert client.link.wait_until(lambda: vb.posture == "STAND", 1)
+    assert _until(link, lambda: vb.posture == "STAND", 1)
     client.sit()
-    assert client.link.wait_until(lambda: vb.posture == "SIT", 1)
-    assert client.link.wait_until(lambda: client.state.mode == "IDLE", 0.5)
+    assert _until(link, lambda: vb.posture == "SIT", 1)
+    assert _until(link, lambda: client.state.mode == "IDLE", 0.5)
     client.balance()
-    assert client.link.wait_until(lambda: vb.posture == "STAND", 1)
-    assert client.link.goals()["SET_POSTURE"].fields["flags"] == 1
-    assert client.link.wait_until(lambda: client.state.snapshot()["balance"], 1)
+    assert _until(link, lambda: vb.posture == "STAND", 1)
+    assert link.goals()["SET_POSTURE"].fields["flags"] == 1
+    assert _until(link, lambda: client.state.snapshot()["balance"], 1)
 
 
 def test_balance_goal_and_flag(rig):
@@ -133,65 +169,91 @@ def test_every_client_command(rig):
 
 
 def test_ack_dedup_against_vbody(rig):
-    client, vb = rig()
-    client.wait_ready(2)
+    client, vb = rig(stepped=True)
+    _ready_stepped(client)
     link = client.link
     seq = 200
     for _ in range(2):  # a retry after a lost ACK: same seq and type
         link._txq.put((consts.TYPES["CAL_SAVE"], seq, b"", "CAL_SAVE"))
-    keep_alive(link, 0.4)
+    stepped_alive(link, 0.4, 0.02)  # the save takes 0.1 s
+    assert link.wait_until(lambda: link.state.stats.dup_acks + link.state.stats.unmatched_acks == 2, 1)
+    assert link.wait_until(lambda: _events(client, "EEPROM_SAVED"), 1)
+    stepped_alive(link, 0.2, 0.02)
     assert len(_events(client, "EEPROM_SAVED")) == 1  # executed once, acked twice
     assert link.state.stats.dup_acks + link.state.stats.unmatched_acks == 2
 
 
 def test_fall_clears_goals_and_bumps_epoch(rig):
-    client, vb = rig()
-    client.wait_ready(2)
+    client, vb = rig(stepped=True)
+    link = client.link
+    clock = link.clock
+    _ready_stepped(client)
     client.stand()
-    keep_alive(client.link, 0.1)
+    stepped_alive(link, 0.1, 0.02)
     e0 = client.state.epoch
     cleared = []
-    client.link.subscribe("goals_cleared", lambda r, n: cleared.append(r))
+    link.subscribe("goals_cleared", lambda r, n: cleared.append(r))
+    t_fall = clock()
     vb.trigger_fall(-1)
-    assert client.link.wait_until(lambda: bool(cleared), 1)
+    assert link.wait_until(lambda: bool(cleared), 1)
     assert cleared[0] == "FELL"
     assert client.state.epoch == (e0 + 1) & 0xFF
-    assert "SET_POSTURE" not in client.link.goals()
-    assert client.link.wait_until(lambda: client.state.fallen, 0.5)
+    assert "SET_POSTURE" not in link.goals()
+    assert _until(link, lambda: client.state.fallen, 0.5)
     # a goal from the old epoch is refused as STALE by the body and dropped by the link
-    client.link.set_goal("SET_POSTURE", posture=3, transition_ticks=0, flags=0)
-    client.link._goals["SET_POSTURE"].epoch = e0
-    assert client.link.wait_until(lambda: "SET_POSTURE" not in client.link.goals(), 1)
-    assert client.link.wait_until(lambda: _events(client, "RECOVERED"), 3)
+    link.set_goal("SET_POSTURE", posture=3, transition_ticks=0, flags=0)
+    link._goals["SET_POSTURE"].epoch = e0
+    assert link.wait_until(lambda: "SET_POSTURE" not in link.goals(), 1)
+    # 1 s down, then a 1 s recovery (from the first tick after the fall ends)
+    stepped_alive(link, t_fall + 1.98 - clock(), 0.02)
+    assert vb.recover_until is not None and not _events(client, "RECOVERED")
+    stepped_alive(link, 0.08, 0.02)
+    assert vb.recover_until is None
+    assert link.wait_until(lambda: _events(client, "RECOVERED"), 1)
 
 
 def test_watchdog_when_mind_stalls(rig):
-    client, vb = rig()
-    client.wait_ready(2)
+    client, vb = rig(stepped=True)
+    link = client.link
+    clock = link.clock
+    _ready_stepped(client)
     client.stand()
-    keep_alive(client.link, 0.2)
+    stepped_alive(link, 0.2, 0.02)
     assert vb.posture == "STAND"
     cleared = []
-    client.link.subscribe("goals_cleared", lambda r, n: cleared.append(r))
-    # stall: no mark_alive. Liveness window 0.3 s + body watchdog 0.5 s
-    time.sleep(1.2)
+    link.subscribe("goals_cleared", lambda r, n: cleared.append(r))
+    # stall: no mark_alive from m. The link goes quiet at the end of its
+    # liveness window (0.3 s here); the body's watchdog stops it 0.5 s after
+    # the last frame it got (WD_STOP_MS).
+    link.mark_alive()
+    m = clock()
+    clock.run(0.32, 0.02)
+    last = link.last_tx[0]
+    assert m < last < m + 0.3
+    assert vb.last_rx_at == last  # the body got it in the same step
+    clock.run(last + 0.49 - clock(), 0.02)  # small steps: the body keeps streaming telemetry
+    assert link.last_tx[0] == last  # nothing more from a stalled mind
+    assert vb.wd_stage == 0  # silent for 0.49 s
+    clock.step(0.03)  # a body tick at last+0.51 has run
     assert vb.wd_stage >= 1
-    assert cleared == ["WATCHDOG"]
-    assert client.state.mode == "LINK_LOST"
+    assert link.wait_until(lambda: cleared == ["WATCHDOG"], 1), cleared
+    clock.step(0.02)  # the next telemetry (25 Hz) reports it
+    assert link.wait_until(lambda: client.state.mode == "LINK_LOST", 1)
     # mind resumes: heartbeats flow, body reports LINK_RESTORED
-    keep_alive(client.link, 0.3)
-    assert _events(client, "LINK_RESTORED")
-    assert "SET_POSTURE" not in client.link.goals()
+    stepped_alive(link, 0.3, 0.02)
+    assert vb.wd_stage == 0
+    assert link.wait_until(lambda: _events(client, "LINK_RESTORED"), 1)
+    assert "SET_POSTURE" not in link.goals()
 
 
 def test_reboot_detected(rig):
-    client, vb = rig()
-    client.wait_ready(2)
-    keep_alive(client.link, 0.4)
+    client, vb = rig(stepped=True)
+    _ready_stepped(client)
+    stepped_alive(client.link, 0.4, 0.02)  # past the HELLO solicitation window (0.3 s here)
     reboots = []
     client.link.subscribe("reboot", lambda h, why: reboots.append(why))
     vb.reboot(P.ResetCause.WARM_UNEXPECTED)
-    assert client.link.wait_until(lambda: bool(reboots), 1)
+    assert _until(client.link, lambda: bool(reboots), 0.2)
     assert client.state.reset_cause == "WARM_UNEXPECTED"
 
 

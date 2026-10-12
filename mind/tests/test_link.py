@@ -1,3 +1,14 @@
+"""SerialLink against a scripted peer over a loopback.
+
+Timing rules (heartbeat, liveness window, goal refresh, HELLO polling, ACK
+timeout and retries, reconnect backoff) are tested on a StepClock
+(``make_link(stepped=True)``): time moves only on ``clock.step(dt)``, which
+returns once the link's writer has run at the new time and the peer has read
+what it wrote. "Nothing was sent" is then exact, and periods are checked on
+both sides of their boundary. Steps avoid landing exactly on a boundary: the
+link compares float clock differences.
+"""
+
 import asyncio
 import threading
 import time
@@ -7,12 +18,14 @@ import pytest
 from kilo.link import consts
 from kilo.link.serial_link import CommandError, LinkConfig, LinkTimeout, SerialLink
 from kilo.link.transport import loopback_pair
+from kilo.stepclock import StepClock
 
-from conftest import FAST, Peer, keep_alive
+from conftest import FAST, Background, Peer, count, stepped_alive
 from kilo.link.codec import KiloCodec
 from kilo.link.messages import KiloMessages
 
 T = consts.TYPES
+EPS = 1e-6
 
 
 def test_connect_sends_hello_req(make_link):
@@ -22,55 +35,81 @@ def test_connect_sends_hello_req(make_link):
 
 
 def test_heartbeat_only_while_mind_alive(make_link):
-    link, peer = make_link()
-    keep_alive(link, 0.6)
-    n = len(peer.of("HEARTBEAT"))
-    assert n >= 4, n  # ~100 ms of silence each
-    # mind stalls: within the liveness window (0.3 s here) heartbeats stop
-    time.sleep(0.4)
-    t0 = time.monotonic()
-    time.sleep(0.5)
-    assert peer.of("HEARTBEAT", since=t0) == []
-    assert peer.of("HELLO_REQ", since=t0) == []  # no autonomous polling either
-    # and resume
-    t1 = time.monotonic()
-    keep_alive(link, 0.35)
-    assert len(peer.of("HEARTBEAT", since=t1)) >= 2
+    # HELLO polling off here (no telemetry: the body is "lost" and would be
+    # polled); test_body_lost_after_300ms_and_hello_polling covers it.
+    link, peer = make_link(stepped=True, hello_poll_s=1e6)
+    clock = link.clock
+    # HEARTBEAT after 100 ms of silence, not before
+    for _ in range(5):
+        n = count(peer, "HEARTBEAT")
+        link.mark_alive()
+        clock.step(0.099)
+        assert count(peer, "HEARTBEAT") == n
+        clock.step(0.002)
+        assert count(peer, "HEARTBEAT") == n + 1
+    # the mind stalls (last stamp at m): heartbeats go on inside the 0.3 s
+    # liveness window and stop at its end
+    m = clock()
+    link.mark_alive()
+    clock.step(0.101)
+    clock.step(0.101)
+    assert len(peer.of("HEARTBEAT", since=m + 0.1)) == 2  # at m+0.101 and m+0.202
+    clock.step(0.101)  # m+0.303: silent for 0.101 s, but the mind is not alive
+    clock.run(1.0, 0.01)
+    assert peer.of("HEARTBEAT", since=m + 0.3) == []
+    assert peer.frames[-1][0] < m + 0.3  # nothing autonomous at all
+    # and resume at once
+    t1 = clock()
+    link.mark_alive()
+    clock.step(0.001)
+    assert len(peer.of("HEARTBEAT", since=t1)) == 1
+    stepped_alive(link, 0.35, 0.03)
+    assert len(peer.of("HEARTBEAT", since=t1)) == 4  # every 0.12 s with 0.03 s steps
 
 
 def test_goal_sent_immediately_and_refreshed_at_5hz(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
+    clock = link.clock
     peer.telemetry(epoch=5)
     assert link.wait_until(lambda: link.state.epoch == 5, 1)
-    t0 = time.monotonic()
+    t0 = clock()
     link.set_goal("SET_POSTURE", posture=3, transition_ticks=0, flags=0)
-    assert peer.wait_for(lambda: peer.of("SET_POSTURE"), 0.1)
-    assert peer.of("SET_POSTURE")[0][0] - t0 < 0.05
-    end = time.monotonic() + 1.0
-    while time.monotonic() < end:  # a live body streams telemetry (a lost one gets no refresh)
-        peer.telemetry(epoch=5)
-        keep_alive(link, 0.04)
+    clock.settle()  # no time passes
+    assert [f[0] for f in peer.of("SET_POSTURE")] == [t0]
+    tick = [1]
+
+    def telemetry():  # a live body streams telemetry (a lost one gets no refresh)
+        tick[0] += 1
+        peer.telemetry(tick=tick[0], epoch=5)
+        assert link.wait_until(lambda: link.state.tick == tick[0], 1)
+    dt = 0.007
+    stepped_alive(link, 1.0, dt, telemetry)
     sends = peer.of("SET_POSTURE")
-    assert 5 <= len(sends) <= 8, len(sends)
+    gaps = [b[0] - a[0] for a, b in zip(sends[1:], sends[2:])]
+    assert len(sends) >= 5 and gaps, sends
+    assert all(0.2 - EPS <= g <= 0.2 + dt + EPS for g in gaps), gaps  # 5 Hz
+    assert sends[1][0] - t0 <= 0.2 + dt + EPS
     assert all(p[3][0] == 5 for p in sends)  # stamped with the epoch they were set under
 
 
 def test_goal_refresh_stops_when_mind_stalls(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
+    clock = link.clock
     peer.telemetry(epoch=1)
-    link.wait_until(lambda: link.state.epoch == 1, 1)
+    assert link.wait_until(lambda: link.state.epoch == 1, 1)
     link.set_goal("SET_EYES", led_mask=0x3F, r=1, g=2, b=3)
-    keep_alive(link, 0.3)
-    time.sleep(0.35)
-    t0 = time.monotonic()
-    time.sleep(0.5)
-    assert peer.of("SET_EYES", since=t0) == []
+    stepped_alive(link, 0.3)
+    m = clock() - 0.01  # the last liveness stamp, before the last step
+    assert count(peer, "SET_EYES") >= 2
+    clock.run(1.0, 0.01)
+    assert peer.of("SET_EYES", since=m + 0.1)  # still refreshed inside the window
+    assert peer.of("SET_EYES", since=m + 0.3) == []
 
 
 def test_goal_waits_for_first_epoch(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
     link.set_goal("SET_POSTURE", posture=1, transition_ticks=0, flags=0)
-    keep_alive(link, 0.25)
+    stepped_alive(link, 0.25)
     assert peer.of("SET_POSTURE") == []
     peer.telemetry(epoch=9)
     assert peer.wait_for(lambda: peer.of("SET_POSTURE"), 0.5)
@@ -80,7 +119,7 @@ def test_goal_waits_for_first_epoch(make_link):
 
 @pytest.mark.parametrize("ev", ["FELL", "WATCHDOG", "LOW_BATTERY"])
 def test_clearing_events_drop_motion_goals(make_link, ev):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
     cleared = []
     events = []
     link.subscribe("goals_cleared", lambda reason, names: cleared.append((reason, names)))
@@ -97,9 +136,10 @@ def test_clearing_events_drop_motion_goals(make_link, ev):
     assert set(link.goals()) == {"SET_EYES"}  # not a motion goal
     assert link.state.epoch == 3
     # nothing from before the event is replayed
-    t0 = time.monotonic()
-    keep_alive(link, 0.5)
+    t0 = link.clock()
+    stepped_alive(link, 0.5)
     assert peer.of("SET_POSTURE", since=t0) == []
+    assert len(peer.of("SET_EYES", since=t0)) >= 2  # the refresh did run meanwhile
     assert events and consts.EVENTS[events[-1].code] == ev
 
 
@@ -126,38 +166,50 @@ def test_stale_refusal_drops_goal(make_link):
     assert link.state.stats.goals_refused["SET_POSTURE:STALE"] == 1
 
 
-def _acker(statuses=None, ignore=0, names=("CAL_SAVE",), delay=0.0, ack_all=False):
+def _acker(statuses=None, ignore=0, names=("CAL_SAVE",)):
     """Handler: ignore the first `ignore` matching frames, then ACK."""
-    count = {"n": 0}
+    n = {"n": 0}
 
     def h(peer, name, f):
         if name not in names:
             return
-        count["n"] += 1
-        if count["n"] <= ignore and not ack_all:
+        n["n"] += 1
+        if n["n"] <= ignore:
             return
-        st = statuses[min(count["n"] - 1, len(statuses) - 1)] if statuses else 0
-
-        def go():
-            if delay:
-                time.sleep(delay)
-            peer.ack(f.seq, f.type, st)
-        threading.Thread(target=go, daemon=True).start() if delay else go()
+        st = statuses[min(n["n"] - 1, len(statuses) - 1)] if statuses else 0
+        peer.ack(f.seq, f.type, st)
     return h
 
 
+def _ack_deadline(clock, t):
+    """The one pending wait is the request's ACK timeout, ending at ``t``."""
+    (d,) = clock.wait_for_waiters()
+    assert abs(d - t) < EPS, (d, t)
+
+
+# On a StepClock the ACK timeout only runs out when the test steps time, so
+# "no retry" below holds however slow the machine is.
+
 def test_request_ack_ok(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
     peer.handler = _acker()
     ack = link.request("CAL_SAVE")
     assert ack.status == 0
     assert link.state.stats.retries == 0
+    assert count(peer, "CAL_SAVE") == 1
 
 
 def test_request_retries_with_same_seq(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
+    clock = link.clock
     peer.handler = _acker(ignore=2)
-    link.request("CAL_SAVE")
+    t0 = clock()
+    bg = Background(lambda: link.request("CAL_SAVE"), clock)
+    for k in (1, 2):
+        _ack_deadline(clock, t0 + 0.05 * k)
+        clock.step(0.05)
+    bg.result()
+    assert abs(bg.ended_at - (t0 + 0.1)) < EPS
     sends = peer.of("CAL_SAVE")
     assert len(sends) == 3
     assert len({s[2] for s in sends}) == 1  # de-dup relies on the same seq
@@ -165,35 +217,54 @@ def test_request_retries_with_same_seq(make_link):
 
 
 def test_request_timeout_after_three_retries(make_link):
-    link, peer = make_link()
-    t0 = time.monotonic()
+    link, peer = make_link(stepped=True)
+    clock = link.clock
+    t0 = clock()
+    bg = Background(lambda: link.request("CAL_SAVE"), clock)
+    for k in range(4):  # the first try and 3 retries, 50 ms apart
+        assert peer.wait_for(lambda: count(peer, "CAL_SAVE") == k + 1)
+        _ack_deadline(clock, t0 + 0.05 * (k + 1))
+        clock.step(0.049)
+        assert count(peer, "CAL_SAVE") == k + 1  # not early
+        clock.step(0.001)
     with pytest.raises(LinkTimeout):
-        link.request("CAL_SAVE")
-    dt = time.monotonic() - t0
-    assert len(peer.of("CAL_SAVE")) == 4
-    assert 0.18 <= dt < 0.5
+        bg.result()
+    assert abs(bg.ended_at - (t0 + 0.2)) < EPS
+    assert [round(f[0] - t0, 6) for f in peer.of("CAL_SAVE")] == [0.0, 0.05, 0.1, 0.15]
     assert link.state.stats.timeouts == 1
 
 
 def test_request_error_status(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
     peer.handler = _acker(statuses=[9])  # EEPROM_BUSY
     with pytest.raises(CommandError) as ei:
         link.request("CAL_SAVE")
     assert ei.value.status_name == "EEPROM_BUSY"
+    assert count(peer, "CAL_SAVE") == 1
 
 
 def test_late_ack_then_dedup_reack_is_counted(make_link):
-    link, peer = make_link()
-    # every copy is acked, 70 ms late: the first retry goes out, then both ACKs arrive
-    peer.handler = _acker(delay=0.07, ack_all=True)
-    link.request("CAL_SAVE")
-    assert link.wait_until(lambda: link.state.stats.dup_acks >= 1, 0.5)
+    link, peer = make_link(stepped=True)
+    clock = link.clock
+    seen = []
+    peer.handler = lambda p, name, f: seen.append(f) if name == "CAL_SAVE" else None
+    t0 = clock()
+    bg = Background(lambda: link.request("CAL_SAVE"), clock)
+    _ack_deadline(clock, t0 + 0.05)
+    clock.step(0.05)  # no ACK within 50 ms: the first retry goes out
+    assert peer.wait_for(lambda: len(seen) == 2)
+    assert seen[0].seq == seen[1].seq
+    for f in seen:  # then both ACKs arrive (the body re-acks the duplicate)
+        peer.ack(f.seq, f.type)
+    bg.result()
+    assert link.wait_until(lambda: link.state.stats.dup_acks == 1, 1)
     assert link.state.stats.unmatched_acks == 0
+    assert link.state.stats.retries == 1
 
 
 def test_query_retry_uses_fresh_seq(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
+    clock = link.clock
     n = {"k": 0}
 
     def h(p, name, f):
@@ -202,7 +273,11 @@ def test_query_retry_uses_fresh_seq(make_link):
             if n["k"] >= 2:
                 p.send("PONG", token=0x1234, tick=1)
     peer.handler = h
-    msg = link.request("PING", {"token": 0x1234})
+    t0 = clock()
+    bg = Background(lambda: link.request("PING", {"token": 0x1234}), clock)
+    _ack_deadline(clock, t0 + 0.05)
+    clock.step(0.05)
+    msg = bg.result()
     assert msg.token == 0x1234
     seqs = [s[2] for s in peer.of("PING")]
     assert len(seqs) == 2 and seqs[0] != seqs[1]
@@ -240,30 +315,44 @@ def test_reconnect_after_failure():
 
 
 def test_open_failure_backoff():
+    clock = StepClock()
     attempts = []
     a, b = loopback_pair()
-    peer = Peer(b)
+    peer = Peer(b, clock=clock)
 
     def factory():
-        attempts.append(time.monotonic())
+        attempts.append(clock())
         if len(attempts) < 3:
             raise OSError("no such device")
         return a
 
     link = SerialLink(factory, codec=KiloCodec(), messages=KiloMessages(),
-                      config=LinkConfig(**FAST))
+                      config=LinkConfig(**FAST), clock=clock)
+    t0 = clock()
     link.start()
     try:
+        # reconnect_min_s 0.02, doubling: tries at t0, t0+0.02, t0+0.06
+        (d,) = clock.wait_for_waiters()
+        assert attempts == [t0] and abs(d - (t0 + 0.02)) < EPS
+        clock.step(0.019)
+        assert len(attempts) == 1
+        clock.step(0.001)
+        assert link.wait_until(lambda: len(attempts) == 2, 1)
+        (d,) = clock.wait_for_waiters()
+        assert abs(d - (t0 + 0.06)) < EPS  # the backoff grew to 0.04
+        clock.step(0.039)
+        assert len(attempts) == 2
+        clock.step(0.001)
         assert link.wait_until(lambda: link.state.connected, 2)
+        assert [round(t - t0, 6) for t in attempts] == [0.0, 0.02, 0.06]
         assert link.state.stats.open_failures == 2
-        assert attempts[2] - attempts[1] > attempts[1] - attempts[0] - 0.005  # backoff grows
     finally:
         link.stop()
         peer.stop()
 
 
 def test_reboot_detection_unsolicited_hello(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
     reboots = []
     link.subscribe("reboot", lambda h, why: reboots.append(why))
     peer.hello(epoch=0)
@@ -271,7 +360,7 @@ def test_reboot_detection_unsolicited_hello(make_link):
     peer.telemetry(epoch=0)
     link.wait_until(lambda: link.state.epoch == 0, 1)
     link.set_goal("SET_POSTURE", posture=3, transition_ticks=0, flags=0)
-    keep_alive(link, 0.4)  # past the solicitation window
+    stepped_alive(link, 0.4)  # past the solicitation window (0.3 s here)
     peer.hello(epoch=0, reset_cause=3)
     assert link.wait_until(lambda: bool(reboots), 1)
     assert link.state.reboots == 1
@@ -295,17 +384,26 @@ def test_reboot_detection_tick_backwards(make_link):
 
 
 def test_body_lost_after_300ms_and_hello_polling(make_link):
-    link, peer = make_link()
+    link, peer = make_link(stepped=True)
+    clock = link.clock
     conn = []
     link.subscribe("connection", lambda c, a: conn.append(a))
+    t0 = clock()
     peer.telemetry()
     assert link.wait_until(lambda: link.state.alive, 1)
-    keep_alive(link, 0.4)
+    stepped_alive(link, 0.29)
+    assert link.state.alive and False not in conn
+    stepped_alive(link, 0.02)  # t0+0.31: no telemetry for 300 ms
     assert not link.state.alive
-    assert False in conn
-    t0 = time.monotonic()
-    keep_alive(link, 1.1)
-    assert 2 <= len(peer.of("HELLO_REQ", since=t0)) <= 3  # 2 Hz
+    assert False in conn  # told by the writer's housekeeping, inside the step
+    stepped_alive(link, 1.1)
+    polls = [f[0] - t0 for f in peer.of("HELLO_REQ") if f[0] > t0]
+    assert len(polls) == 2, polls  # 2 Hz: the connect's poll was at t0
+    assert all(0.5 * k - EPS <= p <= 0.5 * k + 0.01 + EPS for k, p in zip((1, 2), polls)), polls
+    # a stalled mind does not poll either
+    m = clock() - 0.01
+    clock.run(1.5, 0.01)
+    assert peer.of("HELLO_REQ", since=m + 0.3) == []
 
 
 def test_protocol_mismatch_flag(make_link):

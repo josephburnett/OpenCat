@@ -278,6 +278,11 @@ class VirtualBody:
         self.rx_overflow = 0
         self._running = threading.Event()
         self._thread: threading.Thread | None = None
+        # sync() (tests with a StepClock): the clock time the run loop last
+        # caught up to (every tick due done), and the bytes it has processed
+        self._synced = threading.Condition()
+        self._caught_up_at = float("-inf")
+        self._rx_done = 0
         self._start_time = self.clock()
         self.boot_delay = boot_delay
         self.booting_until: float | None = None  # silent init after a reboot (boot_delay)
@@ -403,8 +408,31 @@ class VirtualBody:
 
     def stop(self) -> None:
         self._running.clear()
+        with self._synced:
+            self._synced.notify_all()
         if self._thread:
             self._thread.join(1.0)
+
+    def sync(self, timeout: float = 5.0) -> None:
+        """For tests driving a StepClock (shared with the link): return once
+        the run loop has done every tick due at the clock's current time and
+        processed every byte written to it so far. A no-op when not running."""
+        if self._thread is None or not self._running.is_set():
+            return
+        target = self.clock()
+        written = getattr(self.t, "rx_written", None)
+        wake = getattr(self.t, "wake", None)
+        end = time.monotonic() + timeout
+        with self._synced:
+            while not (self._caught_up_at >= target and (written is None or self._rx_done >= written)):
+                if not self._running.is_set():
+                    return
+                left = end - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("virtual body did not catch up")
+                if wake is not None:
+                    wake()  # a read blocked on an empty pipe: come round now
+                self._synced.wait(min(left, 0.005))
 
     def trigger_fall(self, side: int = 1) -> None:
         with self.lock:
@@ -485,6 +513,10 @@ class VirtualBody:
                     time.sleep(min(0.005, next_tick - now))
                 if data:
                     self.process(data)
+                with self._synced:
+                    self._caught_up_at = now
+                    self._rx_done += len(data)
+                    self._synced.notify_all()
                 continue
             next_tick += TICK_S
             if now - next_tick > 0.2:
