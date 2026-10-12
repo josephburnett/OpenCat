@@ -36,13 +36,9 @@ JOINT_NAMES = {
 }
 JOINT_IDS = {n: j for j, n in JOINT_NAMES.items()}
 
-# Joint limits in degrees, copied from body/src/core/joints.cpp (JOINTS[] lo/hi,
-# itself from src/OpenCat.h angleLimit[]). tests/test_tricks.py cross-checks.
-JOINT_LIMITS = {
-    0: (-120, 120), 1: (-80, 45), 2: (-120, 120),
-    8: (-100, 80), 9: (-100, 80), 10: (-80, 100), 11: (-80, 100),
-    12: (-60, 120), 13: (-60, 120), 14: (-120, 60), 15: (-120, 60),
-}
+# Joint limits in degrees for the driven joints: the spec's [[joints]] (the
+# body's joints.cpp reads the same; from src/OpenCat.h angleLimit[]).
+JOINT_LIMITS = {j.id: (j.lo, j.hi) for j in P.JOINT_INFO.values() if j.driven}
 
 # Mirror rule, from legacy Skill::mirror() (src/skill.h): negate head pan (0)
 # and tail (2), swap the L/R columns (8,9) (10,11) (12,13) (14,15) (legacy also

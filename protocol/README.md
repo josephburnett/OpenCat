@@ -7,9 +7,11 @@ single source of truth.** Everything in `gen/` and `vectors/` is generated
 from it and committed, so consumers never need to run the generator.
 
 ```
-spec.toml              messages, enums, flags, link constants, live params
+spec.toml              messages, enums, flags, link constants, live params, and the shared
+                       defaults and limits (gait patterns, joint limits, balance, head)
 gen.py                 generator (stdlib only, Python 3.11+)
 vendor.py              copies gen/ + c/ into body/src/proto, gen/ + py/ codec into mind/kilo/protocol
+doc_check.py           fails when docs/architecture.md §3b/§3d/§3f or mind/README.md quote other numbers
 vector_cases.py        the test-vector cases gen.py turns into vectors/*.json
 gen/kilo_protocol.h    C99/C++: ids, enums, packed payload structs, constants, length rules
 gen/kilo_protocol.py   Python: dataclasses with pack()/unpack(), enums, constants
@@ -47,7 +49,8 @@ PYTHON=~/venv/bin/python protocol/test.sh   # interpreter that has pytest
 `test.sh` runs these steps:
 
 1. `gen.py --check`: the generated files are up to date; `vendor.py --check`:
-   the body's and mind's copies are identical to them.
+   the body's and mind's copies are identical to them; `doc_check.py`: the
+   docs' tables quote the spec's shared defaults (gait, joints, balance, head).
 2. Builds the C codec with `-std=c99 -pedantic -Wall -Wextra -Werror` and
    `test_protocol.cpp` with `g++ -std=c++17 -Wall -Wextra -Werror
    -fsanitize=address,undefined`. Runs it against the vectors, then fuzzes the

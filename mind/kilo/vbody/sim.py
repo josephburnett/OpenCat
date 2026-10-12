@@ -122,16 +122,16 @@ P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.Ms
 P2_GOALS = frozenset({P.MsgId.SET_GAIT, P.MsgId.SET_BODY_POSE})
 GAIT_RANGES = consts.field_ranges("SET_GAIT")
 GAIT_FLAGS = int(P.GaitFlags.BOB | P.GaitFlags.WAG | P.GaitFlags.BALANCE)
-# Leg phase offsets (fractions of a cycle) in the order LF, RF, RB, LB (§3d).
-LEG_OFFSETS = {P.GaitPattern.WALK: (0.50, 0.00, 0.25, 0.75), P.GaitPattern.CRAWL: (0.50, 0.00, 0.25, 0.75),
-               P.GaitPattern.TROT: (0.00, 0.50, 0.00, 0.50)}
+# Leg phase offsets (fractions of a cycle) in the order LF, RF, RB, LB (§3d,
+# spec [gait_patterns.*] offsets /256).
+LEG_OFFSETS = {P.GaitPattern(d.pattern): tuple(o / 256 for o in d.offsets) for d in P.GAIT_PATTERN_DEFAULTS.values()}
 # Fake joint angles (degrees, canonical order: pan, tilt, tail, shoulders
 # LF RF RB LB, knees LF RF RB LB) for the JOINTS stream. Not the body's tables.
 FAKE_ANGLES = {"REST": (0, 0, 0, -60, -60, 60, 60, 60, 60, -60, -60),
                "SIT": (0, 20, 0, 30, 30, 75, 75, -30, -30, 60, 60),
                "CALIB": (0,) * 11, "ZERO": (0,) * 11}
 FAKE_STAND = (0, 0, 0, 30, 30, -30, -30, 30, 30, -30, -30)
-BOB_DEG, WAG_DEG = 4.0, 15.0  # §3d head bob and tail wag amplitudes
+BOB_DEG, WAG_DEG = float(P.GAIT_BOB_DEG), float(P.GAIT_WAG_DEG)  # §3d head bob and tail wag amplitudes
 HEAD_HOLD_S = P.HEAD_HOLD_MS / 1000.0
 REST_MOVE_S = 1.0  # REST_MOVE_TICKS on the body: reflex moves to REST take 1 s
 
@@ -142,9 +142,9 @@ def boot_epoch(last_epoch: int) -> int:
     e = (last_epoch + 1) & 0xFF
     return e or 1
 
-# SET_BALANCE defaults (body/src/core/balance.h) and the posture it runs in.
-BALANCE_DEFAULTS = {"enable": 0, "kp_q8": 128, "kd_ms": 30, "deadband_deg": 2, "max_corr_deg": 15}
-BALANCE_MAX_DEG = 30
+# SET_BALANCE defaults (spec [balance], as the body boots) and the posture it runs in.
+BALANCE_DEFAULTS = {"enable": 0, **P.BALANCE_DEFAULTS}
+BALANCE_MAX_DEG = P.BALANCE_LIMIT_DEG
 BALANCE_POSTURES = ("SIT", "STAND")
 # Tricks (body/src/core/keyframe.cpp).
 TRICK_DRIVEN_MASK = 0xFF07          # joint ids 0-2 and 8-15

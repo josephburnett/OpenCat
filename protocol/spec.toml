@@ -965,3 +965,207 @@ min = 30
 max = 150
 unit = "deg"
 doc = "Knee bend relative to the upper link at joint angle 0 (the calibration posture). Petoi: lower leg at 90 deg; verify on Kilo."
+
+# ---------------------------------------------------------------------------
+# Shared defaults and limits. Not wire layout: numbers that the body, the mind
+# (kilo.body.client, kilo.tricks.model), the virtual body (kilo.vbody.sim) and
+# the docs (architecture.md §3b, §3d, §3f; mind/README.md "Walking") all use.
+# gen.py emits them as #defines and flash-table initializers (C, so they cost
+# no RAM) and as plain data (Python); protocol/doc_check.py fails when the
+# docs' tables disagree. Changing one here changes the body's binary: reflash.
+
+# Gait (doc §3d; all (est.), to be tuned on Kilo).
+[gait]
+bob_deg = 4                    # head bob amplitude: tilt += bob sin(2 * 2 pi phi), scaled by the stride ramp
+wag_deg = 15                   # tail wag amplitude: tail += wag sin(2 pi phi), scaled by the stride ramp
+stance_h_256 = 205             # STANCE's body height when IDLE enters it from another posture: /256 of (L1 + L2), 0.80
+
+# Per pattern, keyed by the [enums.gait_pattern] names (every pattern, in enum
+# order). The body uses period_ms, duty, body_h_256 and offsets for a SET_GAIT
+# that leaves period, duty or body_h_mm 0 (outside their spec range: "the
+# pattern's default"); the mind sends every field, filling the ones the user
+# left out from here (stride and step are the mind's only: 0 is a real value,
+# turning in place / a shuffle).
+#   period_ms   gait cycle; within SET_GAIT period_ms's range
+#   duty        stance fraction, /256; within SET_GAIT duty's range
+#   stride_mm   default stride (the mind's), within SET_GAIT stride_mm's range
+#   step_h_mm   default swing height (the mind's), within SET_GAIT step_h_mm's range
+#   body_h_256  default body height, /256 of (LEG_L1_MM + LEG_L2_MM): 205 = 0.80, 179 = 0.70
+#   offsets     leg phase offsets, /256 of a cycle, legs LF RF RB LB. A leg swings
+#               when phi + offset crosses duty, so a larger offset swings earlier:
+#               WALK/CRAWL give LB -> LF -> RB -> RF (the lateral sequence), TROT
+#               the diagonal pairs LF+RB, RF+LB.
+# Periods: WALK 1000 and CRAWL 1500 (§3d first said 800 / 1200): with Kilo's
+# measured legs (45 + 50 mm) the shorter periods asked the knees for 9.3 and
+# 10.0 deg per tick at the default stride and step height, i.e. the safety
+# slew (SLEW_MAX_A16, 10 deg/tick) would have clipped the crawl's swing.
+[gait_patterns.WALK]
+period_ms = 1000
+duty = 192
+stride_mm = 30
+step_h_mm = 15
+body_h_256 = 205
+offsets = [128, 0, 64, 192]
+
+[gait_patterns.TROT]
+period_ms = 500
+duty = 140
+stride_mm = 35
+step_h_mm = 12
+body_h_256 = 205
+offsets = [0, 128, 0, 128]
+
+[gait_patterns.CRAWL]
+period_ms = 1500
+duty = 218
+stride_mm = 25
+step_h_mm = 18
+body_h_256 = 179
+offsets = [128, 0, 64, 192]
+
+# Joint limits (doc §3b), whole degrees in the joint (OpenCat) convention, by
+# legacy joint id 0..15 (every id, in order; from src/OpenCat.h angleLimit[]).
+# The body clamps every output to them (the last stage before the slew); the
+# mind's trick validator refuses keyframes outside them.
+#   id      legacy joint id (= index); the PCA channel, direction and mid shift
+#           stay in body/src/core/joints.cpp (the robot model)
+#   name    lower-case name (kilo.tricks.model.JOINT_NAMES for driven joints)
+#   driven  one of the 11 joints in canonical order (link.joint_count); the
+#           others are unused 12-DoF slots, kept so the legacy tables line up
+#   lo, hi  limits in degrees, int8
+[[joints]]
+id = 0
+name = "head_pan"
+driven = true
+lo = -120
+hi = 120
+
+[[joints]]
+id = 1
+name = "head_tilt"
+driven = true
+lo = -80
+hi = 45
+
+[[joints]]
+id = 2
+name = "tail"
+driven = true
+lo = -120
+hi = 120
+
+[[joints]]
+id = 3
+name = "unused_3"
+driven = false
+lo = -120
+hi = 120
+
+[[joints]]
+id = 4
+name = "unused_4"
+driven = false
+lo = -90
+hi = 60
+
+[[joints]]
+id = 5
+name = "unused_5"
+driven = false
+lo = -90
+hi = 60
+
+[[joints]]
+id = 6
+name = "unused_6"
+driven = false
+lo = -90
+hi = 90
+
+[[joints]]
+id = 7
+name = "unused_7"
+driven = false
+lo = -90
+hi = 90
+
+[[joints]]
+id = 8
+name = "lf_shoulder"
+driven = true
+lo = -100
+hi = 80
+
+[[joints]]
+id = 9
+name = "rf_shoulder"
+driven = true
+lo = -100
+hi = 80
+
+[[joints]]
+id = 10
+name = "rb_shoulder"
+driven = true
+lo = -80
+hi = 100
+
+[[joints]]
+id = 11
+name = "lb_shoulder"
+driven = true
+lo = -80
+hi = 100
+
+[[joints]]
+id = 12
+name = "lf_knee"
+driven = true
+lo = -60
+hi = 120
+
+[[joints]]
+id = 13
+name = "rf_knee"
+driven = true
+lo = -60
+hi = 120
+
+[[joints]]
+id = 14
+name = "rb_knee"
+driven = true
+lo = -120
+hi = 60
+
+[[joints]]
+id = 15
+name = "lb_knee"
+driven = true
+lo = -120
+hi = 60
+
+# Balance (doc §3f): the body's SET_BALANCE state at boot, and the mind's
+# defaults for `kilo balance` / BodyClient.set_balance (which converts Kp and
+# Kd from these raw values: Kp = kp_q8 / 256, Kd = kd_ms / 1000 s). Keys are
+# the SET_BALANCE field names; all (est.).
+#   kp_q8         proportional gain, Q8 (128 = 0.5)
+#   kd_ms         rate gain in ms (30 = 0.03 s)
+#   deadband_deg  dead band, deg
+#   max_corr_deg  correction clamp, deg
+#   limit_deg     dead band and clamp above this are BAD_ARG (= the SET_BALANCE ranges' max)
+[balance]
+kp_q8 = 128
+kd_ms = 30
+deadband_deg = 2
+max_corr_deg = 15
+limit_deg = 30
+
+# Head (SET_HEAD, doc §3c layer 1): the mind's defaults and limits.
+#   speed_dps  default look() / `kilo head` slew, deg/s (0 = only the body's 500 deg/s safety slew)
+#   max_deg    the mind refuses a target beyond +-this (the body clamps to the joint limits anyway)
+#   not_held   the i16 a16 value that leaves a joint to its owner (= the body's JOINT_OFF)
+[head]
+speed_dps = 120
+max_deg = 180
+not_held = -32768

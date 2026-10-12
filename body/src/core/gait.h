@@ -39,12 +39,14 @@
 #ifndef KILO_CORE_GAIT_H
 #define KILO_CORE_GAIT_H
 #include <stdint.h>
+#include "../proto/kilo_protocol.h"
 
 enum GaitState : uint8_t { GS_OFF = 0, GS_RUN = 1, GS_STOP = 2, GS_LAND = 3 };
 
-// Head bob (tilt, twice per cycle) and tail wag (once per cycle), a16.
-#define GAIT_BOB_A16 (4 * 16)
-#define GAIT_WAG_A16 (15 * 16)
+// Head bob (tilt, twice per cycle) and tail wag (once per cycle), a16
+// (spec [gait]).
+#define GAIT_BOB_A16 (KILO_GAIT_BOB_DEG * 16)
+#define GAIT_WAG_A16 (KILO_GAIT_WAG_DEG * 16)
 
 struct Gait {
   // SET_GAIT goal as received (0 = the pattern's default for period,
@@ -77,7 +79,8 @@ void gait_goal(Gait& g, const uint8_t* p);
 // Latch a SET_BODY_POSE goal (payload after the epoch: pitch, roll i16 a16,
 // dheight, xshift i8 mm); pitch and roll are clamped to +-30 deg.
 void gait_pose_goal(Gait& g, const uint8_t* p);
-// STANCE's height when IDLE enters STANCE from another posture: 0.80 (L1 + L2).
+// STANCE's height when IDLE enters STANCE from another posture: 0.80 (L1 + L2)
+// (spec gait.stance_h_256).
 void gait_stance_default(Gait& g);
 
 // Start running the latched goal (IDLE is in STANCE, settled).

@@ -2433,6 +2433,70 @@ PARAMS: dict[int, ParamInfo] = {
 PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}
 
 
+# ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ----
+GAIT_BOB_DEG = 4
+GAIT_WAG_DEG = 15
+GAIT_STANCE_H_256 = 205
+
+
+@dataclass(frozen=True)
+class GaitPatternDefaults:
+    """A gait pattern's defaults (spec [gait_patterns.*]): body_h_256 is /256 of
+    LEG_L1_MM + LEG_L2_MM, offsets are /256 of a cycle for legs LF RF RB LB."""
+    pattern: int
+    name: str
+    period_ms: int
+    duty: int
+    stride_mm: int
+    step_h_mm: int
+    body_h_256: int
+    offsets: tuple[int, int, int, int]
+
+
+GAIT_PATTERN_DEFAULTS: dict[int, GaitPatternDefaults] = {
+    0: GaitPatternDefaults(0, 'WALK', 1000, 192, 30, 15, 205, (128, 0, 64, 192)),
+    1: GaitPatternDefaults(1, 'TROT', 500, 140, 35, 12, 205, (0, 128, 0, 128)),
+    2: GaitPatternDefaults(2, 'CRAWL', 1500, 218, 25, 18, 179, (128, 0, 64, 192)),
+}
+
+
+@dataclass(frozen=True)
+class JointInfo:
+    """A joint (spec [[joints]]): legacy id, name, driven, limits in whole degrees."""
+    id: int
+    name: str
+    driven: bool
+    lo: int
+    hi: int
+
+
+JOINT_INFO: dict[int, JointInfo] = {
+    0: JointInfo(0, 'head_pan', True, -120, 120),
+    1: JointInfo(1, 'head_tilt', True, -80, 45),
+    2: JointInfo(2, 'tail', True, -120, 120),
+    3: JointInfo(3, 'unused_3', False, -120, 120),
+    4: JointInfo(4, 'unused_4', False, -90, 60),
+    5: JointInfo(5, 'unused_5', False, -90, 60),
+    6: JointInfo(6, 'unused_6', False, -90, 90),
+    7: JointInfo(7, 'unused_7', False, -90, 90),
+    8: JointInfo(8, 'lf_shoulder', True, -100, 80),
+    9: JointInfo(9, 'rf_shoulder', True, -100, 80),
+    10: JointInfo(10, 'rb_shoulder', True, -80, 100),
+    11: JointInfo(11, 'lb_shoulder', True, -80, 100),
+    12: JointInfo(12, 'lf_knee', True, -60, 120),
+    13: JointInfo(13, 'rf_knee', True, -60, 120),
+    14: JointInfo(14, 'rb_knee', True, -120, 60),
+    15: JointInfo(15, 'lb_knee', True, -120, 60),
+}
+# SET_BALANCE defaults (field name -> raw value); dead band and clamp above BALANCE_LIMIT_DEG are BAD_ARG.
+BALANCE_DEFAULTS: dict[str, int] = {'kp_q8': 128, 'kd_ms': 30, 'deadband_deg': 2, 'max_corr_deg': 15}
+BALANCE_LIMIT_DEG = 30
+# SET_HEAD: the mind's default slew (deg/s) and target limit (deg); the value that leaves a joint to its owner.
+HEAD_SPEED_DPS = 120
+HEAD_MAX_DEG = 180
+HEAD_NOT_HELD = -32768
+
+
 def payload_len_status(msg_type: int, payload: bytes) -> int:
     """LEN_OK, LEN_BAD or LEN_UNKNOWN_TYPE, exactly as kilo_payload_len_check() in C."""
     n = len(payload)

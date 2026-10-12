@@ -1070,6 +1070,125 @@ enum kilo_param_id {
 /* Initializer for an int16_t [KILO_PARAM_COUNT] array of defaults, in id order. */
 #define KILO_PARAM_DEFAULTS_INIT { 500, 1500, 10, 10, 25, 160, 6900, 7100, 6600, 7000, 6300, 2, 4, 45, 50, 123, 65, 0, 90 }
 
+/* ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ---- */
+#define KILO_GAIT_BOB_DEG 4 /* head bob amplitude, deg */
+#define KILO_GAIT_WAG_DEG 15 /* tail wag amplitude, deg */
+#define KILO_GAIT_STANCE_H_256 205 /* STANCE's body height, /256 of L1 + L2 */
+#define KILO_GAIT_PATTERN_COUNT 3
+#define KILO_GAIT_WALK_PERIOD_MS 1000
+#define KILO_GAIT_WALK_DUTY 192
+#define KILO_GAIT_WALK_STRIDE_MM 30
+#define KILO_GAIT_WALK_STEP_H_MM 15
+#define KILO_GAIT_WALK_BODY_H_256 205
+#define KILO_GAIT_WALK_OFFSET_LF 128
+#define KILO_GAIT_WALK_OFFSET_RF 0
+#define KILO_GAIT_WALK_OFFSET_RB 64
+#define KILO_GAIT_WALK_OFFSET_LB 192
+#define KILO_GAIT_TROT_PERIOD_MS 500
+#define KILO_GAIT_TROT_DUTY 140
+#define KILO_GAIT_TROT_STRIDE_MM 35
+#define KILO_GAIT_TROT_STEP_H_MM 12
+#define KILO_GAIT_TROT_BODY_H_256 205
+#define KILO_GAIT_TROT_OFFSET_LF 0
+#define KILO_GAIT_TROT_OFFSET_RF 128
+#define KILO_GAIT_TROT_OFFSET_RB 0
+#define KILO_GAIT_TROT_OFFSET_LB 128
+#define KILO_GAIT_CRAWL_PERIOD_MS 1500
+#define KILO_GAIT_CRAWL_DUTY 218
+#define KILO_GAIT_CRAWL_STRIDE_MM 25
+#define KILO_GAIT_CRAWL_STEP_H_MM 18
+#define KILO_GAIT_CRAWL_BODY_H_256 179
+#define KILO_GAIT_CRAWL_OFFSET_LF 128
+#define KILO_GAIT_CRAWL_OFFSET_RF 0
+#define KILO_GAIT_CRAWL_OFFSET_RB 64
+#define KILO_GAIT_CRAWL_OFFSET_LB 192
+/* Initializer for a [KILO_GAIT_PATTERN_COUNT] table of {uint16_t period_ms;
+   uint8_t duty, body_h_256; uint8_t offsets[4] (LF RF RB LB)}, in enum
+   gait_pattern order. */
+#define KILO_GAIT_PATTERN_TABLE_INIT { \
+    {1000, 192, 205, {128, 0, 64, 192}}, /* WALK */ \
+    {500, 140, 205, {0, 128, 0, 128}}, /* TROT */ \
+    {1500, 218, 179, {128, 0, 64, 192}}, /* CRAWL */ \
+}
+/* Joint limits, whole degrees, by legacy joint id. */
+#define KILO_JOINT_HEAD_PAN_ID 0
+#define KILO_JOINT_HEAD_PAN_LO (-120)
+#define KILO_JOINT_HEAD_PAN_HI 120
+#define KILO_JOINT_HEAD_TILT_ID 1
+#define KILO_JOINT_HEAD_TILT_LO (-80)
+#define KILO_JOINT_HEAD_TILT_HI 45
+#define KILO_JOINT_TAIL_ID 2
+#define KILO_JOINT_TAIL_LO (-120)
+#define KILO_JOINT_TAIL_HI 120
+#define KILO_JOINT_UNUSED_3_ID 3
+#define KILO_JOINT_UNUSED_3_LO (-120)
+#define KILO_JOINT_UNUSED_3_HI 120
+#define KILO_JOINT_UNUSED_4_ID 4
+#define KILO_JOINT_UNUSED_4_LO (-90)
+#define KILO_JOINT_UNUSED_4_HI 60
+#define KILO_JOINT_UNUSED_5_ID 5
+#define KILO_JOINT_UNUSED_5_LO (-90)
+#define KILO_JOINT_UNUSED_5_HI 60
+#define KILO_JOINT_UNUSED_6_ID 6
+#define KILO_JOINT_UNUSED_6_LO (-90)
+#define KILO_JOINT_UNUSED_6_HI 90
+#define KILO_JOINT_UNUSED_7_ID 7
+#define KILO_JOINT_UNUSED_7_LO (-90)
+#define KILO_JOINT_UNUSED_7_HI 90
+#define KILO_JOINT_LF_SHOULDER_ID 8
+#define KILO_JOINT_LF_SHOULDER_LO (-100)
+#define KILO_JOINT_LF_SHOULDER_HI 80
+#define KILO_JOINT_RF_SHOULDER_ID 9
+#define KILO_JOINT_RF_SHOULDER_LO (-100)
+#define KILO_JOINT_RF_SHOULDER_HI 80
+#define KILO_JOINT_RB_SHOULDER_ID 10
+#define KILO_JOINT_RB_SHOULDER_LO (-80)
+#define KILO_JOINT_RB_SHOULDER_HI 100
+#define KILO_JOINT_LB_SHOULDER_ID 11
+#define KILO_JOINT_LB_SHOULDER_LO (-80)
+#define KILO_JOINT_LB_SHOULDER_HI 100
+#define KILO_JOINT_LF_KNEE_ID 12
+#define KILO_JOINT_LF_KNEE_LO (-60)
+#define KILO_JOINT_LF_KNEE_HI 120
+#define KILO_JOINT_RF_KNEE_ID 13
+#define KILO_JOINT_RF_KNEE_LO (-60)
+#define KILO_JOINT_RF_KNEE_HI 120
+#define KILO_JOINT_RB_KNEE_ID 14
+#define KILO_JOINT_RB_KNEE_LO (-120)
+#define KILO_JOINT_RB_KNEE_HI 60
+#define KILO_JOINT_LB_KNEE_ID 15
+#define KILO_JOINT_LB_KNEE_LO (-120)
+#define KILO_JOINT_LB_KNEE_HI 60
+/* Initializer for an int8_t [KILO_CHANNEL_COUNT][2] table of {lo, hi}, in id order. */
+#define KILO_JOINT_LIMITS_INIT { \
+    {-120, 120}, /* 0 head_pan */ \
+    {-80, 45}, /* 1 head_tilt */ \
+    {-120, 120}, /* 2 tail */ \
+    {-120, 120}, /* 3 unused_3 */ \
+    {-90, 60}, /* 4 unused_4 */ \
+    {-90, 60}, /* 5 unused_5 */ \
+    {-90, 90}, /* 6 unused_6 */ \
+    {-90, 90}, /* 7 unused_7 */ \
+    {-100, 80}, /* 8 lf_shoulder */ \
+    {-100, 80}, /* 9 rf_shoulder */ \
+    {-80, 100}, /* 10 rb_shoulder */ \
+    {-80, 100}, /* 11 lb_shoulder */ \
+    {-60, 120}, /* 12 lf_knee */ \
+    {-60, 120}, /* 13 rf_knee */ \
+    {-120, 60}, /* 14 rb_knee */ \
+    {-120, 60}, /* 15 lb_knee */ \
+}
+/* SET_BALANCE state at boot; dead band and clamp above LIMIT_DEG are BAD_ARG. */
+#define KILO_BALANCE_KP_Q8 128
+#define KILO_BALANCE_KD_MS 30
+#define KILO_BALANCE_DEADBAND_DEG 2
+#define KILO_BALANCE_MAX_CORR_DEG 15
+#define KILO_BALANCE_LIMIT_DEG 30
+/* SET_HEAD: the mind's default slew (deg/s) and target limit (deg); the i16 that leaves a joint to its owner. */
+#define KILO_HEAD_SPEED_DPS 120
+#define KILO_HEAD_MAX_DEG 180
+#define KILO_HEAD_NOT_HELD ((int16_t)(-32767 - 1))
+
 #ifdef KILO_PROTOCOL_FIELD_TABLE
 /* Scalar field layout, for host tests and tools. Not for the AVR build. */
 typedef struct kilo_field_info {

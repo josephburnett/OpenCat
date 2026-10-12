@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run every protocol check: generator staleness, C tests (ASan/UBSan), Python
-# tests, the C<->Python cross round trip, and (if installed) an avr-gcc build.
+# Run every protocol check: generator staleness, vendored copies, the docs'
+# copies of the shared defaults, C tests (ASan/UBSan), Python tests, the
+# C<->Python cross round trip, and (if installed) an avr-gcc build.
 #
 #   protocol/test.sh            full run (1e6 fuzz iterations)
 #   FUZZ=10000 protocol/test.sh quicker
@@ -26,6 +27,9 @@ echo "== generator up to date"
 
 echo "== vendored copies (body/src/proto, mind/kilo/protocol) up to date"
 "$PYTHON" "$HERE/vendor.py" --check
+
+echo "== docs' tables agree with the spec's shared defaults (doc_check.py)"
+"$PYTHON" "$HERE/doc_check.py"
 
 echo "== C build (host, sanitizers)"
 for f in cobs crc16 kilo_frame; do

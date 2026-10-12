@@ -690,7 +690,7 @@ static void test_stance_pose() {
   CHECK(body_goal_posture(b, b.epoch, POSTURE_STANCE, 0, 0) == GOAL_OK);
   tick(40);
   int16_t want_sh[4], want_kn[4];
-  int16_t h = (int16_t)(ik_reach_q2() * 205 / 256);
+  int16_t h = (int16_t)(ik_reach_q2() * KILO_GAIT_STANCE_H_256 / 256);
   for (int l = 0; l < 4; l++) ik_leg((uint8_t)l, 0, h, &want_sh[l], &want_kn[l]);
   bool ok = true;
   for (int l = 0; l < 4; l++) ok = ok && b.arb.out[3 + l] == want_sh[l] && b.arb.out[7 + l] == want_kn[l];

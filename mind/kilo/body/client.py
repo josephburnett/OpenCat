@@ -41,26 +41,28 @@ POSTURE_CHOICES = ("limp", "rest", "stand", "sit", "balance", "stance", "calib",
 
 CAL_LIMIT_A16 = 400  # CAL_SET offset_a16 range: ±25°
 
-# SET_BALANCE defaults and limits (body/src/core/balance.h, docs §3f).
-BALANCE_KP = 0.5        # Kp, sent as kp_q8 (Q8, 0..255/256)
-BALANCE_KD_S = 0.03     # Kd in seconds, sent as kd_ms (0..255 ms)
-BALANCE_DEADBAND = 2    # degrees
-BALANCE_CLAMP = 15      # degrees
-BALANCE_MAX_DEG = 30    # dead band and clamp limit
+# SET_BALANCE defaults and limits (spec [balance], docs §3f; the body boots
+# with the same raw values). Kp and Kd are derived here, in the mind's units.
+BALANCE_KP = P.BALANCE_DEFAULTS["kp_q8"] / 256         # Kp 0.5, sent as kp_q8 (Q8, 0..255/256)
+BALANCE_KD_S = P.BALANCE_DEFAULTS["kd_ms"] / 1000      # Kd 0.03 s, sent as kd_ms (0..255 ms)
+BALANCE_DEADBAND = P.BALANCE_DEFAULTS["deadband_deg"]  # degrees
+BALANCE_CLAMP = P.BALANCE_DEFAULTS["max_corr_deg"]     # degrees
+BALANCE_MAX_DEG = P.BALANCE_LIMIT_DEG                  # dead band and clamp limit
 
-# SET_HEAD (docs §3c layer 1): an i16 a16 of -32768 leaves that joint to its
-# owner; targets beyond the joint limits are clamped by the body.
-HEAD_NOT_HELD = -32768
-HEAD_MAX_DEG = 180
-HEAD_SPEED_DPS = 120    # default look() slew, °/s (0 = only the body's 500°/s safety slew)
+# SET_HEAD (docs §3c layer 1; spec [head]): an i16 a16 of -32768 leaves that
+# joint to its owner; targets beyond the joint limits are clamped by the body.
+HEAD_NOT_HELD = P.HEAD_NOT_HELD
+HEAD_MAX_DEG = P.HEAD_MAX_DEG
+HEAD_SPEED_DPS = P.HEAD_SPEED_DPS  # default look() slew, °/s (0 = only the body's 500°/s safety slew)
 
-# SET_GAIT defaults per pattern (docs/architecture.md §3d, estimates to be
-# tuned on Kilo): period ms, duty /256, stride mm, step height mm, and the body
-# height as a fraction of L1 + L2 (params LEG_L1_MM + LEG_L2_MM).
+# SET_GAIT defaults per pattern (spec [gait_patterns.*], docs/architecture.md
+# §3d; estimates to be tuned on Kilo): period ms, duty /256, stride mm, step
+# height mm, and the body height as a fraction of L1 + L2 (params LEG_L1_MM +
+# LEG_L2_MM): the spec's body_h_256 / 256, the body's own default.
 GAIT_DEFAULTS: dict[str, dict[str, float]] = {
-    "walk": {"period_ms": 1000, "duty": 192, "stride_mm": 30, "step_h_mm": 15, "body_h_frac": 0.80},
-    "trot": {"period_ms": 500, "duty": 140, "stride_mm": 35, "step_h_mm": 12, "body_h_frac": 0.80},
-    "crawl": {"period_ms": 1500, "duty": 218, "stride_mm": 25, "step_h_mm": 18, "body_h_frac": 0.70},
+    d.name.lower(): {"period_ms": d.period_ms, "duty": d.duty, "stride_mm": d.stride_mm,
+                     "step_h_mm": d.step_h_mm, "body_h_frac": d.body_h_256 / 256}
+    for d in P.GAIT_PATTERN_DEFAULTS.values()
 }
 GAIT_PATTERN_CHOICES = tuple(consts.GAIT_PATTERNS)  # walk, trot, crawl (spec enum gait_pattern)
 DEFAULT_PATTERN = "trot"

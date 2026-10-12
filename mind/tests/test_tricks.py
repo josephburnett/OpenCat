@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -11,11 +10,10 @@ import pytest
 from kilo.protocol import kilo_link_codec as C
 from kilo.protocol import kilo_protocol as P
 from kilo.tricks import import_legacy, legacy, library
-from kilo.tricks.model import (CANONICAL, JOINT_LIMITS, Easing, Keyframe, Posture, Trick,
+from kilo.tricks.model import (CANONICAL, JOINT_LIMITS, JOINT_NAMES, UNUSED, Easing, Keyframe, Posture, Trick,
                                TrickError, Trigger, pose)
 
 REPO = Path(__file__).resolve().parents[2]
-JOINTS_CPP = REPO / "body" / "src" / "core" / "joints.cpp"
 FRAMES_JSON = REPO / "protocol" / "vectors" / "frames.json"
 
 UP = (0, 0, 0, 0, 0, 0, 0, 0, 30, 30, -30, -30, 30, 30, -30, -30)
@@ -257,13 +255,14 @@ def test_validation():
         Trick("l", [kf()] * 2, loop_start=1, loop_end=2).validate()
 
 
-def test_joint_limits_match_body():
-    rows = re.findall(r"\{\s*(-?\d+),\s*(-?\d+),\s*(-?\d+),\s*(-?\d+),\s*(-?\d+)\}\s*,\s*//\s*(\d+)",
-                      JOINTS_CPP.read_text())
-    body = {int(r[5]): (int(r[3]), int(r[4])) for r in rows}
-    assert len(body) == 16
-    for j, lim in JOINT_LIMITS.items():
-        assert body[j] == lim, j
+def test_joint_table_matches_spec():
+    """JOINT_LIMITS comes from the spec; the hand-written names, wire order and
+    unused slots must agree with its [[joints]] table too."""
+    driven = [j for j in P.JOINT_INFO.values() if j.driven]
+    assert CANONICAL == tuple(j.id for j in driven) and len(CANONICAL) == P.JOINT_COUNT
+    assert JOINT_NAMES == {j.id: j.name for j in driven}
+    assert UNUSED == tuple(j.id for j in P.JOINT_INFO.values() if not j.driven)
+    assert JOINT_LIMITS == {j.id: (j.lo, j.hi) for j in driven}
 
 
 def test_frame_encode_decode():
