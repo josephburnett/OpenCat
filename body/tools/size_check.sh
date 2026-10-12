@@ -13,12 +13,17 @@
 #   - globals (.data + .bss + .noinit) > GLOBALS_MAX (default 1540);
 #   - the ELF was not built with the size flags: no __prologue_saves__ (no
 #     -mcall-prologues), or a call/jmp whose target an rcall/rjmp reaches
-#     (no --relax).
+#     (no --relax);
+#   - (build mode only, unless STACK_CHECK=0) body/tools/stack_check.sh, the
+#     static worst-case stack estimate, fails: margin 2048 - globals - stack
+#     below MIN_MARGIN (default 128 B). It builds once more with
+#     -fstack-usage at link time (a few seconds with arduino-cli's cache).
 #
 # Usage: body/tools/size_check.sh [build-dir]       build, then check
 #        body/tools/size_check.sh --elf FILE.elf       check an existing build
 #                                                      (what `kilo flash` does)
-# Env:   ARDUINO_CLI, FLASH_MAX, GLOBALS_MAX, EXTRA_FLAGS (e.g. -DKILO_BUZZER=0)
+# Env:   ARDUINO_CLI, FLASH_MAX, GLOBALS_MAX, EXTRA_FLAGS (e.g. -DKILO_BUZZER=0),
+#        STACK_CHECK (1; 0 skips the stack estimate), MIN_MARGIN (128)
 set -u
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${ARDUINO_CLI:-$HOME/.local/bin/arduino-cli}"
@@ -101,6 +106,13 @@ fi
 
 echo "largest symbols:"
 "$NM" -S --size-sort -C -t d "$ELF" | tail -12 | awk '{printf "  %6d %s %s\n", $2, $3, substr($0, index($0,$4))}'
+
+if [ -n "${BUILD:-}" ] && [ "${STACK_CHECK:-1}" != 0 ]; then
+  echo "stack estimate (body/tools/stack_check.sh):"
+  sout=$("$BODY/tools/stack_check.sh" "$BUILD-stack" 2>&1); st=$?
+  echo "$sout" | sed 's/^/  /'
+  [ "$st" -eq 0 ] || fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then echo "size_check: PASS"; else echo "size_check: FAIL"; fi
 exit "$fail"
