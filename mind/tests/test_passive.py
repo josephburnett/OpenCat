@@ -245,6 +245,7 @@ def _timeline(out):
             (re.match(r"\s*([+-]\d+\.\d)s  (.*)", ln) for ln in out.splitlines()) if m]
 
 
+@pytest.mark.slow
 def test_monitor_passive_sends_nothing(vbody_pty_fast_limp):
     vb, path = vbody_pty_fast_limp
     p = _run(path, "monitor", "--passive", "--duration", "1.5")
@@ -256,6 +257,7 @@ def test_monitor_passive_sends_nothing(vbody_pty_fast_limp):
     assert sum(1 for _, t in lines if t.startswith("tel tick")) >= 1, p.stdout
 
 
+@pytest.mark.slow
 def test_posture_then_watch_shows_the_watchdog_timeline(vbody_pty_fast_limp):
     vb, path = vbody_pty_fast_limp
     p = _run(path, "posture", "stand", "--for", "0.6", "--then-watch", "4.5")

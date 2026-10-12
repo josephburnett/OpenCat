@@ -196,6 +196,27 @@ def keep_alive(link: SerialLink, seconds: float, period: float = 0.02) -> None:
         time.sleep(period)
 
 
+# Slow tests in files that other work owns right now (marked here rather
+# than with @pytest.mark.slow in the file); see the "slow" marker in pyproject.
+_SLOW_ELSEWHERE = {
+    "test_daemon.py": {"test_cli_through_the_daemon_matches_direct", "test_cli_posture_hold_through_the_daemon",
+                       "test_hold_ends_when_the_client_disconnects", "test_subscription_streams_at_the_requested_rate",
+                       "test_a_slow_client_does_not_block_the_loop",
+                       "test_release_lease_expires_and_disconnect_keeps_the_lease"},
+    "test_hardening.py": {"test_link_stats_snapshot_under_concurrent_counter_growth", "test_cli_trick_through_the_daemon",
+                          "test_reconnect_into_a_rebooting_body_does_not_stand_it_up",
+                          "test_trick_ops_through_the_daemon"},
+    "test_ir.py": {"test_daemon_remote_keys", "test_daemon_remote_walks"},
+    "test_e2e_cli.py": {"test_kilo_balance_on", "test_kilo_posture_stand"},
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.originalname in _SLOW_ELSEWHERE.get(item.path.name, ()):
+            item.add_marker(pytest.mark.slow)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_daemon(monkeypatch, tmp_path_factory):
     """Never let a test (or a `kilo` subprocess) find a developer's running

@@ -136,10 +136,11 @@ def test_clearing_events_drop_motion_goals(make_link, ev):
     assert set(link.goals()) == {"SET_EYES"}  # not a motion goal
     assert link.state.epoch == 3
     # nothing from before the event is replayed
-    t0 = link.clock()
+    link.clock.settle()  # a SET_POSTURE packed before the clear is out and counted
+    n, n_eyes = count(peer, "SET_POSTURE"), count(peer, "SET_EYES")
     stepped_alive(link, 0.5)
-    assert peer.of("SET_POSTURE", since=t0) == []
-    assert len(peer.of("SET_EYES", since=t0)) >= 2  # the refresh did run meanwhile
+    assert count(peer, "SET_POSTURE") == n
+    assert count(peer, "SET_EYES") >= n_eyes + 2  # the refresh did run meanwhile
     assert events and consts.EVENTS[events[-1].code] == ev
 
 
@@ -366,6 +367,26 @@ def test_reboot_detection_unsolicited_hello(make_link):
     assert link.state.reboots == 1
     assert link.state.reset_cause == "WARM_UNEXPECTED"
     assert "SET_POSTURE" not in link.goals()
+
+
+def test_hello_solicitation_window(make_link):
+    """A HELLO that repeats the last one's identity is a reboot only when
+    unsolicited: more than hello_solicit_window_s (0.3 s here) after the
+    last HELLO_REQ (the connect's, at t0)."""
+    link, peer = make_link(stepped=True)
+    reboots = []
+    link.subscribe("reboot", lambda h, why: reboots.append(why))
+    peer.hello(epoch=0)
+    assert link.wait_until(lambda: link.state.hello is not None, 1)
+    stepped_alive(link, 0.29)
+    n = link.state.stats.frames_rx
+    peer.hello(epoch=0)  # t0+0.29: still an answer to the HELLO_REQ
+    assert link.wait_until(lambda: link.state.stats.frames_rx > n, 1)
+    assert reboots == []
+    stepped_alive(link, 0.02)  # t0+0.31, before the next poll (t0+0.5)
+    peer.hello(epoch=0)
+    assert link.wait_until(lambda: bool(reboots), 1)
+    assert "unsolicited" in reboots[0]
 
 
 def test_reboot_detection_tick_backwards(make_link):

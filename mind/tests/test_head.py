@@ -37,6 +37,7 @@ def _held(client):
     return "head_held" in client.state.flags and (client.state.owners or ("", ""))[1] == "PI_HOLD"
 
 
+@pytest.mark.slow
 def test_look_is_a_refreshed_goal_and_release_head(rig):
     client, vb = rig
     client.wait_ready(2)
@@ -61,6 +62,7 @@ def test_look_is_a_refreshed_goal_and_release_head(rig):
         client.look(0, 0, speed_dps=-1)
 
 
+@pytest.mark.slow
 def test_look_dropped_by_an_epoch_bump(rig):
     client, vb = rig
     client.wait_ready(2)
@@ -86,6 +88,7 @@ def vbody_pty():
     os.close(slave)
 
 
+@pytest.mark.slow
 def test_kilo_look(vbody_pty):
     vb, path = vbody_pty
     p = subprocess.Popen([sys.executable, "-m", "kilo.cli", "--direct", "--port", path, "look", "25", "-10",

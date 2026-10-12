@@ -323,6 +323,7 @@ def _received(vb, name):
     return [P.MESSAGES[M[name]].unpack(p) for n, _, p in list(vb.received) if n == name]
 
 
+@pytest.mark.slow
 def test_client_walk_stop_and_geometry(rig):
     client, vb = rig
     client.wait_ready(2)
@@ -399,6 +400,7 @@ def test_client_walk_until_stopped_and_pose(rig):
 
 # ---- the daemon --------------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_daemon_walk_ops(start_daemon):  # noqa: F811
     d, vb, path, sock = start_daemon()
     body = remote(sock)
@@ -470,6 +472,7 @@ def _kilo(path, *args, timeout=20):
                           capture_output=True, text=True, timeout=timeout)
 
 
+@pytest.mark.slow
 def test_kilo_walk_direct(vbody_pty):  # noqa: F811
     vb, path = vbody_pty
     r = _kilo(path, "walk", "back", "--pattern", "walk", "--stride", "25", "--for", "1.5")
@@ -483,6 +486,7 @@ def test_kilo_walk_direct(vbody_pty):  # noqa: F811
     assert r.returncode == 0 and "stopped" in r.stdout and "SAFETY" not in r.stdout
 
 
+@pytest.mark.slow
 def test_kilo_walk_sigterm_stops(vbody_pty):  # noqa: F811
     vb, path = vbody_pty
     p = subprocess.Popen([sys.executable, "-m", "kilo.cli", "--direct", "--port", path, "walk", "march"], cwd=MIND,
@@ -518,6 +522,7 @@ def test_kilo_walk_bad_arg_sends_nothing(vbody_pty):  # noqa: F811
     assert not [n for n, _, _ in list(vb.received) if n == "SET_GAIT"]
 
 
+@pytest.mark.slow
 def test_kilo_pose_direct(vbody_pty):  # noqa: F811
     vb, path = vbody_pty
     p = subprocess.Popen([sys.executable, "-m", "kilo.cli", "--direct", "--port", path, "pose", "--pitch", "4",

@@ -47,6 +47,15 @@ The alternative, `pip install --break-system-packages -e .` into the system
 Python, works but mixes pip-managed files into `/usr/local`; prefer the venv.
 `pip install -e` makes the source tree live, so `git pull` is enough to update.
 
+Tests: `python -m pytest mind/tests -q`. `-m "not slow"` skips the tests
+marked slow (they start `kilo` subprocesses or a daemon and wait in wall
+time). `pip install pytest-xdist` and `-n 4` runs the suite in parallel
+(sockets, ptys and log directories are per test), but the slow tests then
+compete for the CPU and can time out on a loaded machine, so the default run
+stays serial. The link and virtual-body timing rules (heartbeat, liveness
+window, goal refresh, ACK retries, backoff, the body watchdog) run on a
+stepped clock (`kilo.stepclock.StepClock`) and do not depend on load.
+
 Serial access needs the `dialout` group (`sudo usermod -aG dialout $USER`), and
 the Pi configuration in docs/architecture.md Appendix F (serial console off,
 UART on, 1-Wire off, UART clock 48 MHz, GPIO4 left as an input).

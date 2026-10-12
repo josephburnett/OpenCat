@@ -297,6 +297,7 @@ def test_verify_hello_timeout_and_what_it_saw(vrig):
     assert not r and r.hello["reset_cause"] == 0
 
 
+@pytest.mark.slow
 def test_verify_hello_asks_when_the_boot_hello_was_missed(vrig):
     client, vb = vrig
     client.wait_ready(2)
@@ -333,6 +334,7 @@ def fake_avrdude(tmp_path):
     return env, hexf, marker
 
 
+@pytest.mark.slow
 def test_kilo_flash_direct_and_through_the_daemon(fake_avrdude, tmp_path):
     import json
     import shutil
@@ -387,6 +389,7 @@ def test_kilo_flash_direct_and_through_the_daemon(fake_avrdude, tmp_path):
 
 # ---- kilo monitor --rate ------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_monitor_rate_is_honoured_when_piped():
     import json
 

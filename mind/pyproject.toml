@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = ["pyserial>=3.5"]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest"]  # optional: pytest-xdist for `pytest -n 4`
 # PyYAML for personality.yaml (apt python3-yaml on Raspbian); without it a
 # built-in parser reads the subset the file uses.
 behaviour = ["PyYAML>=5"]
@@ -27,3 +27,6 @@ include = ["kilo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: takes seconds of wall time (subprocesses, a daemon, real-time waits); in the default run, `-m 'not slow'` skips them",
+]
