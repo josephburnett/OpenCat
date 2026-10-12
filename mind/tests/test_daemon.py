@@ -584,3 +584,25 @@ def test_cli_run_subcommand(vbody_pty, sockdir):
     finally:
         if p.poll() is None:
             p.kill()
+
+
+def test_balance_enable_restored_after_epoch_bump(start_daemon):
+    """Cross-layer (review §2.4): the body clears SET_BALANCE's enable on
+    every epoch bump (body.cpp body_epoch_bump; the vbody does the same),
+    while the mind keeps the goal latched (not an epoch goal) and refreshes
+    it at 5 Hz: `kilo run --balance` is back on within 300 ms of a bump."""
+    d, vb, path, sock = start_daemon(balance_kp=0.99)
+    assert wait_for(lambda: vb.balance["enable"] == 1, 3)
+    kp = vb.balance["kp_q8"]
+    assert kp == round(0.99 * 256)
+    epoch = vb.epoch
+    with vb.lock:
+        vb._epoch_bump()  # what a fall, a watchdog stop or LOW battery does
+        assert vb.balance["enable"] == 0 and vb.balance["kp_q8"] == kp  # the gains stay
+    t0 = time.monotonic()
+    assert wait_for(lambda: vb.balance["enable"] == 1, 1.0, period=0.005)
+    took = time.monotonic() - t0
+    assert took < 0.3, f"balance back on after {took:.3f} s"
+    assert vb.epoch == (epoch + 1) & 0xFF and vb.balance["kp_q8"] == kp
+    assert d.goal_owner.get("SET_BALANCE", "unset") is None  # still the daemon's own latch
+    assert "SET_BALANCE" in d.link.goals()
