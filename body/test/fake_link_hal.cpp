@@ -39,6 +39,11 @@ uint8_t link_hal_tx_free(void) {
   return (uint8_t)(g_lh.cap - g_lh.ring_used);
 }
 
+uint16_t link_hal_us(void) {
+  g_lh.us_calls++;
+  return g_lh.now_us = (uint16_t)(g_lh.now_us + g_lh.us_step);
+}
+
 void link_hal_write(const uint8_t* data, uint8_t len) {
   g_lh.ring_used += len;
   g_lh.tx.insert(g_lh.tx.end(), data, data + len);

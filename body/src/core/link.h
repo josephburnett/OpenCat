@@ -37,7 +37,8 @@ void link_init(uint32_t build, uint16_t caps);
 // event queue like every other event.)
 void link_boot(uint8_t reset_cause, uint16_t last_alive);
 // Drain the RX ring and handle every complete frame. Never blocks, except
-// that a reply waits (at most one TX-ring drain, < 4 ms) for room.
+// that a reply waits for TX room (one ring drain, < 4 ms; at most 8 ms, then
+// the reply is dropped and counted in tx_dropped).
 void link_poll(void);
 // Once per tick, after body_tick: queued events, then the streams due this
 // tick in priority order TELEMETRY > JOINTS > IMU_RAW, dropping what does
@@ -50,7 +51,8 @@ void link_send_events(void);
 struct LinkCounters {
   uint16_t rx_crc_err;   // bad CRC, bad COBS or bad length: header untrusted
   uint16_t rx_overflow;  // > 65 B before a delimiter
-  uint16_t tx_dropped;   // stream frames that did not fit in the TX ring
+  uint16_t tx_dropped;   // stream frames that did not fit in the TX ring, and
+                         // replies/ACKs that found no room within TX_WAIT_US
   uint32_t uptime_s;
 };
 const LinkCounters& link_counters(void);
@@ -65,6 +67,7 @@ struct LinkSample {
 };
 bool link_hal_read(uint8_t* c);                        // next RX byte
 uint8_t link_hal_tx_free(void);                        // free TX ring bytes
+uint16_t link_hal_us(void);                            // free-running microseconds (wraps)
 void link_hal_write(const uint8_t* data, uint8_t len); // only called when it fits
 void link_hal_sample(LinkSample* s);                   // and reset the "since" values
 // STATS fields the hardware owns: overruns, max_tick_us, stack_free_min,

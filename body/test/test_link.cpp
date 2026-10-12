@@ -491,6 +491,54 @@ static void test_streams_and_priority(void) {
   CHECK(out.size() == 1 && out[0].payload[0] == KILO_EVENT_LINK_RESTORED);
 }
 
+// A stalled TX ring (the UDRE ISR not draining): a reply or ACK waits at
+// most TX_WAIT_US (8 ms) of link_hal_us() time, then is dropped and counted,
+// instead of spinning until the hardware watchdog fires. The command still
+// executed, so the mind's retry (same seq) is re-acked from the de-dup cache.
+static void test_tx_stall() {
+  setup();
+  g_lh.drain = 0;
+  g_lh.ring_used = g_lh.cap;  // full, and nothing drains it
+  g_lh.us_step = 100;         // 100 us per clock read
+  g_lh.us_calls = 0;
+  std::vector<TxFrame> out = rx(KILO_MSG_SET_STREAM, 50, {2, 0, 0});
+  CHECK(out.empty());
+  CHECK(link_counters().tx_dropped == 1);
+  // 8000 us / 100 us per read: about 80 reads, i.e. it waited ~8 ms, not forever.
+  CHECKF(g_lh.us_calls >= 80 && g_lh.us_calls <= 82, "us_calls %d", g_lh.us_calls);
+  // A query reply is bounded the same way.
+  g_lh.us_calls = 0;
+  out = rx(KILO_MSG_PING, 51, {1, 2});
+  CHECK(out.empty() && link_counters().tx_dropped == 2 && g_lh.us_calls <= 82);
+  // The clock wraps (16-bit microseconds): the bound still holds.
+  g_lh.now_us = 0xFFF0;
+  g_lh.us_calls = 0;
+  out = rx(KILO_MSG_PING, 52, {1, 2});
+  CHECK(out.empty() && link_counters().tx_dropped == 3 && g_lh.us_calls >= 80 && g_lh.us_calls <= 82);
+  // A slow drain that frees room within the bound: the ACK waits and goes.
+  g_lh.ring_used = g_lh.cap;
+  g_lh.drain = 1;  // one byte per tx_free() poll
+  g_lh.us_step = 10;
+  out = rx(KILO_MSG_SET_STREAM, 53, {1, 0, 0});
+  CHECK(is_ack(out, 53, KILO_MSG_SET_STREAM, KILO_ACK_STATUS_OK) && link_counters().tx_dropped == 3);
+  // The retry of the dropped ACK (seq 50) is re-acked from the de-dup cache.
+  g_lh.drain = 1000;
+  CHECK(is_ack(rx(KILO_MSG_SET_STREAM, 50, {2, 0, 0}), 50, KILO_MSG_SET_STREAM, KILO_ACK_STATUS_OK));
+  // The drops are reported by EVENT TX_DROPPED within the second.
+  for (int i = 0; i < 50; i++) {
+    b.tick++;
+    link_tick();
+  }
+  int ev_drop = 0;
+  for (const TxFrame& f : g_lh.take())
+    if (f.type == KILO_MSG_EVENT && f.payload[0] == KILO_EVENT_TX_DROPPED && i16(f.payload, 1) == 3) ev_drop++;
+  CHECK(ev_drop == 1);
+  // A fast path with room never reads the clock.
+  g_lh.us_calls = 0;
+  CHECK(is_ack(rx(KILO_MSG_SET_STREAM, 54, {0, 0, 0}), 54, KILO_MSG_SET_STREAM, KILO_ACK_STATUS_OK));
+  CHECK(g_lh.us_calls == 0);
+}
+
 int main() {
   test_vectors();
   test_hello_and_queries();
@@ -498,5 +546,6 @@ int main() {
   test_goals();
   test_commands();
   test_streams_and_priority();
+  test_tx_stall();
   return report("link");
 }

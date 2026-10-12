@@ -21,6 +21,9 @@ struct FakeLinkHal {
   // Simulated TX ring: `ring_used` bytes are waiting; each tx_free() call
   // first drains `drain` of them (the UART ISR). drain >= cap = never full.
   int cap = 95, ring_used = 0, drain = 1000;
+  // Simulated clock for link_hal_us(): advances `us_step` per call.
+  uint16_t now_us = 0, us_step = 100;
+  int us_calls = 0;
   uint16_t pca[16] = {};
   bool pca_ok = true;
   int reboots = 0, offset_writes = 0;
