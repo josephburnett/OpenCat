@@ -436,10 +436,9 @@ def test_head_goal(harness):
 
 def test_gait_goal(harness):
     """P2 (§3d): refusals, the start, the stop's one-period ramp-down and
-    GAIT_STOPPED on the same tick. Skipped against a firmware without the
-    gait generator (until the P2 body is merged)."""
-    if not harness.p2:
-        pytest.skip("this firmware has no gait generator (SET_GAIT is UNKNOWN_TYPE)")
+    GAIT_STOPPED on the same tick. The body in this tree has the gait
+    generator, so a harness that refuses SET_GAIT is a failure, not a skip."""
+    assert harness.p2, "the link harness has no gait generator (SET_GAIT is UNKNOWN_TYPE)"
     S = P.Posture
     g = dict(pattern=1, period_ms=500, duty=140, stride_mm=20, turn_mm=0, step_h_mm=10, body_h_mm=80, flags=7)
     hb = lambda seq: wire("HEARTBEAT", seq)

@@ -619,33 +619,47 @@ def test_idle_rest_when_the_posture_owner_leaves_before_the_balance_owner(start_
 # ---- 12: LinkStats race ------------------------------------------------------------------------
 
 def test_link_stats_snapshot_under_concurrent_counter_growth():
+    # Two writers add fresh Counter keys (each key a size change) while two readers copy the
+    # stats. The growth is bounded (KEYS per writer) so each copy stays cheap, and the readers
+    # copy for as long as the writers are adding keys, so the race window is the whole run.
+    # (On CPython with the GIL dict(Counter) is a single C call, so the lock matters for
+    # free-threaded builds and for any Python-level iteration added to as_dict() later.)
+    KEYS = 4000
     st = BodyState()
     link = SerialLink(lambda: None, state=st)
-    stop = threading.Event()
+    growing = threading.Event()
+    growing.set()
     errors = []
+    reads = [0, 0]
+    start = threading.Barrier(4)
 
-    def grow():
-        i = 0
-        while not stop.is_set():
-            link._handle(DecodeError(f"k{i}"), 0.0)
-            i += 1
+    def grow(w):
+        start.wait()
+        for i in range(KEYS):
+            link._handle(DecodeError(f"w{w}k{i}"), 0.0)
 
-    def read():
+    def read(r):
+        start.wait()
         try:
-            for _ in range(3000):
+            while growing.is_set() or reads[r] == 0:
                 st.snapshot()
+                reads[r] += 1
         except RuntimeError as e:
             errors.append(e)
-    th = [threading.Thread(target=grow) for _ in range(2)] + [threading.Thread(target=read) for _ in range(2)]
-    for t in th:
+    writers = [threading.Thread(target=grow, args=(w,)) for w in range(2)]
+    readers = [threading.Thread(target=read, args=(r,)) for r in range(2)]
+    for t in writers + readers:
         t.start()
-    for t in th[2:]:
-        t.join(30)
-    stop.set()
-    for t in th[:2]:
-        t.join(5)
+    for t in writers:
+        t.join(20)
+    growing.clear()
+    for t in readers:
+        t.join(20)
+    assert not any(t.is_alive() for t in writers + readers), "a thread did not finish"
     assert errors == []
-    assert "lock" not in st.stats.as_dict() and len(st.stats.as_dict()["decode_errors"]) > 10
+    assert min(reads) >= 1 and sum(reads) > 20, reads  # the readers really overlapped the growth
+    d = st.stats.as_dict()
+    assert "lock" not in d and len(d["decode_errors"]) == 2 * KEYS
 
 
 # ---- 14: log directory cap ------------------------------------------------------------------------
