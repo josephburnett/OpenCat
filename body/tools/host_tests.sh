@@ -26,10 +26,12 @@ bad=$(grep -nE '#include *[<"](Arduino|Wire|HardwareSerial|EEPROM|SPI)' "$BODY"/
 if [ -n "$bad" ]; then echo "$bad"; echo "lint FAILED"; fail=$((fail + 1)); else echo "lint ok"; fi
 
 # 3. Unit tests: every test links all of core/ (C++17 here; the firmware
-#    itself is built as gnu++11 by arduino-cli).
+#    itself is built as gnu++11 by arduino-cli). test/fake_avr/ stands in for
+#    the avr-libc headers, so a test can compile a hal/ file against register
+#    fakes (test_i2c.cpp).
 CXX="${CXX:-g++}"
 FLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined
-       -ffp-contract=off -DREPO_ROOT="\"$REPO\"")
+       -ffp-contract=off -DREPO_ROOT="\"$REPO\"" -I"$BODY/test/fake_avr")
 # The vendored protocol C files (src/proto, kept identical to protocol/ by
 # protocol/vendor.py) are C99: compile them with the C compiler.
 CC="${CC:-gcc}"

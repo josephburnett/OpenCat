@@ -1,6 +1,7 @@
 // The hardware side of core/link: UART rings, PCA9685 read-back, MPU
 // offsets, reboot, and the STATS / TELEMETRY values the app measures.
 #include "../core/link.h"
+#include "../hal/clock.h"
 #include "../hal/i2c.h"
 #include "../hal/mpu6050.h"
 #include "../hal/pca9685.h"
@@ -10,6 +11,7 @@
 
 bool link_hal_read(uint8_t* c) { return uart_read(c); }
 uint8_t link_hal_tx_free(void) { return uart_tx_free(); }
+uint16_t link_hal_us(void) { return (uint16_t)clock_micros(); }
 void link_hal_write(const uint8_t* data, uint8_t len) { uart_write(data, len, 0); }
 
 void link_hal_sample(LinkSample* s) {

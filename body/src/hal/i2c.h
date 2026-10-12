@@ -3,8 +3,9 @@
 // Why not Wire: Wire buffers 32 B per transaction (the PCA9685 wants one
 // 66 B burst), costs ~165 B of RAM, and its waits are unbounded in the
 // versions that matter. Here every wait for the hardware is bounded (about
-// 1 ms per byte), errors come back as codes, and a hung bus is recovered by
-// clocking SCL by hand until the stuck slave lets go of SDA.
+// 1.7 ms per action, and about 9.6 ms in total per tick period: see
+// i2c_budget_reset), errors come back as codes, and a hung bus is recovered
+// by clocking SCL by hand until the stuck slave lets go of SDA.
 //
 // No interrupts: the tick has nothing else to do while it waits, and polling
 // keeps the code small and the order of events obvious.
@@ -19,9 +20,16 @@ enum I2cErr : uint8_t {
   I2C_NACK_DATA = 3,  // the slave refused a byte
   I2C_ARB_LOST = 4,   // another master, or noise (recovered)
   I2C_BUS_STUCK = 5,  // SDA still low after recovery
+  I2C_BUDGET = 6,     // this tick's I2C time is spent: not started
 };
 
 void i2c_init(void);
+
+// Refill the per-tick I2C time budget (about 9.6 ms of polling). Called at
+// the start of every tick, by i2c_init and by each MPU init step; between
+// two refills all transfers together wait at most that long, and once it is
+// spent every transfer fails (I2C_BUDGET, counted) until the next refill.
+void i2c_budget_reset(void);
 
 // Register write: START, addr+W, reg, len bytes, STOP. data may be in RAM or,
 // with the _P variant, in flash.

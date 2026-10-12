@@ -59,6 +59,7 @@ static uint32_t imu_retry_at; // after a failed attempt, wait before the next
 
 static void run_tick(void) {
   uint32_t t0 = clock_micros();
+  i2c_budget_reset();  // this tick period's I2C time (hal/i2c.h)
   Body& b = g_body;
   TickIn in;
   in.imu = IMU_NONE;

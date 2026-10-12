@@ -95,19 +95,27 @@ const LinkCounters& link_counters(void) { return L.cnt; }
 
 static inline uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
+// How long a reply or ACK may wait for TX room: twice a full drain of the
+// 96 B ring at 250000 baud (96 x 40 us = 3.84 ms). Longer means the UDRE ISR
+// is not draining it; the frame is dropped then, instead of spinning until
+// the hardware watchdog reboots the body.
+#define TX_WAIT_US 8000u
+
 // Frame and queue one message. Every frame is exactly len + 6 wire bytes
 // (len <= 60, so COBS adds exactly one code byte). `must`: replies and ACKs
-// wait for room (the UART drains the 96 B ring in < 4 ms); streams are
-// dropped and counted instead.
+// wait for room, at most TX_WAIT_US; streams are dropped at once. A drop is
+// counted (tx_dropped, EVENT TX_DROPPED); for a dropped ACK or reply the
+// mind's retry (50 ms, same seq for commands, so the de-dup re-acks) covers.
 KILO_NOINLINE static bool emit(uint8_t type, const void* payload, uint8_t len, bool must) {
   uint8_t n = (uint8_t)(len + KILO_FRAME_OVERHEAD);
   if (link_hal_tx_free() < n) {
+    uint16_t t0 = link_hal_us();
+    while (must && link_hal_tx_free() < n)
+      if ((uint16_t)(link_hal_us() - t0) >= TX_WAIT_US) must = false;
     if (!must) {
       L.cnt.tx_dropped++;
       L.drops_this_s++;
       return false;
-    }
-    while (link_hal_tx_free() < n) {
     }
   }
   kilo_frame_encode(type, L.tx_seq++, (const uint8_t*)payload, len, wire);
