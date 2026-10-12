@@ -43,7 +43,7 @@ log = logging.getLogger("kilo.daemon")
 
 RUNNER_STALL_S = 1.0          # the pump stops stamping when the runner has not ticked for this long
 RUNNER_START_GRACE_S = 10.0   # ... or has not ticked at all this long after it started
-BEHAVIOUR_ACTIVE = ("behaviour runner active; stop it with `kilo daemon stop` (or `systemctl --user stop kilo`) "
+BEHAVIOUR_ACTIVE = ("behaviour runner active; stop it with `kilo daemon stop` (or `sudo systemctl stop kilo`) "
                     "and run `kilo run` without --behaviour, or pass --override (`kilo --override ...`) to "
                     "pause it while this command holds the body")
 

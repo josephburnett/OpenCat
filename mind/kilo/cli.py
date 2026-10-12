@@ -266,7 +266,7 @@ def _daemon_for(args: argparse.Namespace) -> Any:
 def _refuse_port_busy(args: argparse.Namespace, conn: Any, what: str) -> int:
     print(f"kilo {args.cmd}: {what} needs the serial port to itself, but the daemon (`kilo run`, pid "
           f"{conn.info.get('pid')}) holds {conn.info.get('port')} and feeds the body's watchdog. Stop it "
-          f"first (`kilo daemon stop`, or `systemctl --user stop kilo` under systemd), or pass --port "
+          f"first (`kilo daemon stop`, or `sudo systemctl stop kilo` under systemd), or pass --port "
           f"for another port.", file=sys.stderr)
     return EXIT_ERR
 
@@ -648,7 +648,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
             return
         raise FlashError(f"{port} is in use ({why}): probably a `kilo run` daemon this command could not "
                          f"reach (--direct, another user's, or root's). Stop it first (`kilo daemon stop`, "
-                         f"`systemctl --user stop kilo`), or pass --force to flash anyway.")
+                         f"`sudo systemctl stop kilo`), or pass --force to flash anyway.")
 
     lease = DaemonPortLease(conn, port) if conn is not None else None
     try:

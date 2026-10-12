@@ -1,0 +1,52 @@
+# Kilo mind daemon as a systemd *system* service running as the owner
+# (mind/README.md "Daemon and systemd"; docs/setup.md). The recommended unit.
+#
+# Installed by `sudo mind/systemd/install.sh --system` to
+# /etc/systemd/system/kilo.service, with @USER@, @GROUP@, @HOME@ and @KILO@
+# filled in (from the invoking user: `id -un`, the dialout group, getent).
+#
+#   sudo systemctl start|stop|restart kilo     systemctl status kilo
+#   journalctl -u kilo -f                      (joe is in adm; else:)
+#   tail -f ~/kilo-logs/daemon.log             (the daemon's own log, always written)
+#
+# Why a system unit: a user service starts only when the user manager does,
+# and user managers wait for systemd-user-sessions.service, which is ordered
+# after network.target, i.e. after NetworkManager has started (34 s on the
+# Pi 2 B): the daemon came up 67 s after power. This unit has no network
+# ordering at all, so Kilo starts (and runs) with no network, e.g. with the
+# Wi-Fi dongle unplugged.
+#
+# Ordering: the default dependencies only (After=sysinit.target basic.target,
+# stop before shutdown). No After=/Wants= on the serial device: the daemon
+# waits for its port itself (and for a USB replug), and KILO_PORT may be
+# ttyACM0, ttyAMA0 or a /dev/serial/by-id path.
+#
+# Settings: @HOME@/.config/kilo/env (KILO_PORT, KILO_RUN_ARGS, ...; see
+# env.example), the same file the user unit reads, editable without sudo.
+[Unit]
+Description=Kilo mind daemon (owns the body's serial port: kilo run)
+Documentation=file:@HOME@/OpenCat/mind/README.md
+After=basic.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+# /run/kilo, owned by @USER@; the daemon listens on $RUNTIME_DIRECTORY/kilo.sock
+# = /run/kilo/kilo.sock (mode 0660), the first socket every `kilo` client tries.
+RuntimeDirectory=kilo
+RuntimeDirectoryMode=0755
+WorkingDirectory=@HOME@
+EnvironmentFile=-@HOME@/.config/kilo/env
+Environment=PYTHONUNBUFFERED=1
+# No --log by default (add it to KILO_RUN_ARGS for the JSON-lines frame log); stderr (the
+# daemon's own log) goes to the journal and to ~/kilo-logs/daemon.log.
+ExecStart=@KILO@ run $KILO_RUN_ARGS
+# SIGTERM: drop goals, go silent (the body's watchdog takes over), close the port.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

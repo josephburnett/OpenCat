@@ -51,7 +51,7 @@ from kilo.link.serial_link import LinkConfig, SerialLink
 from kilo.link.transport import DEFAULT_BAUD, open_port
 from kilo.log import LOG_DIR_MAX_BYTES
 from kilo.perception.shared import SharedPercepts
-from kilo.remote import socket_candidates
+from kilo.remote import listen_socket, socket_candidates
 
 log = logging.getLogger("kilo.daemon")
 
@@ -77,7 +77,8 @@ class Daemon(OpsMixin, ClientsMixin, HoldsMixin, BehaviourMixin, RemoteIRMixin, 
         self.port = port
         self.auto_port = auto_port or port is None
         self.baud = baud
-        self.socket_path, self.socket_why = socket_candidates(socket)[0]
+        self.socket_path, self.socket_why = listen_socket(socket)
+        self._socket_explicit = bool(socket) or bool(os.environ.get("KILO_SOCKET"))
         self.logger = logger
         self.wire_logger = wire_logger
         self.factory = transport_factory or self._open_port
@@ -219,6 +220,19 @@ class Daemon(OpsMixin, ClientsMixin, HoldsMixin, BehaviourMixin, RemoteIRMixin, 
 
     async def _prepare_socket(self) -> None:
         p = self.socket_path
+        if not self._socket_explicit:
+            # One daemon per body: refuse to start beside one the clients would find
+            # first (the system service on /run/kilo, or a user-service daemon).
+            from kilo.remote import connect
+
+            for other, _why in socket_candidates():
+                if other == p or not other.exists():
+                    continue
+                conn = await asyncio.get_running_loop().run_in_executor(None, connect, other)
+                if conn is not None:
+                    pid = conn.info.get("pid")
+                    conn.close()
+                    raise SystemExit(f"kilo run: a daemon (pid {pid}) already listens on {other}")
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if p.exists() or p.is_symlink():
             from kilo.remote import connect
