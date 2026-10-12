@@ -4,6 +4,7 @@
 // degree within its limits, over several plausible per-robot EEPROM sets.
 #include <cstdlib>
 #include "../src/core/joints.h"
+#include "../src/proto/kilo_protocol.h"
 #include "check.h"
 
 // ---- legacy, transcribed. avr-gcc's double is 32-bit, so every "double"
@@ -25,6 +26,13 @@ static int legacy_calibratedPWM(int czp, int dir, int lo, int hi, int a2p, int b
 // -------------------------------------------------------------------------
 
 int main() {
+  // The robot model's limits are the spec's ([[joints]], by id): each row of
+  // JOINTS[] names its joint's KILO_JOINT_<NAME>_LO/HI by hand, so check the
+  // rows against the id-ordered table.
+  static const int8_t spec_limits[JOINT_COUNT][2] = KILO_JOINT_LIMITS_INIT;
+  for (int j = 0; j < JOINT_COUNT; j++)
+    CHECKF(joint_lo_a16((uint8_t)j) == spec_limits[j][0] * 16 && joint_hi_a16((uint8_t)j) == spec_limits[j][1] * 16,
+           "joint %d limits != spec", j);
   srand(7);
   const uint16_t oscs[] = {25000, 23100, 23500, 24700, 25300, 26500, 27400};
   const uint8_t bytes_b[] = {60, 55, 65, 40, 80};

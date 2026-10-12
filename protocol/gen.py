@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tomllib
 import types
@@ -180,6 +181,75 @@ def validate(spec: dict) -> None:
             raise SpecError(f"param {p['name']}: need i16 min <= default <= max")
     if sorted(pids) != list(range(len(pids))):
         raise SpecError("param ids must be dense from 0")
+    validate_shared(spec)
+
+
+def field_range(spec: dict, msg: str, name: str) -> tuple[int, int]:
+    m = next(m for m in spec["messages"] if m["name"] == msg)
+    f = next(f for f in m["fields"] if f["name"] == name)
+    return tuple(f["range"])
+
+
+def validate_shared(spec: dict) -> None:
+    """The shared defaults and limits ([gait], [gait_patterns.*], [[joints]],
+    [balance], [head]) against each other and the wire ranges."""
+    link = spec["link"]
+    g = spec["gait"]
+    if set(g) != {"bob_deg", "wag_deg", "stance_h_256"}:
+        raise SpecError("gait: unexpected or missing keys")
+    for k in ("bob_deg", "wag_deg"):
+        if not 0 <= g[k] <= 90:
+            raise SpecError(f"gait.{k}: 0..90")
+    if not 1 <= g["stance_h_256"] <= 255:
+        raise SpecError("gait.stance_h_256: 1..255")
+    pats = spec["gait_patterns"]
+    if list(pats) != list(spec["enums"]["gait_pattern"]):
+        raise SpecError("gait_patterns: need every enums.gait_pattern name, in enum order")
+    if list(spec["enums"]["gait_pattern"].values()) != list(range(len(pats))):
+        raise SpecError("enums.gait_pattern: values must be dense from 0 (they index the pattern table)")
+    for n, p in pats.items():
+        if set(p) != {"period_ms", "duty", "stride_mm", "step_h_mm", "body_h_256", "offsets"}:
+            raise SpecError(f"gait_patterns.{n}: unexpected or missing keys")
+        for k in ("period_ms", "duty", "stride_mm", "step_h_mm"):
+            lo, hi = field_range(spec, "SET_GAIT", k)
+            if not lo <= p[k] <= hi:
+                raise SpecError(f"gait_patterns.{n}.{k} outside SET_GAIT's range {lo}..{hi}")
+        if not 1 <= p["body_h_256"] <= 255:
+            raise SpecError(f"gait_patterns.{n}.body_h_256: 1..255")
+        if len(p["offsets"]) != 4 or not all(0 <= o <= 255 for o in p["offsets"]):
+            raise SpecError(f"gait_patterns.{n}.offsets: 4 values 0..255 (LF RF RB LB)")
+    joints = spec["joints"]
+    if [j["id"] for j in joints] != list(range(link["channel_count"])):
+        raise SpecError("joints: ids 0..channel_count-1, in order")
+    if sum(bool(j["driven"]) for j in joints) != link["joint_count"]:
+        raise SpecError("joints: driven count != link.joint_count")
+    if len({j["name"] for j in joints}) != len(joints):
+        raise SpecError("joints: duplicate name")
+    for j in joints:
+        if not -128 <= j["lo"] <= j["hi"] <= 127:
+            raise SpecError(f"joint {j['name']}: need int8 lo <= hi")
+    b = spec["balance"]
+    if set(b) != {"kp_q8", "kd_ms", "deadband_deg", "max_corr_deg", "limit_deg"}:
+        raise SpecError("balance: unexpected or missing keys")
+    for k in ("deadband_deg", "max_corr_deg"):
+        if field_range(spec, "SET_BALANCE", k)[1] != b["limit_deg"]:
+            raise SpecError(f"balance.limit_deg != SET_BALANCE {k} range max")
+        if not 0 <= b[k] <= b["limit_deg"]:
+            raise SpecError(f"balance.{k}: 0..limit_deg")
+    for k in ("kp_q8", "kd_ms"):
+        if not 0 <= b[k] <= 255:
+            raise SpecError(f"balance.{k}: u8")
+    # SET_BALANCE's field notes quote the defaults ("default 128 = 0.5").
+    m = next(m for m in spec["messages"] if m["name"] == "SET_BALANCE")
+    for f in m["fields"]:
+        d = re.match(r"default (\d+)", f.get("note", ""))
+        if d and int(d.group(1)) != b[f["name"]]:
+            raise SpecError(f"SET_BALANCE.{f['name']}: note says default {d.group(1)}, balance.{f['name']} = {b[f['name']]}")
+    h = spec["head"]
+    if set(h) != {"speed_dps", "max_deg", "not_held"}:
+        raise SpecError("head: unexpected or missing keys")
+    if h["not_held"] != -32768 or not 0 < h["max_deg"] * 16 <= 32767 or not 0 <= h["speed_dps"] <= 0xFFFF:
+        raise SpecError("head: not_held -32768, max_deg * 16 within i16, speed_dps u16")
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +506,7 @@ def gen_c(spec: dict) -> str:
     w("/* Initializer for an int16_t [KILO_PARAM_COUNT] array of defaults, in id order. */")
     w("#define KILO_PARAM_DEFAULTS_INIT { " + ", ".join(str(p["default"]) for p in params) + " }")
     w("")
+    gen_c_shared(spec, w)
     # field table for tests / tools (opt-in, costs flash)
     w("#ifdef KILO_PROTOCOL_FIELD_TABLE")
     w("/* Scalar field layout, for host tests and tools. Not for the AVR build. */")
@@ -486,6 +557,56 @@ def gen_c(spec: dict) -> str:
     w("")
     w("#endif /* KILO_PROTOCOL_H */")
     return "\n".join(L) + "\n"
+
+
+def gen_c_shared(spec: dict, w) -> None:
+    """Shared defaults and limits: #defines and table initializers only (no
+    objects), so a unit pays nothing for what it does not use and a table
+    lives where its user declares it (PROGMEM on the AVR: flash, never RAM)."""
+    def num(v: int) -> str:
+        return f"({v})" if v < 0 else str(v)
+
+    g = spec["gait"]
+    w("/* ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ---- */")
+    w(f"#define KILO_GAIT_BOB_DEG {g['bob_deg']} /* head bob amplitude, deg */")
+    w(f"#define KILO_GAIT_WAG_DEG {g['wag_deg']} /* tail wag amplitude, deg */")
+    w(f"#define KILO_GAIT_STANCE_H_256 {g['stance_h_256']} /* STANCE's body height, /256 of L1 + L2 */")
+    pats = spec["gait_patterns"]
+    w(f"#define KILO_GAIT_PATTERN_COUNT {len(pats)}")
+    for n, p in pats.items():
+        for k in ("period_ms", "duty", "stride_mm", "step_h_mm", "body_h_256"):
+            w(f"#define KILO_GAIT_{n}_{k.upper()} {num(p[k])}")
+        for leg, o in zip(("LF", "RF", "RB", "LB"), p["offsets"]):
+            w(f"#define KILO_GAIT_{n}_OFFSET_{leg} {o}")
+    w("/* Initializer for a [KILO_GAIT_PATTERN_COUNT] table of {uint16_t period_ms;")
+    w("   uint8_t duty, body_h_256; uint8_t offsets[4] (LF RF RB LB)}, in enum")
+    w("   gait_pattern order. */")
+    w("#define KILO_GAIT_PATTERN_TABLE_INIT { \\")
+    for n, p in pats.items():
+        offs = ", ".join(str(o) for o in p["offsets"])
+        w(f"    {{{p['period_ms']}, {p['duty']}, {p['body_h_256']}, {{{offs}}}}}, /* {n} */ \\")
+    w("}")
+    w("/* Joint limits, whole degrees, by legacy joint id. */")
+    for j in spec["joints"]:
+        n = j["name"].upper()
+        w(f"#define KILO_JOINT_{n}_ID {j['id']}")
+        w(f"#define KILO_JOINT_{n}_LO {num(j['lo'])}")
+        w(f"#define KILO_JOINT_{n}_HI {num(j['hi'])}")
+    w("/* Initializer for an int8_t [KILO_CHANNEL_COUNT][2] table of {lo, hi}, in id order. */")
+    w("#define KILO_JOINT_LIMITS_INIT { \\")
+    for j in spec["joints"]:
+        w(f"    {{{j['lo']}, {j['hi']}}}, /* {j['id']} {j['name']} */ \\")
+    w("}")
+    b = spec["balance"]
+    w("/* SET_BALANCE state at boot; dead band and clamp above LIMIT_DEG are BAD_ARG. */")
+    for k in ("kp_q8", "kd_ms", "deadband_deg", "max_corr_deg", "limit_deg"):
+        w(f"#define KILO_BALANCE_{k.upper()} {b[k]}")
+    h = spec["head"]
+    w("/* SET_HEAD: the mind's default slew (deg/s) and target limit (deg); the i16 that leaves a joint to its owner. */")
+    w(f"#define KILO_HEAD_SPEED_DPS {h['speed_dps']}")
+    w(f"#define KILO_HEAD_MAX_DEG {h['max_deg']}")
+    w(f"#define KILO_HEAD_NOT_HELD ((int16_t)({h['not_held'] + 1} - 1))")
+    w("")
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +862,7 @@ def gen_py(spec: dict) -> str:
     w("PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}")
     w("")
     w("")
+    gen_py_shared(spec, w)
     w("def payload_len_status(msg_type: int, payload: bytes) -> int:")
     w('    """LEN_OK, LEN_BAD or LEN_UNKNOWN_TYPE, exactly as kilo_payload_len_check() in C."""')
     w("    n = len(payload)")
@@ -792,6 +914,58 @@ def gen_py(spec: dict) -> str:
     w("        kw[k] = v")
     w("    return cls(**kw)")
     return "\n".join(L) + "\n"
+
+
+def gen_py_shared(spec: dict, w) -> None:
+    """Shared defaults and limits as plain data: the raw spec values (a derived
+    value such as Kp = kp_q8 / 256 is computed by its one consumer)."""
+    g = spec["gait"]
+    w("# ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ----")
+    w(f"GAIT_BOB_DEG = {g['bob_deg']}")
+    w(f"GAIT_WAG_DEG = {g['wag_deg']}")
+    w(f"GAIT_STANCE_H_256 = {g['stance_h_256']}")
+    w("")
+    w("")
+    w("@dataclass(frozen=True)")
+    w("class GaitPatternDefaults:")
+    w('    """A gait pattern\'s defaults (spec [gait_patterns.*]): body_h_256 is /256 of')
+    w('    LEG_L1_MM + LEG_L2_MM, offsets are /256 of a cycle for legs LF RF RB LB."""')
+    for k, t in (("pattern", "int"), ("name", "str"), ("period_ms", "int"), ("duty", "int"), ("stride_mm", "int"),
+                 ("step_h_mm", "int"), ("body_h_256", "int"), ("offsets", "tuple[int, int, int, int]")):
+        w(f"    {k}: {t}")
+    w("")
+    w("")
+    enum = spec["enums"]["gait_pattern"]
+    w("GAIT_PATTERN_DEFAULTS: dict[int, GaitPatternDefaults] = {")
+    for n, p in spec["gait_patterns"].items():
+        w(f"    {enum[n]}: GaitPatternDefaults({enum[n]}, {n!r}, {p['period_ms']}, {p['duty']}, {p['stride_mm']}, "
+          f"{p['step_h_mm']}, {p['body_h_256']}, {tuple(p['offsets'])!r}),")
+    w("}")
+    w("")
+    w("")
+    w("@dataclass(frozen=True)")
+    w("class JointInfo:")
+    w('    """A joint (spec [[joints]]): legacy id, name, driven, limits in whole degrees."""')
+    for k, t in (("id", "int"), ("name", "str"), ("driven", "bool"), ("lo", "int"), ("hi", "int")):
+        w(f"    {k}: {t}")
+    w("")
+    w("")
+    w("JOINT_INFO: dict[int, JointInfo] = {")
+    for j in spec["joints"]:
+        w(f"    {j['id']}: JointInfo({j['id']}, {j['name']!r}, {bool(j['driven'])}, {j['lo']}, {j['hi']}),")
+    w("}")
+    b = spec["balance"]
+    w("# SET_BALANCE defaults (field name -> raw value); dead band and clamp above BALANCE_LIMIT_DEG are BAD_ARG.")
+    w("BALANCE_DEFAULTS: dict[str, int] = {"
+      + ", ".join(f"{k!r}: {b[k]}" for k in ("kp_q8", "kd_ms", "deadband_deg", "max_corr_deg")) + "}")
+    w(f"BALANCE_LIMIT_DEG = {b['limit_deg']}")
+    h = spec["head"]
+    w("# SET_HEAD: the mind's default slew (deg/s) and target limit (deg); the value that leaves a joint to its owner.")
+    w(f"HEAD_SPEED_DPS = {h['speed_dps']}")
+    w(f"HEAD_MAX_DEG = {h['max_deg']}")
+    w(f"HEAD_NOT_HELD = {h['not_held']}")
+    w("")
+    w("")
 
 
 # ---------------------------------------------------------------------------

@@ -25,14 +25,16 @@
 #ifndef KILO_CORE_BALANCE_H
 #define KILO_CORE_BALANCE_H
 #include <stdint.h>
+#include "../proto/kilo_protocol.h"
 #include "attitude.h"
 
-// SET_BALANCE defaults (doc §3f, est.): Kp 0.5, Kd 0.03 s, DB 2 deg, 15 deg.
-#define BAL_KP_Q8 128
-#define BAL_KD_MS 30
-#define BAL_DB_DEG 2
-#define BAL_MAX_DEG 15
-#define BAL_MAX_DEG_LIMIT 30  // SET_BALANCE max_corr_deg / deadband_deg above this: BAD_ARG
+// SET_BALANCE defaults (doc §3f, est.; spec [balance]): Kp 0.5, Kd 0.03 s,
+// DB 2 deg, 15 deg.
+#define BAL_KP_Q8 KILO_BALANCE_KP_Q8
+#define BAL_KD_MS KILO_BALANCE_KD_MS
+#define BAL_DB_DEG KILO_BALANCE_DEADBAND_DEG
+#define BAL_MAX_DEG KILO_BALANCE_MAX_CORR_DEG
+#define BAL_MAX_DEG_LIMIT KILO_BALANCE_LIMIT_DEG  // SET_BALANCE max_corr_deg / deadband_deg above this: BAD_ARG
 #define BAL_SLEW_A16 16       // 1 deg per tick
 
 // Sign of the deviation fed to the legacy gains (balance_map), relative to

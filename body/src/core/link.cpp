@@ -51,6 +51,7 @@ static_assert(SAME(OWN_IDLE, KILO_OWNER_IDLE) && SAME(OWN_GAIT, KILO_OWNER_GAIT)
               "owners != spec");
 static_assert(SAME(DRIVEN_COUNT, KILO_JOINT_COUNT) && SAME(JOINT_COUNT, KILO_CHANNEL_COUNT), "joint counts != spec");
 static_assert(SAME(PCA_FULL_OFF, KILO_PCA_FULL_OFF_BIT), "full-off bit != spec");
+static_assert(SAME(JOINT_OFF, KILO_HEAD_NOT_HELD), "SET_HEAD not-held value != JOINT_OFF");
 static_assert(SAME(NOTES_LEN, KILO_BEEP_MAX_NOTES), "BEEP queue != spec");
 static_assert(SAME(GOAL_BUSY, KILO_ACK_STATUS_BUSY) && SAME(GOAL_NO_TRICK, KILO_ACK_STATUS_NO_TRICK) &&
                   SAME(GOAL_STALE, KILO_ACK_STATUS_STALE) && SAME(GOAL_LOW_BATT, KILO_ACK_STATUS_REFUSED_LOW_BATT),

@@ -1,10 +1,14 @@
 #include "joints.h"
 #include "pgm.h"
+#include "../proto/kilo_protocol.h"
 
 // One row per legacy joint id, straight from src/OpenCat.h (pwm_pin[],
-// rotationDirection[], middleShift[], angleLimit[]). Limits are whole degrees
-// and fit int8. Rows 3-7 are the unused 12-DoF slots: kept so the legacy
-// EEPROM arrays can be cross-checked in full, never driven.
+// rotationDirection[], middleShift[]); the limits (angleLimit[], whole
+// degrees, int8) come from the spec's [[joints]] (protocol/spec.toml), which
+// the mind's trick validator reads too. test_joints.cpp checks every row's
+// limits against KILO_JOINT_LIMITS_INIT (id order). Rows 3-7 are the unused
+// 12-DoF slots: kept so the legacy EEPROM arrays can be cross-checked in
+// full, never driven.
 //
 // Exception: the tail (row 2) is dir +1, the Nybble value up to
 // N_240702. Upstream commit b152455 ("support robotic arm", N_240907) flipped
@@ -21,22 +25,22 @@ struct JointRow {
 };
 
 static const JointRow JOINTS[JOINT_COUNT] PROGMEM = {
-    {12, 1, 0, -120, 120},    // 0 head pan
-    {11, -1, 15, -80, 45},    // 1 head tilt
-    {4, 1, 0, -120, 120},     // 2 tail (+1: see note above)
-    {3, 1, 0, -120, 120},     // 3 unused
-    {13, 1, -45, -90, 60},    // 4 unused
-    {10, -1, -45, -90, 60},   // 5 unused
-    {5, 1, -45, -90, 90},     // 6 unused
-    {2, -1, -45, -90, 90},    // 7 unused
-    {14, 1, 10, -100, 80},    // 8 LF shoulder
-    {9, -1, 10, -100, 80},    // 9 RF shoulder
-    {6, -1, -10, -80, 100},   // 10 RB shoulder
-    {1, 1, -10, -80, 100},    // 11 LB shoulder
-    {15, -1, -30, -60, 120},  // 12 LF knee
-    {8, 1, -30, -60, 120},    // 13 RF knee
-    {7, 1, 30, -120, 60},     // 14 RB knee
-    {0, -1, 30, -120, 60},    // 15 LB knee
+    {12, 1, 0, KILO_JOINT_HEAD_PAN_LO, KILO_JOINT_HEAD_PAN_HI},  // 0 head pan
+    {11, -1, 15, KILO_JOINT_HEAD_TILT_LO, KILO_JOINT_HEAD_TILT_HI},  // 1 head tilt
+    {4, 1, 0, KILO_JOINT_TAIL_LO, KILO_JOINT_TAIL_HI},  // 2 tail (+1: see note above)
+    {3, 1, 0, KILO_JOINT_UNUSED_3_LO, KILO_JOINT_UNUSED_3_HI},  // 3 unused
+    {13, 1, -45, KILO_JOINT_UNUSED_4_LO, KILO_JOINT_UNUSED_4_HI},  // 4 unused
+    {10, -1, -45, KILO_JOINT_UNUSED_5_LO, KILO_JOINT_UNUSED_5_HI},  // 5 unused
+    {5, 1, -45, KILO_JOINT_UNUSED_6_LO, KILO_JOINT_UNUSED_6_HI},  // 6 unused
+    {2, -1, -45, KILO_JOINT_UNUSED_7_LO, KILO_JOINT_UNUSED_7_HI},  // 7 unused
+    {14, 1, 10, KILO_JOINT_LF_SHOULDER_LO, KILO_JOINT_LF_SHOULDER_HI},  // 8 LF shoulder
+    {9, -1, 10, KILO_JOINT_RF_SHOULDER_LO, KILO_JOINT_RF_SHOULDER_HI},  // 9 RF shoulder
+    {6, -1, -10, KILO_JOINT_RB_SHOULDER_LO, KILO_JOINT_RB_SHOULDER_HI},  // 10 RB shoulder
+    {1, 1, -10, KILO_JOINT_LB_SHOULDER_LO, KILO_JOINT_LB_SHOULDER_HI},  // 11 LB shoulder
+    {15, -1, -30, KILO_JOINT_LF_KNEE_LO, KILO_JOINT_LF_KNEE_HI},  // 12 LF knee
+    {8, 1, -30, KILO_JOINT_RF_KNEE_LO, KILO_JOINT_RF_KNEE_HI},  // 13 RF knee
+    {7, 1, 30, KILO_JOINT_RB_KNEE_LO, KILO_JOINT_RB_KNEE_HI},  // 14 RB knee
+    {0, -1, 30, KILO_JOINT_LB_KNEE_LO, KILO_JOINT_LB_KNEE_HI},  // 15 LB knee
 };
 
 static const uint8_t CANONICAL[DRIVEN_COUNT] PROGMEM = {0,  1,  2,  8,  9, 10,

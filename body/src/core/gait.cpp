@@ -5,28 +5,20 @@
 #include "params.h"
 #include "pgm.h"
 
-// Per pattern (doc §3d, all (est.), to be tuned): defaults for the fields a
-// SET_GAIT may leave 0 (outside their spec range: period, duty, body
-// height), and the leg phase offsets in 1/256 cycle (LF, RF, RB, LB). A leg swings when phi + offset crosses duty, so a larger offset
-// swings earlier: WALK/CRAWL give LB -> LF -> RB -> RF (the lateral
-// sequence), TROT the diagonal pairs LF+RB, RF+LB. (The stride default of
-// §3d, 30 / 35 / 25 mm, is the mind's: stride 0 is a real value, turning
-// in place; likewise step 0, a shuffle: the mind sends §3d's 15 / 12 / 18.)
+// Per pattern (doc §3d, spec [gait_patterns.*]: the numbers and their
+// rationale live in protocol/spec.toml): defaults for the fields a SET_GAIT
+// may leave 0 (outside their spec range: period, duty, body height), and the
+// leg phase offsets in 1/256 cycle (LF, RF, RB, LB). A leg swings when phi +
+// offset crosses duty, so a larger offset swings earlier. (The spec's stride
+// and step defaults are the mind's: stride 0 is a real value, turning in
+// place; likewise step 0, a shuffle.) The row layout is the one
+// KILO_GAIT_PATTERN_TABLE_INIT fills, in enum gait_pattern order.
 struct PatRow {
   uint16_t period_ms;
   uint8_t duty, h_256;  // h_256: body height / (L1 + L2), /256
   uint8_t off[4];
 };
-// Periods: WALK 1000 and CRAWL 1500 (§3d first said 800 / 1200). With
-// Kilo's measured legs (45 + 50 mm) the shorter periods asked the knees for
-// 9.3 and 10.0 deg per tick at the default stride and step height, i.e. the
-// safety slew (SLEW_MAX_A16, 10 deg/tick) would have clipped the crawl's
-// swing. Tuning on Kilo will move these again.
-static const PatRow PAT[3] PROGMEM = {
-    {1000, 192, 205, {128, 0, 64, 192}},  // WALK
-    {500, 140, 205, {0, 128, 0, 128}},    // TROT
-    {1500, 218, 179, {128, 0, 64, 192}},  // CRAWL
-};
+static const PatRow PAT[KILO_GAIT_PATTERN_COUNT] PROGMEM = KILO_GAIT_PATTERN_TABLE_INIT;
 #define PAT_U8(pat, field) PGM_U8(&PAT[pat].field)
 
 #define SLEW_Q2 2      // 0.5 mm per tick: stride, turn, step and body height
@@ -47,7 +39,7 @@ void gait_init(Gait& g) {
   gait_stance_default(g);
 }
 
-void gait_stance_default(Gait& g) { g.h = (int16_t)(((int32_t)ik_reach_q2() * 205) >> 8); }
+void gait_stance_default(Gait& g) { g.h = (int16_t)(((int32_t)ik_reach_q2() * KILO_GAIT_STANCE_H_256) >> 8); }
 
 uint8_t gait_check(const uint8_t* p) {
   uint16_t per = rd16(p + 3);
