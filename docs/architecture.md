@@ -1,7 +1,7 @@
 # Kilo architecture: body firmware and mind software
 
 This is the design for rebuilding the firmware and control software of Kilo,
-a Petoi Nybble on a NyBoard V1_2 with a Raspberry Pi 2 Model B on its back.
+a Petoi Nybble on a NyBoard V1_2 with a Raspberry Pi 2 Model B as its mind (today in its own enclosure with its own supply, joined by the USB serial cable; riding on Kilo is the goal).
 
 **Status:** revised draft for implementation, 2026-10-10.
 

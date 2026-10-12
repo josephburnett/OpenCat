@@ -69,10 +69,40 @@ Board angles from the owner's phone level on the board.
 Still to do on Kilo: `LEG_SH_ZERO_DEG` / `LEG_KN_ZERO_DEG` in `calib`,
 first steps on the floor, tuning, H14, H9.
 
-## 4. First steps
+## 4. First steps (2026-10-11 17:34-17:40, build ded3c1d8)
 
-Not started.
+Kilo on a wood floor (owner), tethered to the Pi by the USB serial cable
+(the Pi lives in its own enclosure with its own supply, not on Kilo).
+Daemon started by hand (`--idle-posture none`); every run through
+`kilo walk ... --for S`, which stops and waits for GAIT_STOPPED. Attitude
+lines are the command's 1 Hz printout (firmware readings).
+
+| # | Command | Firmware | Owner |
+|---|---|---|---|
+| 1 | `walk march --pattern trot --period 800 --step-h 8` (balance on, body 76) | roll 1.4 → 4.5 → −16.5° over 3 s, then **FELL +1** at 17:34:56, GAIT_STOPPED, RECOVERED 2.9 s later | "wobbled until it fell over" (left side); **got up on its own**: the first verified self-recovery |
+| 2 | `walk march --pattern walk --period 1200 --step-h 8 --body-h 60 --no-balance --for 6` | pitch 1.8-4.2°, roll within ±3.8°, clean stop | "Looked good. Crouched down." |
+| 3 | `walk forward --pattern walk --stride 10 --period 1200 --step-h 8 --body-h 60 --no-balance --for 6` | within ±5°, clean stop | moved "maybe like a centimeter" (5 cm expected) |
+| 4 | `walk forward --pattern walk --stride 25 --period 1200 --step-h 8 --body-h 70 --no-balance --for 8` | pitch 1.7-3.0°, roll within ±1.8°, clean stop | **"15 cm exactly"** (15 cm expected), "slight to the left" |
+
+- **Kilo walks.** Run 4 is the first measured match between the gait maths
+  and the floor.
+- Trot in place with balance on fell within 3 s. Inference (unverified):
+  the diagonal-pair support on a 65 mm track rocks, and the geometric
+  balance may feed the rocking; to test trot again, start with
+  `--no-balance` and a lower body, and compare.
+- 10 mm steps on wood from a 60 mm crouch mostly slid (1 of 5 cm); 25 mm
+  steps at 70 mm did not slip measurably.
+- Left drift: inference, the right-leaning list (left-front knee, P1 finding
+  B4) loads the right feet more; recalibrate the knee before judging.
+- Body stats at the end: max tick 7.9 ms (cumulative; never rose during
+  walking), overruns 0, stack free 238 B (355 B before P2, 248 B after the
+  flash: the gait and its stop sequence use about 10 B more stack than
+  STANCE). Battery 8.38 V at 17:07 → 7.99 V at 17:41.
+- Not run: turning, the default (faster, higher) walk, trot forward, crawl,
+  H14, H9, start/stop video.
 
 ## 5. Tuning
 
-Not started.
+Not started. First candidates from §4: trot stability (balance off, body
+height, step height), stride vs slip on wood, the left drift after the knee
+calibration.
