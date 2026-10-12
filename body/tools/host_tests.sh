@@ -59,6 +59,21 @@ for t in "$BODY"/test/test_*.cpp; do
   if ! "$OUT/$name"; then fail=$((fail + 1)); fi
 done
 
+# 3b. HAL tests (test/hal): the real hal/ sources on fake AVR registers
+#     (test/hal/fake_avr.h and its avr/, util/ shims). Each test #includes
+#     the hal/ and core/ .cpp files it exercises, or lists sources to link
+#     on a "// LINK:" line (globs relative to body/).
+for t in "$BODY"/test/hal/test_*.cpp; do
+  name=hal_$(basename "$t" .cpp)
+  echo "== $name"
+  srcs=()
+  for f in $(sed -n 's|^// LINK: ||p' "$t"); do srcs+=("$BODY"/$f); done
+  if ! "$CXX" "${FLAGS[@]}" -I"$BODY/test/hal" -o "$OUT/$name" "$t" "${srcs[@]}" "$BODY/test/hal/fake_avr.cpp" "${PROTO[@]}" "${LDLIBS[@]}"; then
+    echo "$name: BUILD FAILED"; fail=$((fail + 1)); continue
+  fi
+  if ! "$OUT/$name"; then fail=$((fail + 1)); fi
+done
+
 # 4. The stdin-driven dispatch harness used by mind/tests/test_crosscheck.py
 #    must keep building.
 echo "== link_harness (build only; run by mind/tests/test_crosscheck.py)"
