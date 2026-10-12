@@ -1,8 +1,9 @@
 """A simulated body for testing the mind without hardware (§6).
 
-§6's eventual virtual body is ``body/test/vbody``: the real firmware ``core/``
-on stub HALs. This module is the Python stand-in. It speaks the real protocol
-(the vendored COBS/CRC codec and the generated message dataclasses) and
+§6's virtual body on the real firmware ``core/`` is ``kilo.vbody.core``
+(body/test/core_harness.cpp); this module is the Python stand-in, and
+tests/test_corebody.py lists where the two differ (the core is right). It
+speaks the real protocol (the vendored COBS/CRC codec and the generated message dataclasses) and
 implements the P0 body's message-level contract, the same one the C link layer
 implements (docs/architecture.md §4 "P0 dispatch"); a cross-check test feeds
 both the same frames and compares the replies:
@@ -44,8 +45,9 @@ both the same frames and compares the replies:
   pitch/roll in STANCE and while walking; an epoch bump resets it;
 - JOINTS at the SET_STREAM joints divider: fake angles (LIMP: -32768), legs
   oscillating with the gait phase, head tilt bob and tail wag when flagged;
-- balance (P1): the SET_POSTURE balance flag (cleared by an epoch bump) or
-  SET_BALANCE enable turns it on in SIT and STAND outside any reflex; TELEMETRY
+- balance (P1): the SET_POSTURE balance flag or SET_BALANCE enable (both
+  cleared by an epoch bump, as on the body; the link refreshes SET_BALANCE at
+  5 Hz) turns it on in SIT and STAND outside any reflex; TELEMETRY
   flags bit 0 mirrors that, and the simulated pitch/roll wobble shrinks. The
   controller itself is not simulated;
 - tricks (P1, docs §3e): the body's upload rules (TRICK_BEGIN / TRICK_FRAMES
@@ -347,7 +349,8 @@ class VirtualBody:
     def _epoch_bump(self, trick_reason: int = TDR.PREEMPTED, gait_ramp: bool = False) -> None:
         self.epoch = (self.epoch + 1) & 0xFF
         self.goals.clear()
-        self.balance_req = False  # the posture flag is a motion goal; SET_BALANCE settings stay
+        self.balance_req = False  # the posture flag is a motion goal
+        self.balance["enable"] = 0  # so is SET_BALANCE's enable (body_epoch_bump; the gains stay)
         self.head_until = None    # the head hold too
         self.pose = (0, 0, 0, 0)  # and the body pose
         self._trick_end(trick_reason)  # TRICK_DONE carries the new epoch

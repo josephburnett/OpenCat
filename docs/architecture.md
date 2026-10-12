@@ -1639,15 +1639,20 @@ Appendix H has the per-unit criteria.
 simavr. This catches 16-bit `int` and promotion bugs, and gives real cycle
 counts that replace the estimates in 3a.
 
-**Virtual body.** `body/test/vbody` links `core/` with stub HALs (scripted IMU,
-fake ultrasonic, recorded servo counts) and speaks the real protocol on a pty.
-The mind runs against it unchanged on a desktop or the Pi. Integration tests
-cover:
-- watchdog stages;
-- epoch refusal after a simulated fall;
-- trick upload and play;
-- ACK de-duplication;
-- reboot detection.
+**Virtual body.** `body/test/core_harness.cpp` links `core/` with the host
+fakes of its seams (scripted attitude, IMU status and battery counts, recorded
+servo counts) and runs main.cpp's tick from stdin; `mind/kilo/vbody/core.py`
+puts it on a pty in real time (`python -m kilo.vbody.core`) or, for tests, on
+an in-process transport in lockstep with a `SerialLink` on a simulated clock
+(one step = one 20 ms tick). `mind/tests/test_corebody.py` drives it through
+the real `SerialLink`/`BodyClient`:
+- HELLO, contact, telemetry rate, reboot detection (warm boot hold);
+- the watchdog stages, to the tick, and STALE refusals after the bump;
+- trick upload, play, BUSY, pre-emption (PREEMPTED) and LIMP (STOPPED);
+- the gait's start through STANCE, ramp, stop, landing and one GAIT_STOPPED;
+- the fall reflex from the IMU (FELL, rc, RECOVERED; RECOVERY_FAILED);
+- SET_BALANCE's enable cleared by an epoch bump and restored by the 5 Hz
+  refresh.
 
 **Python tests.** pytest covers:
 - the codec vs `protocol/vectors/*.json`;
