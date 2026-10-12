@@ -325,7 +325,7 @@ def test_subscription_streams_at_the_requested_rate(start_daemon):
 
 
 def test_a_slow_client_does_not_block_the_loop(start_daemon, monkeypatch):
-    monkeypatch.setattr(dmod, "STREAM_BUFFER_MAX", 4096)
+    monkeypatch.setattr(dmod.streams, "STREAM_BUFFER_MAX", 4096)
     d, vb, path, sock = start_daemon()
     slow = socket.socket(socket.AF_UNIX)
     slow.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -393,7 +393,7 @@ def test_release_lease_expires_and_disconnect_keeps_the_lease(start_daemon, monk
     reopened under avrdude: the lease is honoured after the disconnect, and
     every reopen settles the port first."""
     settled = []
-    monkeypatch.setattr(dmod, "settle_port", lambda port, baud=None, **kw: settled.append(port) or [])
+    monkeypatch.setattr(dmod.port, "settle_port", lambda port, baud=None, **kw: settled.append(port) or [])
     d, vb, path, sock = start_daemon()
     body = remote(sock)
     try:

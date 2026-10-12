@@ -17,7 +17,8 @@ Stream messages only follow a ``subscribe`` request and carry no id.
 
 ``socket_path()`` is the one resolver both sides use. ``RemoteBody`` has the
 BodyClient methods the CLI calls (and proxies any other public BodyClient
-method through the generic ``call`` op when its arguments are JSON-able), so
+method name to the daemon's generic ``call`` op, which serves only the few in
+``kilo.daemon.ops.CALL_ALLOWED``: ``look``, ``release_head``, ``ping``), so
 the command functions in kilo.cli run unchanged against either.
 """
 
@@ -534,7 +535,9 @@ class RemoteBody:
 
     def __getattr__(self, name: str) -> Any:
         """Any other public BodyClient method, through the daemon's generic
-        ``call`` op (arguments and result must be JSON-able)."""
+        ``call`` op (arguments and result must be JSON-able). The daemon
+        serves only ``kilo.daemon.ops.CALL_ALLOWED`` and refuses the rest
+        (ValueError)."""
         if name.startswith("_") or not callable(getattr(BodyClient, name, None)):
             raise AttributeError(name)
 
