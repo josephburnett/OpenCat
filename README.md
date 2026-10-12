@@ -21,9 +21,9 @@ that share the work:
 - `protocol/`: the single definition of the messages between the two; the C
   and Python sides are generated from it.
 
-Where to read more: `docs/architecture.md` is the design,
-`docs/handoff-2026-10-11.md` is where things stand, `mind/README.md` lists the
-commands, and `docs/p*-hardware-test*.md` record what has been tried on Kilo.
+Where to read more: `docs/architecture.md` is the design, `docs/setup.md`
+sets up a dev host and the Pi, `mind/README.md` lists the commands, and
+`docs/p*-hardware-test*.md` record what has been tried on Kilo.
 
 The original OpenCat firmware (`OpenCat.ino` and `src/`) is still in the
 tree: `src/InstinctNybble.h` holds the stock postures and skills that the new

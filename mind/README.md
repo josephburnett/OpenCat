@@ -30,6 +30,7 @@ one on connect) are only sent while the mind's main loop proved alive within
 
 ## Install on the Pi
 
+The full recipe for the Pi and a dev host is `docs/setup.md`; the essentials:
 pyserial comes from apt (`python3-serial`, 3.5). Recommended: a per-repo venv
 that can see the system site packages, so pyserial is not installed twice and
 the system Python stays untouched:
