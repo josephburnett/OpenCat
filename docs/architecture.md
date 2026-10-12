@@ -1667,19 +1667,20 @@ give real cycle counts and stack high-water marks that replace the estimates in
 3a. Today the 16-bit concerns are covered only by the bare-type lint and the
 avr-gcc builds, and stack depth only by `stack_free_min` read back from Kilo.
 
-**Virtual body.** What exists is the Python virtual body `mind/kilo/vbody/sim.py`
-(`kilo vbody`): a re-implementation of the body's dispatch and state machines
-that speaks the real protocol on a pty, cross-checked against the C dispatch
-(below). *Planned, not done:* `body/test/vbody`, which would link `core/` with
-stub HALs (scripted IMU, fake ultrasonic, recorded servo counts) and speak the
-real protocol on a pty. Either way the mind runs against it unchanged on a
-desktop or the Pi. Integration tests (`mind/tests`, against the Python vbody)
-cover:
-- watchdog stages;
-- epoch refusal after a simulated fall;
-- trick upload and play;
-- ACK de-duplication;
-- reboot detection.
+**Virtual body.** `body/test/core_harness.cpp` links `core/` with the host
+fakes of its seams (scripted attitude, IMU status and battery counts, recorded
+servo counts) and runs main.cpp's tick from stdin; `mind/kilo/vbody/core.py`
+puts it on a pty in real time (`python -m kilo.vbody.core`) or, for tests, on
+an in-process transport in lockstep with a `SerialLink` on a simulated clock
+(one step = one 20 ms tick). `mind/tests/test_corebody.py` drives it through
+the real `SerialLink`/`BodyClient`:
+- HELLO, contact, telemetry rate, reboot detection (warm boot hold);
+- the watchdog stages, to the tick, and STALE refusals after the bump;
+- trick upload, play, BUSY, pre-emption (PREEMPTED) and LIMP (STOPPED);
+- the gait's start through STANCE, ramp, stop, landing and one GAIT_STOPPED;
+- the fall reflex from the IMU (FELL, rc, RECOVERED; RECOVERY_FAILED);
+- SET_BALANCE's enable cleared by an epoch bump and restored by the 5 Hz
+  refresh.
 
 **Python tests.** pytest covers:
 - the codec vs `protocol/vectors/*.json`;

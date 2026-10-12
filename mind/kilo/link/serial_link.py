@@ -215,6 +215,9 @@ class SerialLink:
         self._silent = passive
         self.last_tx: tuple[float, float, str] | None = None  # (clock, wall time, type) of the last frame
         self.last_heartbeat: tuple[float, float] | None = None  # (clock, wall time)
+        # Completed writer passes (housekeeping included): a stepped clock
+        # (kilo.vbody.core) waits for one to start and end after each step.
+        self.writer_passes = 0
 
     # ---- lifecycle -------------------------------------------------------------
     def start(self) -> "SerialLink":
@@ -515,6 +518,7 @@ class SerialLink:
                 self._housekeeping()
             except Exception:
                 log.exception("link housekeeping failed")
+            self.writer_passes += 1
 
     def _send_frame(self, typ: int, seq: int, payload: bytes, name: str) -> bool:
         with self._tx_lock:

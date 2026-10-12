@@ -60,6 +60,10 @@ echo "== link_harness (build only; run by mind/tests/test_crosscheck.py)"
 if ! "$BODY/tools/build_link_harness.sh" "$OUT/link_harness"; then
   echo "link_harness: BUILD FAILED"; fail=$((fail + 1))
 fi
+echo "== core_harness (build only; run by mind/tests/test_corebody.py)"
+if ! "$BODY/tools/build_link_harness.sh" "$OUT/core_harness" core_harness; then
+  echo "core_harness: BUILD FAILED"; fail=$((fail + 1))
+fi
 
 if [ "$fail" -eq 0 ]; then echo "host tests: ALL PASSED"; else echo "host tests: $fail FAILED"; fi
 exit "$fail"

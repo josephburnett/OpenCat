@@ -581,8 +581,10 @@ body (SET_GAIT/SET_BODY_POSE UNKNOWN_TYPE, STANCE BAD_ARG), which the
 cross-check uses against a firmware without the gait. `VirtualBody.process(data, now)` drives it synchronously
 (replies are appended to `sent` and written to the transport, if any); a
 cross-check test compares it frame by frame with the body's C dispatch. It is
-a stand-in for §6's `body/test/vbody`, which will run the real firmware core
-on stub HALs.
+a stand-in for the real firmware core, which `kilo/vbody/core.py` runs as a
+virtual body (`body/test/core_harness.cpp` on host fakes; `python -m
+kilo.vbody.core` serves it on a pty, `tests/test_corebody.py` drives it in
+lockstep); the differences found between the two are listed in that test.
 
 ## Tricks
 

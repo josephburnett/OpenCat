@@ -1,8 +1,9 @@
 """A simulated body for testing the mind without hardware (§6).
 
-§6's eventual virtual body is ``body/test/vbody``: the real firmware ``core/``
-on stub HALs. This module is the Python stand-in. It speaks the real protocol
-(the vendored COBS/CRC codec and the generated message dataclasses) and
+§6's virtual body on the real firmware ``core/`` is ``kilo.vbody.core``
+(body/test/core_harness.cpp); this module is the Python stand-in, and
+tests/test_corebody.py lists where the two differ (the core is right). It
+speaks the real protocol (the vendored COBS/CRC codec and the generated message dataclasses) and
 implements the P0 body's message-level contract, the same one the C link layer
 implements (docs/architecture.md §4 "P0 dispatch"); a cross-check test feeds
 both the same frames and compares the replies:
