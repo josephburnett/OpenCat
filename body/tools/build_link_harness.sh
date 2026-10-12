@@ -4,6 +4,7 @@
 # Usage: body/tools/build_link_harness.sh OUTPUT_BINARY
 set -eu
 BODY="$(cd "$(dirname "$0")/.." && pwd)"
+. "$BODY/tools/common.sh"
 OUT="${1:?usage: build_link_harness.sh OUTPUT_BINARY}"
 DIR="$(dirname "$OUT")"
 mkdir -p "$DIR"
@@ -15,5 +16,6 @@ for f in "$BODY"/src/proto/*.c; do
   "$CC" -std=c99 -Wall -Wextra -Werror -O1 -c "$f" -o "$o"
   objs+=("$o")
 done
+kilo_core_sources "$BODY"
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -o "$OUT" "$BODY/test/link_harness.cpp" \
-  "$BODY"/src/core/*.cpp "$BODY/test/fake_eeprom.cpp" "$BODY/test/fake_link_hal.cpp" "${objs[@]}"
+  "${KILO_CORE_SRCS[@]}" "${objs[@]}"

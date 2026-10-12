@@ -25,7 +25,8 @@ def vbody_pty():
     os.close(slave)
 
 
-def _kilo(path, *args, timeout=15):
+def _kilo(path, *args):
+    """Start the CLI; each caller bounds it with communicate(timeout=...)."""
     return subprocess.Popen([sys.executable, "-m", "kilo.cli", "--port", path, *args], cwd=MIND,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 

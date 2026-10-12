@@ -67,7 +67,7 @@ UART on, 1-Wire off, UART clock 48 MHz, GPIO4 left as an input).
 
 Device nodes are globbed rather than listed with `serial.tools.list_ports`,
 which hides `ttyAMA*`/`ttyS*` as "platform" ports on recent kernels (the same
-problem Petoi's `serialMaster/ardSerial.py` works around).
+problem Petoi's Pi-side `ardSerial.py` works around).
 
 > **Unplug the CH343 USB adapter whenever the Pi drives the UART**, and vice
 > versa. Both drive the 328P's single RX line; with both attached, frames from
@@ -412,7 +412,9 @@ SET_BALANCE on with the given Kp (default 0.5, the firmware's; 0.99 levels
 the whole slope and passed H13 on Kilo) at start, again after a port release
 for flashing, and whenever a client's balance hold ends (instead of switching
 balance off). Nobody owns it, like the idle latch, and it is not an epoch
-goal, so the link keeps sending it across a body reboot: Kilo wakes up
+goal, so the link keeps sending it across a body reboot (the body clears
+its enable on every epoch bump, a watchdog stop or a fall included; the
+5 Hz refresh turns it back on within 200 ms): Kilo wakes up
 balancing whenever it stands or sits, and walks with the gait's balance flag
 using the same gains. The remote's CH+ toggles it off and on again with that
 Kp; a client's `kilo balance off` holds it off until the client goes away.
@@ -1010,7 +1012,8 @@ the pose, JOINTS), BodyClient against the vbody (goal bytes, epoch stamp,
 refresh, clearing on a fall), the daemon ops and holds, `kilo walk` /
 `kilo pose` end to end (also SIGTERM and a P1 body's refusal) and the
 renderings; `test_ir.py` the remote's walking. The cross-check's gait case
-is skipped until the firmware implements SET_GAIT. The suite takes about
+runs against the firmware's real gait generator (a harness without
+SET_GAIT fails it rather than skipping it). The suite takes about
 three minutes.
 
 ## Layout

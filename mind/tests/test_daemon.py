@@ -21,6 +21,7 @@ from kilo.body.client import BodyClient
 from kilo.body.state import BodyState
 from kilo.daemon import Daemon
 from kilo.link import consts
+from kilo.protocol import kilo_protocol as P
 from kilo.link.serial_link import CommandError, LinkConfig, LinkError, NotConnected
 from kilo.remote import DaemonError, RemoteBody, connect, socket_candidates, socket_path
 from kilo.vbody.sim import VirtualBody, open_pty
@@ -237,6 +238,37 @@ def test_balance_on_by_default(start_daemon):
         body.wait_ready(3)
         assert wait_for(lambda: "SET_BALANCE" in d.link.goals(), 3)  # the daemon's own latch, not a client's
         assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253, 3)
+    finally:
+        body.close()
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["default", "client-hold"])
+def test_balance_returns_after_an_epoch_bump(start_daemon, held):
+    """Cross-layer (review §2.4): the body clears SET_BALANCE's enable on an
+    epoch bump (body.cpp body_epoch_bump, P1 finding B1); SET_BALANCE carries
+    no epoch, so the mind keeps it and its 5 Hz goal refresh turns it back on
+    within one refresh period of the body hearing the Pi again. The
+    bump here is the body's own watchdog stop: the vbody drops every frame from
+    the Pi for longer than WD_STOP_MS, then hears them again."""
+    d, vb, path, sock = start_daemon(balance_kp=None if held else 0.99)
+    body = remote(sock)
+    try:
+        body.wait_ready(3)
+        if held:
+            body.set_balance(True, kp=0.99)
+        assert wait_for(lambda: vb.balance["enable"] == 1 and vb.balance["kp_q8"] == 253)
+        epoch = vb.epoch
+        pi_types = {vb.msgs.name_of(t) for t in P.MESSAGES if t < 0x80}
+        vb.ignore_types = pi_types  # the link goes silent for the body
+        assert wait_for(lambda: vb.wd_stage == 1, 2)
+        assert vb.epoch == (epoch + 1) & 0xFF
+        assert vb.balance["enable"] == 0 and vb.balance["kp_q8"] == 253  # the goal cleared, gains kept
+        vb.ignore_types = set()
+        t0 = time.monotonic()
+        assert wait_for(lambda: vb.balance["enable"] == 1, 1.0, period=0.005)
+        took = time.monotonic() - t0
+        assert took < 0.3, took  # within one 200 ms refresh period of the body hearing the Pi again
+        assert vb.wd_stage == 0 and vb.balance["kp_q8"] == 253
     finally:
         body.close()
 

@@ -16,7 +16,7 @@ Rules (README "Port rules"):
 
 We glob the device nodes instead of using ``serial.tools.list_ports``:
 pyserial classifies ``ttyS*``/``ttyAMA*`` as "platform" ports and leaves them
-out on recent kernels (pyserial issue #489; serialMaster/ardSerial.py works
+out on recent kernels (pyserial issue #489; Petoi's ardSerial.py works
 around the same thing).
 """
 

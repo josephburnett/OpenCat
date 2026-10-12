@@ -20,7 +20,7 @@ Petoi documents them; unconfirmed items are flagged at the end.
 
 ## Software
 
-- `serialMaster/` in this repo is Petoi's Pi-side Python library (`ardSerial.py`, `SerialCommunication.py`, `example.py`, `allSkills.py`, `demos/`). Needs `pyserial` from pip (not apt's python-serial). `./ardSerial.py kcrF` is equivalent to typing `kcrF` in the Arduino serial monitor.
+- `serialMaster/` is Petoi's Pi-side Python library (`ardSerial.py`, `SerialCommunication.py`, `example.py`, `allSkills.py`, `demos/`); it was removed from this repo in ccfb3d8 (Kilo's mind replaces it) and lives on upstream in PetoiCamp/OpenCat and in this repo's history. Needs `pyserial` from pip (not apt's python-serial). `./ardSerial.py kcrF` is equivalent to typing `kcrF` in the Arduino serial monitor.
 - Same token protocol as USB serial: `k`+skill, `m`/`M` and `i`/`I` joint moves, `L` listed angles, `b`/`B` buzzer, `c` calibrate, `d` rest, `G`/`g` gyro, `?` query. Full list in `src/OpenCat.h`; docs at https://docs.petoi.com/apis/serial-protocol. Uppercase tokens take binary arguments (one byte per angle).
 - ROS / ROS 2 wrapper: https://github.com/PetoiCamp/ros_opencat (Docker; "recommended to use with Raspberry Pi").
 - No Petoi Raspberry Pi OS image exists; use stock Raspberry Pi OS or Ubuntu.
@@ -108,4 +108,4 @@ systemctl --user stop kilo                 # before the hardware-test docs (they
 9. https://wiki.gentoo.org/wiki/Raspberry_Pi_Serial_Ports (ttyS0 / ttyAMA0 / BT overlays)
 10. https://github.com/PetoiCamp/ros_opencat
 11. https://pidramble.com/wiki/benchmarks/power-consumption (Pi power figures)
-12. Local: `serialMaster/ardSerial.py` (port detection), `src/OpenCat.h` (tokens, baud)
+12. Local: `src/OpenCat.h` (tokens, baud); `serialMaster/ardSerial.py` (port detection) as it was before ccfb3d8 removed it
