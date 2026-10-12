@@ -412,7 +412,9 @@ SET_BALANCE on with the given Kp (default 0.5, the firmware's; 0.99 levels
 the whole slope and passed H13 on Kilo) at start, again after a port release
 for flashing, and whenever a client's balance hold ends (instead of switching
 balance off). Nobody owns it, like the idle latch, and it is not an epoch
-goal, so the link keeps sending it across a body reboot: Kilo wakes up
+goal, so the link keeps sending it across a body reboot (the body clears
+its enable on every epoch bump, a watchdog stop or a fall included; the
+5 Hz refresh turns it back on within 200 ms): Kilo wakes up
 balancing whenever it stands or sits, and walks with the gait's balance flag
 using the same gains. The remote's CH+ toggles it off and on again with that
 Kp; a client's `kilo balance off` holds it off until the client goes away.
