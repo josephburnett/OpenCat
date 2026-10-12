@@ -209,8 +209,18 @@ At ≈40 µs per int32 division and ≈30 µs per `isqrt` on the 328P that is
 
 **Non-blocking rules**
 
-- No `delay()` and no `pulseIn()`. Busy-waits are limited to 50 µs, except
-  inside I2C transactions, which are bounded at 2 ms.
+- No `delay()` and no `pulseIn()`. Busy-waits are limited to 50 µs, except:
+  - inside I2C transactions: each TWI action waits at most 3000 polling
+    passes (≈1.7 ms), and all actions between two tick starts together at
+    most 17000 (≈9.6 ms, twice a busy healthy tick's I2C). After that every
+    transfer fails as `I2C_BUDGET` without touching the bus, so a slow bus
+    shows up as `i2c_err`, IMU_ERR ticks (→ IMU_FAULT after a run) and a PCA
+    that keeps its last pose, not as an overrun tick (`hal/i2c.h`,
+    `test_i2c.cpp`);
+  - a reply or ACK waiting for TX room: one ring drain (96 B at 250000 baud
+    = 3.84 ms), bounded at 8 ms, after which it is dropped and counted
+    (`tx_dropped`, `EVENT TX_DROPPED`); the mind's 50 ms retry covers it
+    (same seq for commands, re-acked by the de-dup cache).
 - No section runs longer than ≈2 ms without calling `uart_poll()`. At 250000
   baud a byte arrives every 40 µs, and the 192 B RX ring gives 7.7 ms of slack.
 - EEPROM writes go through a background writer: one byte when `EEPE` is clear,
@@ -1201,7 +1211,17 @@ leg angles). The owner raised the P2 flash ceiling to 30 KB (30720 B) the
 same day; globals stay the tight resource (23 B left).
 
 The 1540 B globals ceiling keeps ≥ 508 B for stack and margin. Measured stack
-use is reported through a painted canary (`stack_free_min` in STATS). RAM is
+use is reported through a painted canary (`stack_free_min` in STATS); the
+static worst case is `body/tools/stack_check.sh` (run by `size_check.sh`):
+the deepest call path from `main()` with link-time `-fstack-usage` frames,
+plus the deepest ISR (none re-enables interrupts, so they do not nest), must
+leave ≥ 128 B. **Measured with the P2 gait** (2026-10-11): 274 B (`main` 133
+→ `link_poll` 111 → `config_migrate` 23 → `rd16` 5 → `eeprom_read_byte` 2)
++ 26 B (PCINT2 → `ir_nec_edge`) = 300 B; margin 2048 − 1517 − 300 = 231 B.
+Kilo's paint read 238 B free while walking (293 B used): the static bound is
+7 B above what the robot has touched, so it is tight, not loose.
+**With the bounded spins** (TX wait, I2C budget; same day): 27116 B flash,
+1519 B globals (+2 B: the I2C budget), stack 302 B, margin 227 B. RAM is
 the tight resource. If needed, shrink in this order:
 1. keyframe store 32 → 24 frames (−112 B; the first-version library's
    largest trick has 6 frames, HELLO reports the capacity to the mind).
@@ -1387,8 +1407,11 @@ marks a payload that starts with an epoch byte.
 **TX priority.** The TX ring is 96 B. The worst single-tick burst at maximum
 stream rates is 103 B: TELEMETRY 32 + JOINTS 30 + IMU_RAW 20 + ACK 9 +
 EVENT 12. When a frame does not fit, the body drops IMU_RAW first,
-then JOINTS, then TELEMETRY. ACK and EVENT are never dropped. Events wait in
-their 8-deep queue until there is room. Drops are reported by a rate-limited `EVENT TX_DROPPED`.
+then JOINTS, then TELEMETRY. ACK and EVENT are not dropped for lack of room:
+events wait in their 8-deep queue until there is room, and an ACK or query
+reply waits for the UART to drain (at most 8 ms; only a stalled TX, i.e. a UDRE
+interrupt that never runs, drops one). Drops are reported by a rate-limited
+`EVENT TX_DROPPED`.
 
 **Watchdog timing.**
 - The Pi's serial writer thread sends `HEARTBEAT` whenever it has sent nothing
@@ -1667,7 +1690,13 @@ the phase ceilings `FLASH_MAX` and `GLOBALS_MAX` (3h). It fails if any
 forbidden symbol is linked: `HardwareSerial`/`Print`, `TwoWire`, I2Cdev,
 `pulseIn`, `tone`, the heap, `String`, soft float or libm. If the sanctioned
 float IK fallback is ever used, the float symbols are allowed explicitly
-there. It prints the largest symbols on every run.
+there. It prints the largest symbols on every run. In build mode it then
+runs `body/tools/stack_check.sh`, the static stack estimate (3h): a second
+build with `-fstack-usage` at link time (the sketch is LTO-compiled, so only
+the link-time `.su` files hold the final frames), a call graph from
+`avr-objdump -d` (direct calls; tail jumps; indirect calls listed, none
+today), the deepest path from `main()` plus the deepest ISR, and FAIL below
+128 B of margin (`MIN_MARGIN`).
 
 **Virtual body vs real body.** `mind/tests/test_crosscheck.py` builds the
 body's real dispatch (`core/link.cpp` and `core/`) for the host
@@ -2312,8 +2341,9 @@ body/                     the NyBoard firmware (arduino-cli sketch)
   src/app/                main.cpp (boot, 50 Hz loop)  link_hal.cpp (core/link's hardware seam)
   src/proto/              VENDORED by protocol/vendor.py: kilo_protocol.h, cobs/crc16/kilo_frame.[ch]
   test/                   host unit tests (test_*.cpp), fakes (EEPROM, link HAL),
-                          link_harness.cpp (stdin-driven dispatch for the cross-check)
-  tools/                  host_tests.sh  size_check.sh  build_link_harness.sh
+                          link_harness.cpp (stdin-driven dispatch for the cross-check),
+                          fake_avr/ (avr-libc header and TWI register fakes for test_i2c)
+  tools/                  host_tests.sh  size_check.sh  stack_check.sh/.py  build_link_harness.sh
 protocol/                 spec.toml  gen.py  vendor.py  vector_cases.py  test.sh
   gen/                    kilo_protocol.h  kilo_protocol.py   (generated, committed)
   c/                      cobs  crc16  kilo_frame  test_protocol.cpp

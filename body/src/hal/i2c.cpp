@@ -8,13 +8,31 @@
 #define SDA_BIT 4
 #define SCL_BIT 5
 
-// About 1 ms of polling at 16 MHz (each pass is a few cycles; ISRs stretch
-// it). A healthy byte takes 23 us at 400 kHz, so this only trips on a hung
-// bus. Counting passes avoids depending on the clock module.
+// Per action: about 1.7 ms of polling at 16 MHz (a pass of act()'s loop is
+// 9 cycles, 0.56 us; ISRs stretch it). A healthy byte takes 23 us at
+// 400 kHz (about 40 passes), so this only trips on a hung bus. Counting
+// passes avoids depending on the clock module.
 #define SPIN_LIMIT 3000
+// Per tick period: every wait (act() and the STOP) is charged to a budget
+// that app/main.cpp refills at the start of each tick (and i2c_init, and
+// each MPU init step). 17000 passes is about 9.6 ms, twice the I2C of a
+// healthy busy tick (IMU FIFO count and up to two packets, the 16-channel
+// PCA burst and a PCA_READ: about 210 byte times, 4.8 ms). A slow (not dead)
+// bus therefore costs at most ~10 ms per tick instead of overrunning it: an
+// action that runs out mid-transfer ends as I2C_TIMEOUT (bus recovered), and
+// a transfer begun with the budget spent is refused as I2C_BUDGET without
+// touching the bus. Both are counted errors, so the callers' existing paths
+// apply (IMU_ERR -> IMU_FAULT after a run; the PCA keeps its last pose).
+#define TICK_SPIN_BUDGET 17000
 
 static uint8_t err;       // first error of the current transfer
 static uint16_t err_count;
+static uint16_t budget = TICK_SPIN_BUDGET;  // passes left this tick period
+
+void i2c_budget_reset(void) { budget = TICK_SPIN_BUDGET; }
+
+// This action's spin limit: SPIN_LIMIT, or what is left of the budget.
+static uint16_t spin_limit(void) { return budget < SPIN_LIMIT ? budget : SPIN_LIMIT; }
 
 static void twi_enable(void) {
   TWSR = 0;   // prescaler 1
@@ -55,6 +73,7 @@ void i2c_recover(void) {
 }
 
 void i2c_init(void) {
+  i2c_budget_reset();
   line_release(SDA_BIT);
   line_release(SCL_BIT);
   i2c_recover();
@@ -67,11 +86,18 @@ static void fail(uint8_t e) {
 }
 
 // Start an action (TWCR bits) and wait for TWINT. Returns the status code,
-// or 0 after a timeout.
+// or 0 after a timeout (per action, or the tick budget ran out).
 static uint8_t act(uint8_t twcr) {
   TWCR = (uint8_t)(twcr | _BV(TWINT) | _BV(TWEN));
-  for (uint16_t n = 0; n < SPIN_LIMIT; n++)
-    if (TWCR & _BV(TWINT)) return TW_STATUS;
+  uint16_t lim = spin_limit(), n = lim;  // computed while the hardware works
+  // A do-while counting down keeps the pass at 9 cycles, as before the budget.
+  if (n) do {
+      if (TWCR & _BV(TWINT)) {
+        budget -= (uint16_t)(lim - n);
+        return TW_STATUS;
+      }
+    } while (--n);
+  budget -= lim;
   fail(I2C_TIMEOUT);
   return 0;
 }
@@ -108,7 +134,7 @@ uint8_t i2c_get(bool last) {
 }
 
 void i2c_begin_write(uint8_t addr, uint8_t reg) {
-  err = I2C_OK;
+  err = budget ? I2C_OK : I2C_BUDGET;  // spent: refuse without touching the bus
   start((uint8_t)(addr << 1) | TW_WRITE);
   i2c_put(reg);
 }
@@ -122,11 +148,12 @@ uint8_t i2c_end(void) {
   if (err == I2C_TIMEOUT || err == I2C_ARB_LOST) {
     i2c_recover();
     if (!(PINC & _BV(SDA_BIT))) err = I2C_BUS_STUCK;
-  } else {
+  } else if (err != I2C_BUDGET) {
     TWCR = _BV(TWINT) | _BV(TWEN) | _BV(TWSTO);
     // The STOP bit clears itself once the condition is on the bus (~3 us).
-    for (uint16_t n = 0; n < SPIN_LIMIT && (TWCR & _BV(TWSTO)); n++) {
-    }
+    uint16_t lim = spin_limit(), n = 0;
+    while (n < lim && (TWCR & _BV(TWSTO))) n++;
+    budget -= n;
   }
   if (err && err_count < 0xFFFF) err_count++;
   return err;

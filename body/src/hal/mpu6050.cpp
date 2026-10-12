@@ -123,6 +123,7 @@ void mpu_init_begin(const int16_t offsets[6]) {
 }
 
 MpuInit mpu_init_step(uint32_t now) {
+  i2c_budget_reset();  // one step is a few short transfers, outside the tick
   uint8_t reg = pgm_read_byte(&SCRIPT[pc]);
   uint8_t val = pgm_read_byte(&SCRIPT[pc + 1]);
   uint8_t e = 0;

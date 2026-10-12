@@ -27,7 +27,9 @@ body/tools/host_tests.sh && body/tools/size_check.sh && protocol/test.sh && .ven
 ```
 
 The four suites are the check before every commit. `size_check.sh` needs
-arduino-cli; `protocol/test.sh` needs the venv on `PATH` (it runs pytest).
+arduino-cli; it also runs `body/tools/stack_check.sh` (the static worst-case
+stack estimate, a second build with `-fstack-usage`, a few seconds; it fails
+below 128 B of margin; `STACK_CHECK=0` skips it); `protocol/test.sh` needs the venv on `PATH` (it runs pytest).
 `.venv/` is gitignored.
 
 ## The Pi
