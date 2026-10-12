@@ -118,6 +118,13 @@ Record in the results which constants were changed, if any.
 
 ## 3. STANCE height and levelling (H13)
 
+**Safety (learned 2026-10-11):** with Kilo's 65 mm track and 76 mm stance
+height the static tipping roll is only about 22°, and Kilo lists ≈5° right
+on its own until the left-front knee is recalibrated. Never hold STANCE with
+balance OFF on a side slope above about 8°, and never on a desk: Kilo fell
+off its board once this way. Take the balance-off reference on the flat
+first, then prop the board with balance ON. Do slope tests on the floor.
+
 Kilo on its feet on a board on the floor, a phone with a level app lying on
 its back (or `kilo monitor` for the IMU's pitch and roll).
 

@@ -56,8 +56,36 @@ owner's hands did the tilts; nothing walked.
 
 ## Tricks test
 
-Not started.
+**2026-10-11 evening, build ded3c1d8 (main, P2 firmware), Kilo on the
+desk on battery (8.38 V at the start), owner watching, daemon started by
+hand with `--idle-posture none`.** T2 basics only:
+
+| Step | Result |
+|---|---|
+| STAND from LIMP | OK (owner). Pitch read 6.5° nose down: the desk slopes; STANCE later read the same. |
+| SIT, STAND, REST | OK (owner). |
+| `kilo trick play stretch` | **Too fast** (owner). Root cause: the legacy `str` is a single-frame posture; the legacy firmware held it until the next command, the import moves there in 25 ticks and the trick ends at once with end posture STAND, so Kilo flicks into the stretch and straight back. Fix: the importer gives single-frame legacy postures a hold (see the commit after this session); `kilo trick play --for S` already holds longer. |
+| REST list | Kilo still leans right at REST (roll −8° to −11°): finding B4, the left-front knee (joint 12). Not jogged yet. |
+
+Social tricks, `--speed 0.5`, push-up looping (H9), `kilo look`: not run.
 
 ## Fall and head test
 
-Not started.
+**Two unplanned roll falls during the P2 levelling test (2026-10-11,
+build ded3c1d8), both onto the LEFT side**, see
+`docs/p2-hardware-test-results.md` §3:
+
+| | Fall 1 | Fall 2 |
+|---|---|---|
+| Time | 17:15:46 | 17:21:35 |
+| EVENT FELL arg | +1 (roll) | +1 (roll) |
+| Side (owner) | left | left (right side was uphill) |
+| RECOVERED after | 3.6 s | 5.7 s |
+| Self-recovery | **not verified**: the owner picked Kilo up; the get-up routine ran in the air | same |
+
+- Detection: works; `FELL +1` for a fall onto the left side agrees with the
+  firmware's roll convention (right side up = positive).
+- Recovery: the sequence runs after the fall, but whether it gets Kilo up
+  on its own is unknown; both times the owner lifted Kilo while it played.
+  The planned five-per-side test on a soft surface is still to do.
+- `kilo look`: not run.
