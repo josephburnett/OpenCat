@@ -67,7 +67,7 @@ UART on, 1-Wire off, UART clock 48 MHz, GPIO4 left as an input).
 
 Device nodes are globbed rather than listed with `serial.tools.list_ports`,
 which hides `ttyAMA*`/`ttyS*` as "platform" ports on recent kernels (the same
-problem Petoi's `serialMaster/ardSerial.py` works around).
+problem Petoi's Pi-side `ardSerial.py` works around).
 
 > **Unplug the CH343 USB adapter whenever the Pi drives the UART**, and vice
 > versa. Both drive the 328P's single RX line; with both attached, frames from
@@ -1012,7 +1012,8 @@ the pose, JOINTS), BodyClient against the vbody (goal bytes, epoch stamp,
 refresh, clearing on a fall), the daemon ops and holds, `kilo walk` /
 `kilo pose` end to end (also SIGTERM and a P1 body's refusal) and the
 renderings; `test_ir.py` the remote's walking. The cross-check's gait case
-is skipped until the firmware implements SET_GAIT. The suite takes about
+runs against the firmware's real gait generator (a harness without
+SET_GAIT fails it rather than skipping it). The suite takes about
 three minutes.
 
 ## Layout

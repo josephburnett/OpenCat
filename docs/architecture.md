@@ -50,7 +50,7 @@ operations notes and test tables. The main body links to them.
 | Buzzer | **Kept, Pi-driven.** A `BEEP` note queue plus built-in reflex chirps. ISR-toggled on D5. | 3a, 4 |
 | First tricks | Basics: sit, rest, stand, stretch, balance. Social: hi, wash face, check around, sniff, scratch, pee, push-up, butt-up. Athletic tricks (backflip, roll, jump) are not ported. Fall recovery stays a body reflex. | 5 |
 | Behaviour | An in-house behaviour tree under a utility selector over drives, ticked at 10 Hz. | 5 |
-| Testing | Host g++ tests with sanitizers, the same tests under simavr, a virtual body on a pty, a size/symbol harness, and a HIL checklist. | 6 |
+| Testing | Host g++ tests with sanitizers, a virtual body on a pty (Python, cross-checked against the C dispatch), a size/symbol harness, and a HIL checklist. Planned, not done: the same tests under simavr and a virtual body built from the C core. | 6 |
 
 ---
 
@@ -1131,7 +1131,7 @@ Appendix D.
 
 | | Flash | RAM |
 |---|---|---|
-| Estimate (P2 feature set) | ≈15 KB est.; P2 ceiling 20 KB (P0 measured 17.7 KB, below) | globals ≈1.50 KB + stack 350 B ≈ 1.85 KB |
+| Estimate (P2 feature set) | ≈15 KB est. (the P0 build alone measured 17.7 KB, below); P2 ceiling 30 KB (30720 B, next table) | globals ≈1.50 KB + stack 350 B ≈ 1.85 KB |
 | Limit | 32256 B (32 KB − 512 B optiboot) | 2048 B |
 | Headroom | ≥ 14 KB | ≈200 B |
 
@@ -1617,10 +1617,12 @@ are in Appendix F.
 ## 6. Testing and verification strategy
 
 **Host unit tests (body core).** `body/test/` builds `core/` with
-`g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined`, plus the
-bare-type lint. On 32-bit ARM (the Pi 2 B) libasan needs `-latomic` for its
-64-bit atomics; `body/tools/host_tests.sh` and `protocol/test.sh` probe for that
-once and add it only where a plain sanitizer link fails. It covers:
+`g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined`
+(`body/tools/host_tests.sh`), plus the bare-type and float lints. On 32-bit ARM
+(the Pi 2 B) libasan needs `-latomic` for its 64-bit atomics;
+`body/tools/host_tests.sh` and `protocol/test.sh` probe for that once (the probe
+is in `body/tools/common.sh`) and add it only where a plain sanitizer link
+fails. It covers:
 - fx accuracy;
 - the per-robot legacy transfer function vs a transcription of the legacy float
   code, fed the dumped EEPROM;
@@ -1631,17 +1633,24 @@ once and add it only where a plain sanitizer link fails. It covers:
 - the balance closed-loop sign test;
 - reflex timelines, including epoch bumps;
 - config-slot torn-write recovery;
-- the codec against vectors, plus fuzzing.
+- the link dispatch against `protocol/vectors/frames.json` (the codec's own
+  vectors and 1e6-iteration fuzz run in `protocol/test.sh`).
 
 Appendix H has the per-unit criteria.
 
-**Exact AVR semantics.** The same tests are built with avr-g++ and run under
-simavr. This catches 16-bit `int` and promotion bugs, and gives real cycle
-counts that replace the estimates in 3a.
+**Exact AVR semantics (planned, not done).** The same tests built with avr-g++
+and run under simavr. This would catch 16-bit `int` and promotion bugs, and
+give real cycle counts and stack high-water marks that replace the estimates in
+3a. Today the 16-bit concerns are covered only by the bare-type lint and the
+avr-gcc builds, and stack depth only by `stack_free_min` read back from Kilo.
 
-**Virtual body.** `body/test/vbody` links `core/` with stub HALs (scripted IMU,
-fake ultrasonic, recorded servo counts) and speaks the real protocol on a pty.
-The mind runs against it unchanged on a desktop or the Pi. Integration tests
+**Virtual body.** What exists is the Python virtual body `mind/kilo/vbody/sim.py`
+(`kilo vbody`): a re-implementation of the body's dispatch and state machines
+that speaks the real protocol on a pty, cross-checked against the C dispatch
+(below). *Planned, not done:* `body/test/vbody`, which would link `core/` with
+stub HALs (scripted IMU, fake ultrasonic, recorded servo counts) and speak the
+real protocol on a pty. Either way the mind runs against it unchanged on a
+desktop or the Pi. Integration tests (`mind/tests`, against the Python vbody)
 cover:
 - watchdog stages;
 - epoch refusal after a simulated fall;
@@ -1658,8 +1667,9 @@ cover:
 - link retries over a lossy fake transport;
 - the clearing of desired goals on events.
 
-**Protocol single source.** `gen.py` output is committed. CI regenerates it and
-fails on any diff.
+**Protocol single source.** `gen.py` output is committed. `protocol/test.sh`
+runs `gen.py --check` and `vendor.py --check` and fails on any diff (there is
+no CI yet; the check runs when the suite is run).
 
 **Size and symbol harness.** `body/tools/size_check.sh` compiles `body/` (or
 checks an existing ELF with `--elf`, which is what `kilo flash` does) against
@@ -2296,7 +2306,8 @@ the token protocol at 115200 and finds its EEPROM intact.
 
 ## Appendix G: Repository layout and CLI
 
-As of P0. Names in *italics* are planned for later phases.
+As of P2 (2026-10-11, checked against the tree and `kilo --help`). Names in
+*italics* are planned, not in the tree.
 
 ```
 body/                     the NyBoard firmware (arduino-cli sketch)
@@ -2305,62 +2316,73 @@ body/                     the NyBoard firmware (arduino-cli sketch)
                           fx  joints  posture  arbiter  attitude  battery  body (tick + reflexes)
                           config (slots, legacy import)  params  events  notes  reset  sched
                           link (dispatch, ACK/de-dup, HELLO, streams, events)  pgm.h
-                          *ik  gait  keyframe  balance  fall reflex*
+                          ik  gait  keyframe  balance  reflex (fall)  ir_nec (IR remote decoder)
   src/hal/                register-level drivers: uart  i2c  pca9685  mpu6050 (+ dmp_image.h)
                           adc  buzzer  clock  eeprom  gpio.h  sys (.noinit record, WDT, stack paint)
-                          ultrasonic  *ws2812*
+                          ultrasonic  ir  pcint2 (shared PCINT2 vector)  *ws2812*
   src/app/                main.cpp (boot, 50 Hz loop)  link_hal.cpp (core/link's hardware seam)
   src/proto/              VENDORED by protocol/vendor.py: kilo_protocol.h, cobs/crc16/kilo_frame.[ch]
-  test/                   host unit tests (test_*.cpp), fakes (EEPROM, link HAL),
-                          link_harness.cpp (stdin-driven dispatch for the cross-check)
-  tools/                  host_tests.sh  size_check.sh  build_link_harness.sh
-protocol/                 spec.toml  gen.py  vendor.py  vector_cases.py  test.sh
+  test/                   host unit tests (test_*.cpp), check.h, fakes (EEPROM, link HAL),
+                          link_harness.cpp (stdin-driven dispatch for the cross-check),
+                          trick_library.h (generated by tools/gen_trick_library.py)
+  tools/                  host_tests.sh  size_check.sh  build_link_harness.sh  common.sh (shared by
+                          the scripts)  gen_trick_library.py
+protocol/                 spec.toml  gen.py  vendor.py  vector_cases.py  test.sh  README.md
   gen/                    kilo_protocol.h  kilo_protocol.py   (generated, committed)
   c/                      cobs  crc16  kilo_frame  test_protocol.cpp
   py/                     kilo_link_codec.py  test_codec.py
   vectors/                frames.json  cobs.json              (generated, committed)
 mind/                     the Python mind (pip install -e mind)
-  pyproject.toml  README.md  firmware/ (opencat-legacy.hex)
+  pyproject.toml  README.md  firmware/ (opencat-legacy.hex)  systemd/ (kilo.service, install.sh)
   kilo/
-    cli.py  log.py
+    cli.py (registers the subcommands)  cli_tools.py  cli_head.py  cli_trick.py  cli_walk.py
+    daemon.py  remote.py (the socket client)  ir.py (remote key map)  log.py
     protocol/             VENDORED by protocol/vendor.py: kilo_protocol.py, kilo_link_codec.py
     link/                 codec.py (framing adapter)  messages.py (dataclass adapter)  consts.py
                           serial_link.py (reader/writer threads, goals, commands)  transport.py  ports.py
-    body/                 state.py (BodyState)  client.py (BodyClient)
+    body/                 state.py (BodyState)  client.py (BodyClient)  timeline.py (passive watch)
     tools/                flash.py  gpio.py (GPIO4 reset)
     vbody/                sim.py (virtual body on a pty)  __main__.py
-    *daemon.py  tricks/  behaviour/  perception/*
-  tests/                  pytest: codec, link rules, state, CLI, flash, vbody,
-                          cross-check vs the C dispatch, CLI end to end on a pty
-docs/                     architecture.md  raspberry-pi.md  p0-hardware-test.md  p1-hardware-test.md
-OpenCat.ino, src/         the legacy firmware, until the P2 cutover
+    tricks/               model, player, library/*.json, legacy importer
+    behaviour/            tree, drives, selector, runner, personality.yaml
+    perception/           ultrasonic, imu, percepts, events
+    logs/                 kilolog writer/reader, summary/replay/plot (python -m kilo.logs)
+  tests/                  pytest: codec, link rules, state, CLI, daemon, hardening, flash, vbody,
+                          cross-check vs the C dispatch, CLI end to end on a pty, gait, tricks,
+                          behaviour, perception, logs, IR; fixtures/
+docs/                     architecture.md  raspberry-pi.md  firmware-size-report.md  kilo-eeprom-legacy.md
+                          p0/p1/p2-hardware-test.md and -results.md  setup.md (setup and operations)  code-review-2026-10-11.md
+OpenCat.ino, src/         the legacy firmware: kept as a reference (headers read by tests and the
+                          trick importer); the rollback image is mind/firmware/opencat-legacy.hex
 ```
 
 arduino-cli compiles `src/` recursively, which is why the logic lives under
 `body/src/`.
 
-**CLI.** `kilo` talks to the daemon over `/run/kilo/kilo.sock` (JSON lines), or
-opens the port directly if the daemon is not running. As built
-(`kilo/daemon.py`, `kilo/remote.py`): the socket is
-`$XDG_RUNTIME_DIR/kilo/kilo.sock` for the systemd user service
-(`/run/kilo/kilo.sock` only as root); protocol and ops in mind/README.md
-"Daemon and systemd".
+**CLI.** `kilo` talks to the daemon over a Unix socket (JSON lines), or
+opens the port directly if no daemon is running (`--direct` forces that). As
+built (`kilo/daemon.py`, `kilo/remote.py`): the socket is `--socket`, else
+`$KILO_SOCKET`, else `$XDG_RUNTIME_DIR/kilo/kilo.sock` (the systemd user
+service), `/run/kilo/kilo.sock` as root, else `~/.kilo/kilo.sock`; protocol
+and ops in mind/README.md "Daemon and systemd". `kilo COMMAND --help` is the
+reference; this table is the overview.
 
 | Command | Purpose |
 |---|---|
-| `kilo status`, `kilo monitor` | HELLO, stats; live curses telemetry |
-| `kilo posture rest\|sit\|stand\|limp\|balance` | Postures (`balance` = STAND + flag) |
+| `kilo status [--json]`, `kilo monitor [--passive] [--percepts]` | HELLO, state, link and body stats; live telemetry table (`--passive`: sends nothing, prints what the body does on its own) |
+| `kilo posture limp\|rest\|stand\|sit\|balance\|stance\|calib\|zero [--for S] [--pca] [--then-watch T]` | Hold a posture (`balance` = STAND + flag; `stance` = the IK standing posture) |
 | `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
-| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern trot\|walk\|crawl] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--for S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
-| `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]`, `kilo posture stance` | Body pose over STANCE and the gait (P2, `SET_BODY_POSE`); the IK standing posture |
-| `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]`, `kilo eyes RRGGBB [--side left]`, `kilo beep NOTE:DUR …` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit), eyes, sound |
-| `kilo trick list\|show NAME\|upload NAME\|play NAME [--mirror] [--speed 1.5] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); `import-legacy FILE` and `edit NAME` (jogs joints live and captures frames) later |
-| `kilo cal`, `kilo cal imu` | Joint calibration; IMU offset iteration on the Pi from IMU_RAW (keeps `CalibrateAccel/Gyro`, ≈1 KB, off the body) |
-| `kilo param get\|set\|list [--persist]` | Live tuning (names or ids from the spec's param table) |
-| `kilo eeprom dump 0 283 > docs/kilo-eeprom-legacy.md` | The P0 legacy dump |
-| `kilo flash [--legacy] [--no-build] [--port P]` | Appendix F |
-| `kilo log plot FILE --fields pitch,roll,corr` | Offline plots |
-| `kilo run` | Start the mind (normally via systemd) |
+| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--for S] [--wait S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
+| `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]` | Body pose over STANCE and the gait (P2, `SET_BODY_POSE`) |
+| `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit). *`kilo eyes`, `kilo beep`*: not yet (the messages exist; no CLI, no WS2812 driver) |
+| `kilo trick list\|show NAME\|upload NAME [--force]\|play NAME [--mirror] [--speed X] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); *`import-legacy FILE` and `edit NAME`* later (the library itself is regenerated from the legacy skills by `python -m kilo.tricks.import_legacy`) |
+| `kilo cal show\|set JOINT DEG\|save\|revert` | Joint calibration. *`kilo cal imu`* (IMU offset iteration on the Pi from IMU_RAW) not yet |
+| `kilo param list\|get ID\|set ID VALUE [--persist]` | Live tuning (names or ids from the spec's param table) |
+| `kilo pca`, `kilo eeprom dump START END` | PCA9685 OFF counts read back; EEPROM hex dump (`eeprom dump 0 283` was the P0 legacy dump) |
+| `kilo flash [--legacy] [--no-build] [--hex HEX] [--reset auto\|gpio\|dtr\|none] [--dry-run] [--force] ...` | Appendix F |
+| `kilo log summary\|replay\|plot FILE ...` (`plot --fields pitch,roll`) | Offline log tools (`kilo.logs`) |
+| `kilo vbody [--fall-after S]` | A virtual body on a pty |
+| `kilo run [--behaviour] [--remote] [--balance [KP]] [--idle-posture rest\|limp\|none] ...`, `kilo daemon [status\|stop]` | Start the mind's daemon (normally via systemd); its status, or stop it |
 
 ---
 
