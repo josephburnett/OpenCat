@@ -25,7 +25,8 @@ Where to read more: `docs/architecture.md` is the design,
 `docs/handoff-2026-10-11.md` is where things stand, `mind/README.md` lists the
 commands, and `docs/p*-hardware-test*.md` record what has been tried on Kilo.
 
-The original OpenCat files (`OpenCat.ino`, `src/` and friends) are still in
-the tree. `src/InstinctNybble.h` holds the stock postures and skills that the
-new firmware and the trick importer read; the rest is kept as the point we
-started from. Licence: MIT, as OpenCat's.
+The original OpenCat firmware (`OpenCat.ino` and `src/`) is still in the
+tree: `src/InstinctNybble.h` holds the stock postures and skills that the new
+firmware and the trick importer read, and the tests check a few other headers
+against it. The rest of the fork (its desktop UI, module tests, skill library)
+was removed on 2026-10-11; git history has it. Licence: MIT, as OpenCat's.
