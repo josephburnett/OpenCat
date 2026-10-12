@@ -45,7 +45,8 @@ both the same frames and compares the replies:
 - JOINTS at the SET_STREAM joints divider: fake angles (LIMP: -32768), legs
   oscillating with the gait phase, head tilt bob and tail wag when flagged;
 - balance (P1): the SET_POSTURE balance flag or SET_BALANCE enable (both
-  cleared by an epoch bump; the SET_BALANCE gains stay) turns it on in SIT and STAND outside any reflex; TELEMETRY
+  cleared by an epoch bump; SET_BALANCE's gains stay) turns it on in SIT and
+  STAND outside any reflex; TELEMETRY
   flags bit 0 mirrors that, and the simulated pitch/roll wobble shrinks. The
   controller itself is not simulated;
 - tricks (P1, docs §3e): the body's upload rules (TRICK_BEGIN / TRICK_FRAMES
@@ -348,9 +349,9 @@ class VirtualBody:
         self.epoch = (self.epoch + 1) & 0xFF
         self.goals.clear()
         self.balance_req = False  # the posture flag is a motion goal
-        # SET_BALANCE's enable is a goal too (body_epoch_bump clears bal.enable, P1
-        # finding B1); the gains stay. The mind's 5 Hz refresh turns it back on.
-        self.balance = {**self.balance, "enable": 0}
+        # SET_BALANCE's enable is a goal too (body.cpp body_epoch_bump, P1
+        # finding B1): off until the mind's next refresh. The gains stay.
+        self.balance["enable"] = 0
         self.head_until = None    # the head hold too
         self.pose = (0, 0, 0, 0)  # and the body pose
         self._trick_end(trick_reason)  # TRICK_DONE carries the new epoch

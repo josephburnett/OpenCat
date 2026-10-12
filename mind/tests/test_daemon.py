@@ -357,7 +357,7 @@ def test_subscription_streams_at_the_requested_rate(start_daemon):
 
 
 def test_a_slow_client_does_not_block_the_loop(start_daemon, monkeypatch):
-    monkeypatch.setattr(dmod, "STREAM_BUFFER_MAX", 4096)
+    monkeypatch.setattr(dmod.streams, "STREAM_BUFFER_MAX", 4096)
     d, vb, path, sock = start_daemon()
     slow = socket.socket(socket.AF_UNIX)
     slow.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -425,7 +425,7 @@ def test_release_lease_expires_and_disconnect_keeps_the_lease(start_daemon, monk
     reopened under avrdude: the lease is honoured after the disconnect, and
     every reopen settles the port first."""
     settled = []
-    monkeypatch.setattr(dmod, "settle_port", lambda port, baud=None, **kw: settled.append(port) or [])
+    monkeypatch.setattr(dmod.port, "settle_port", lambda port, baud=None, **kw: settled.append(port) or [])
     d, vb, path, sock = start_daemon()
     body = remote(sock)
     try:
@@ -616,3 +616,25 @@ def test_cli_run_subcommand(vbody_pty, sockdir):
     finally:
         if p.poll() is None:
             p.kill()
+
+
+def test_balance_enable_restored_after_epoch_bump(start_daemon):
+    """Cross-layer (review §2.4): the body clears SET_BALANCE's enable on
+    every epoch bump (body.cpp body_epoch_bump; the vbody does the same),
+    while the mind keeps the goal latched (not an epoch goal) and refreshes
+    it at 5 Hz: `kilo run --balance` is back on within 300 ms of a bump."""
+    d, vb, path, sock = start_daemon(balance_kp=0.99)
+    assert wait_for(lambda: vb.balance["enable"] == 1, 3)
+    kp = vb.balance["kp_q8"]
+    assert kp == round(0.99 * 256)
+    epoch = vb.epoch
+    with vb.lock:
+        vb._epoch_bump()  # what a fall, a watchdog stop or LOW battery does
+        assert vb.balance["enable"] == 0 and vb.balance["kp_q8"] == kp  # the gains stay
+    t0 = time.monotonic()
+    assert wait_for(lambda: vb.balance["enable"] == 1, 1.0, period=0.005)
+    took = time.monotonic() - t0
+    assert took < 0.3, f"balance back on after {took:.3f} s"
+    assert vb.epoch == (epoch + 1) & 0xFF and vb.balance["kp_q8"] == kp
+    assert d.goal_owner.get("SET_BALANCE", "unset") is None  # still the daemon's own latch
+    assert "SET_BALANCE" in d.link.goals()

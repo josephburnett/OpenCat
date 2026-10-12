@@ -2366,7 +2366,8 @@ mind/                     the Python mind (pip install -e mind)
   pyproject.toml  README.md  firmware/ (opencat-legacy.hex)  systemd/ (kilo.service, install.sh)
   kilo/
     cli.py (registers the subcommands)  cli_tools.py  cli_head.py  cli_trick.py  cli_walk.py
-    daemon.py  remote.py (the socket client)  ir.py (remote key map)  log.py
+    daemon/ (core, clients, ops, sessions, behaviour, remote_ir, streams, port, logs, run)
+    remote.py (the socket client)  ir.py (remote key map)  log.py
     protocol/             VENDORED by protocol/vendor.py: kilo_protocol.py, kilo_link_codec.py
     link/                 codec.py (framing adapter)  messages.py (dataclass adapter)  consts.py
                           serial_link.py (reader/writer threads, goals, commands)  transport.py  ports.py
@@ -2391,7 +2392,7 @@ arduino-cli compiles `src/` recursively, which is why the logic lives under
 
 **CLI.** `kilo` talks to the daemon over a Unix socket (JSON lines), or
 opens the port directly if no daemon is running (`--direct` forces that). As
-built (`kilo/daemon.py`, `kilo/remote.py`): the socket is `--socket`, else
+built (`kilo/daemon/`, `kilo/remote.py`; ops in `kilo/daemon/ops.py`): the socket is `--socket`, else
 `$KILO_SOCKET`, else `$XDG_RUNTIME_DIR/kilo/kilo.sock` (the systemd user
 service), `/run/kilo/kilo.sock` as root, else `~/.kilo/kilo.sock`; protocol
 and ops in mind/README.md "Daemon and systemd". `kilo COMMAND --help` is the
