@@ -291,6 +291,7 @@ class _Pipe:
     def __init__(self) -> None:
         self.buf: deque[bytes] = deque()
         self.cond = threading.Condition()
+        self.written = 0  # bytes ever written into this pipe (tests: has the reader caught up?)
 
 
 class LoopbackEnd:
@@ -332,7 +333,19 @@ class LoopbackEnd:
             return
         with self._tx.cond:
             self._tx.buf.append(bytes(data))
+            self._tx.written += len(data)
             self._tx.cond.notify_all()
+
+    @property
+    def rx_written(self) -> int:
+        """Bytes the other end has written to this end so far."""
+        with self._rx.cond:
+            return self._rx.written
+
+    def wake(self) -> None:
+        """End a read() blocked on an empty pipe now (it returns b"")."""
+        with self._rx.cond:
+            self._rx.cond.notify_all()
 
     def close(self) -> None:
         self.closed = True

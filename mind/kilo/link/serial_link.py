@@ -93,6 +93,7 @@ from kilo.link.transport import Transport, TransportFactory
 log = logging.getLogger("kilo.link")
 
 _DEFAULT = object()
+_WAKE = object()  # writer queue item from sync(): run housekeeping now, then report
 
 
 class LinkError(Exception):
@@ -181,6 +182,10 @@ class SerialLink:
         self.retry_in_s: float | None = None  # current reconnect backoff while the port is missing
         self._dispatch_fn = dispatch
         self.clock = clock
+        # Event.wait in clock time: a test's StepClock provides wait(); the
+        # real clock uses threading.Event.wait (wall time) as always.
+        self._wait_event: Callable[[threading.Event, float], bool] = getattr(
+            clock, "wait", lambda ev, timeout: ev.wait(timeout))
         self.state.port = port_name
 
         self._lock = self.state.lock
@@ -189,6 +194,10 @@ class SerialLink:
         self._transport: Transport | None = None
         self._broken = threading.Event()
         self._running = threading.Event()
+        self._stopping = threading.Event()  # set by stop(): ends a reconnect backoff early
+        self._synced = threading.Condition()  # sync(): the writer's last served wake token
+        self._sync_served = 0
+        self._sync_next = 0
         self._threads: list[threading.Thread] = []
         self._seq = random.randrange(256)
         self._hello_on_connect = False
@@ -223,6 +232,7 @@ class SerialLink:
     def start(self) -> "SerialLink":
         if self._running.is_set():
             return self
+        self._stopping.clear()
         self._running.set()
         self._threads = [
             threading.Thread(target=self._reader, name="kilo-link-rx", daemon=True),
@@ -235,6 +245,9 @@ class SerialLink:
     def stop(self, timeout: float = 1.0) -> None:
         """Stop both threads and close the transport (e.g. before flashing)."""
         self._running.clear()
+        self._stopping.set()
+        with self._synced:
+            self._synced.notify_all()
         for t in self._threads:
             t.join(timeout)
         self._threads = []
@@ -272,11 +285,16 @@ class SerialLink:
                 if p is not None and not p.done.is_set():
                     p.silenced = True
                     p.done.set()
+            wakes = []
             while True:
                 try:
-                    self._txq.get_nowait()
+                    item = self._txq.get_nowait()
                 except queue.Empty:
                     break
+                if item[0] is _WAKE:
+                    wakes.append(item)  # a sync() waiting on it: not a frame
+            for item in wakes:
+                self._txq.put(item)
             last = self.last_tx
         self._log("link", silent=True)
         return last
@@ -462,7 +480,7 @@ class SerialLink:
                     if name == "HELLO_REQ":
                         self._hello_solicited_at = self.clock()
                 self._txq.put((typ, p.seq, payload, name))
-                if p.done.wait(timeout):
+                if self._wait_event(p.done, timeout):
                     ok = not p.silenced
                     break
                 if attempt < retries:
@@ -493,16 +511,37 @@ class SerialLink:
         the mind's main loop (a CLI's main thread) passes ``alive=True``.
         """
         deadline = self.clock() + timeout
+        # With the real clock this is the same deadline; with a test's
+        # StepClock (time moves only when stepped) it bounds the wait for
+        # another thread in real time.
+        real_deadline = time.monotonic() + timeout
         with self._changed:
             while True:
                 if alive:
                     self.mark_alive()
                 if pred():
                     return True
-                left = deadline - self.clock()
+                left = min(deadline - self.clock(), real_deadline - time.monotonic())
                 if left <= 0:
                     return False
                 self._changed.wait(min(left, 0.1))
+
+    def sync(self, timeout: float = 5.0) -> None:
+        """For tests driving a StepClock: return once the writer has run a
+        housekeeping pass that started after this call (so at the clock's
+        current time) and has written everything queued before it.
+
+        A no-op while the link is not running."""
+        if not self._running.is_set() or not self._threads:
+            return
+        with self._synced:
+            self._sync_next += 1
+            token = self._sync_next
+        self._txq.put((_WAKE, token, b"", ""))
+        with self._synced:
+            ok = self._synced.wait_for(lambda: self._sync_served >= token or not self._running.is_set(), timeout)
+        if not ok:
+            raise TimeoutError("link writer did not run housekeeping")
 
     # ---- writer thread -------------------------------------------------------
     def _writer(self) -> None:
@@ -511,14 +550,22 @@ class SerialLink:
                 item = self._txq.get(timeout=self.cfg.housekeeping_s)
             except queue.Empty:
                 item = None
+            token = None
             if item is not None:
                 typ, seq, payload, name = item
-                self._send_frame(typ, self._next_seq() if seq is None else seq, payload, name)
+                if typ is _WAKE:
+                    token = seq
+                else:
+                    self._send_frame(typ, self._next_seq() if seq is None else seq, payload, name)
             try:
                 self._housekeeping()
             except Exception:
                 log.exception("link housekeeping failed")
             self.writer_passes += 1
+            if token is not None:
+                with self._synced:
+                    self._sync_served = token
+                    self._synced.notify_all()
 
     def _send_frame(self, typ: int, seq: int, payload: bytes, name: str) -> bool:
         with self._tx_lock:
@@ -720,9 +767,7 @@ class SerialLink:
                 self._changed.notify_all()
 
     def _sleep(self, s: float) -> None:
-        end = self.clock() + s
-        while self._running.is_set() and self.clock() < end:
-            time.sleep(min(0.02, s))
+        self._wait_event(self._stopping, s)  # returns early on stop()
 
     def _handle(self, item: Frame | DecodeError, now: float) -> None:
         st = self.state.stats

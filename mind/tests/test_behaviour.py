@@ -739,6 +739,7 @@ def test_build_root_names():
 
 # ---- against the virtual body ------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_runner_against_vbody():
     from kilo.body.client import BodyClient
     from kilo.link.serial_link import LinkConfig, SerialLink

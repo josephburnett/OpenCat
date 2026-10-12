@@ -92,6 +92,7 @@ def test_kilo_daemon_lists_the_sockets_it_tried(sockdir, monkeypatch):
 
 # ---- port hot-plug ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_daemon_waits_for_the_port_and_survives_a_replug(sockdir, monkeypatch):
     """Start with no port (robot unplugged), plug a vbody in, pull it, plug another."""
     port = sockdir / "tty"  # a symlink to the vbody's pty, made later
@@ -193,6 +194,7 @@ def test_behaviour_runner_under_the_daemon(start_daemon, monkeypatch, tmp_path):
     assert wait_for(lambda: vb.wd_stage >= 1, 2)  # the daemon went silent: the body's watchdog took over
 
 
+@pytest.mark.slow
 def test_kilo_run_behaviour_kilolog_end_to_end(vbody_pty, sockdir, tmp_path):
     """`kilo run --behaviour --kilolog` against the vbody, `kilo monitor
     --percepts` through it, SIGTERM, then `kilo log summary|replay` on the file."""
@@ -241,6 +243,7 @@ def test_kilo_run_behaviour_kilolog_end_to_end(vbody_pty, sockdir, tmp_path):
     assert "startle" in names
 
 
+@pytest.mark.slow
 def test_direct_kilolog_round_trip(vbody_pty, tmp_path):
     vb, path = vbody_pty
     f = tmp_path / "direct.kilolog"
@@ -259,6 +262,7 @@ def test_direct_kilolog_round_trip(vbody_pty, tmp_path):
     assert rc == 2 and "summary" in out
 
 
+@pytest.mark.slow
 def test_monitor_percepts_direct(vbody_pty):
     vb, path = vbody_pty
     mon = subprocess.Popen([sys.executable, "-m", "kilo.cli", "--port", path, "monitor", "--percepts",

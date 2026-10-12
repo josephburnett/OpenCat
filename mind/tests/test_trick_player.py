@@ -113,6 +113,7 @@ def _received(vb, name):
     return [r for r in vb.received if r[0] == name]
 
 
+@pytest.mark.slow
 def test_upload_is_cached(rig):
     client, vb = rig()
     t = library.load("hi")
@@ -157,6 +158,7 @@ def test_play_resolves_on_trick_done(rig):
         asyncio.run(client.play(t, speed=5))
 
 
+@pytest.mark.slow
 def test_play_library_name_and_refusals(rig):
     client, vb = rig()
     # LIMP: the body refuses
@@ -222,6 +224,7 @@ def _kilo(*args, port=None):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
+@pytest.mark.slow
 def test_cli_list_and_show_need_no_body():
     p = _kilo("--port", "/dev/nonexistent-kilo", "trick", "list")
     out, err = p.communicate(timeout=15)
@@ -235,6 +238,7 @@ def test_cli_list_and_show_need_no_body():
     assert p.wait(15) == 1
 
 
+@pytest.mark.slow
 def test_cli_upload_then_play(vbody_pty):
     vb, path = vbody_pty
     p = _kilo("trick", "upload", "check_around", port=path)
@@ -250,6 +254,7 @@ def test_cli_upload_then_play(vbody_pty):
     assert "cached" in out and "TRICK_DONE DONE after" in out, out
 
 
+@pytest.mark.slow
 def test_cli_play_forever_for_then_watch(vbody_pty):
     vb, path = vbody_pty
     vb.params[P.ParamId.WD_REST_MS] = 1000
