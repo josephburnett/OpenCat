@@ -55,12 +55,14 @@ Board angles from the owner's phone level on the board.
   quite good. It's a flimsy board so Kilo was shaking it while I held it."
 - The residual sits at the 2° dead band, as the host model predicted.
 - **Two falls**, both onto the left side (P1 results doc, "Fall and head
-  test"). Fall 1 while the owner swung the board by hand (the detector trips
-  at 75°). Fall 2 during the sideways A/B: STANCE **without** balance on a
-  13° side slope plus Kilo's 5° list is 18° of roll, and with a 65 mm track
-  at a 76 mm foot-centre height the static tipping roll is only about 22°.
-  **Lesson:** never hold STANCE without balance on a side slope above ≈8°,
-  and do slope tests on the floor; the procedure doc was updated.
+  test"). Fall 1: the owner was moving the board around by hand; Kilo rolled
+  over. Fall 2: during the sideways A/B, right side uphill; the owner did
+  not describe the moment. The agent's inference (unverified): STANCE
+  **without** balance on a 13° side slope plus Kilo's ≈5° list is 18° of
+  roll, and with a 65 mm track at a 76 mm foot-centre height the static
+  tipping roll is only about 22°. **Lesson either way:** never hold STANCE
+  without balance on a side slope above ≈8°, and do slope tests on the
+  floor; the procedure doc was updated.
 - Stack free fell from 355 B (P1 build) to 248 B with the gait code in;
   battery 8.38 → 8.11 V over the 17 min session.
 

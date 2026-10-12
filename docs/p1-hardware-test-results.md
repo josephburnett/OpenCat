@@ -89,3 +89,19 @@ build ded3c1d8), both onto the LEFT side**, see
   on its own is unknown; both times the owner lifted Kilo while it played.
   The planned five-per-side test on a soft surface is still to do.
 - `kilo look`: not run.
+
+## IR remote
+
+**2026-10-11 17:26, build ded3c1d8, `kilo --direct monitor --passive`,
+Kilo LIMP on the desk.** The owner pressed keys on the Petoi remote; the
+monitor printed `EVENT IR_KEY` lines:
+
+| Owner pressed | Decoded | Match |
+|---|---|---|
+| stand, "a bunch of times" | `>>|` (0x02, stand), several frames plus held-key repeats | yes |
+| sit (owner not 100 % sure) | `2` (0x18, sit) | yes |
+| rest (owner not 100 % sure) | `100+` (0x98, crawl) | the key one row below `CH-`; consistent with a mis-press, not checked further |
+
+Decoding, the key table and the repeat flag work on the real receiver.
+Range and the mapped actions (`kilo run --remote`) were not tested: the
+motion keys would start walking, which must wait for the floor.
