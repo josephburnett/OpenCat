@@ -4,6 +4,9 @@
 
 ResetRecord sys_reset_record __attribute__((section(".noinit")));
 
+// The two .initN hooks below are AVR start-up code (naked, AVR assembly);
+// the host tests (body/test/hal) compile the rest of this file.
+#ifdef __AVR__
 // Runs in .init3, before main() and before the C runtime clears RAM. After
 // a watchdog reset the watchdog stays enabled (at its shortest timeout on
 // some parts), so turn it off first thing. MCUSR is already 0 here: optiboot
@@ -33,6 +36,7 @@ extern "C" void sys_paint_stack(void) {
       "  brlo 1b\n"
       "  breq 1b\n" ::);
 }
+#endif
 
 extern uint8_t _end;
 extern uint8_t __stack;
