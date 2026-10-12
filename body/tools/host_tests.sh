@@ -32,7 +32,10 @@ if [ -n "$bad" ]; then echo "$bad"; echo "lint FAILED"; fail=$((fail + 1)); else
 #    fakes (test_i2c.cpp).
 CXX="${CXX:-g++}"
 FLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined
-       -ffp-contract=off -DREPO_ROOT="\"$REPO\"" -I"$BODY/test/fake_avr")
+       -ffp-contract=off -DREPO_ROOT="\"$REPO\"")
+# test/fake_avr (the TWI register fake test_i2c.cpp uses) only for the core
+# tests: test/hal ships its own avr/ shims and must not see this one.
+CORE_FLAGS=("${FLAGS[@]}" -I"$BODY/test/fake_avr")
 # The vendored protocol C files (src/proto, kept identical to protocol/ by
 # protocol/vendor.py) are C99: compile them with the C compiler.
 CC="${CC:-gcc}"
@@ -48,7 +51,7 @@ CORE=("${KILO_CORE_SRCS[@]}" "${PROTO[@]}")
 for t in "$BODY"/test/test_*.cpp; do
   name=$(basename "$t" .cpp)
   echo "== $name"
-  if ! "$CXX" "${FLAGS[@]}" -o "$OUT/$name" "$t" "${CORE[@]}" "${LDLIBS[@]}"; then
+  if ! "$CXX" "${CORE_FLAGS[@]}" -o "$OUT/$name" "$t" "${CORE[@]}" "${LDLIBS[@]}"; then
     echo "$name: BUILD FAILED"; fail=$((fail + 1)); continue
   fi
   if ! "$OUT/$name"; then fail=$((fail + 1)); fi

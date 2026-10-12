@@ -95,3 +95,13 @@ Not referenced by anything under `body/`, `mind/`, `protocol/` or `docs/` (grep 
 - Done the same evening (ccfb3d8): `pyUI/`, `ModuleTests/`, `SkillLibrary/`, `serialMaster/`, `Resources/`, `ChangeLog.md` removed, `.gitignore` pruned. `OpenCat.ino` and `src/` kept by the owner's decision (the headers listed in §6 are read by tests and the trick importer).
 - §2.7: the `--balance` semantics are as intended and documented in `mind/README.md` "Balance by default": with `kilo run --balance`, a client's `kilo balance off` holds only while that client lives; the remote's CH+ is the way to switch it off for longer.
 - §2.4: the body does clear `bal.enable` on an epoch bump; the mind's 5 Hz refresh brings it back within 200 ms. Worth a test, not yet written.
+
+## Follow-ups from the fan-out (2026-10-11, late)
+
+All seven branches merged into `main`. Findings reported by the agents and left as they are:
+- HAL (`body/src/hal`): a STOP that never completes is reported as success after 3000 polls and not counted (`i2c_end`); a servo write that fails part-way can leave a half-new pose for one tick (PCA9685 outputs latch on any STOP); any unexpected status on an I2C read is treated as arbitration lost (coarse); `stack_free_min` can overstate by one byte if the deepest byte equals the paint value. Doc note: the config loads before I2C at boot, not at step 4 as §3a says.
+- Link: while the mind is stalled, a changed ("dirty") goal is still sent once when the body is heard again (`serial_link.py`); documented as intended, but it feeds the body's watchdog once on behalf of a stalled mind.
+- Daemon: ops with client-chosen waits (`wait_ready`, `cal_save`, `verify_hello`, `stop_walk`) each hold one of the 8 pool threads; eight such clients would starve every other blocking op.
+- Tests: three near-duplicate "balance returns after an epoch bump" tests exist (test_daemon x2, test_corebody); the daemon/CLI subprocess tests are still wall-clock and fail under heavy load (the review's §3.4 list minus the link/vbody files); `host_tests.sh` writes to a fixed `/tmp/kilo-host-tests`, so concurrent runs clobber each other.
+- Firmware changes awaiting a reflash and a hardware check: the 8 ms cap on the ACK/reply send wait and the per-tick I2C budget (H1 link soak with no TX_DROPPED, `kilo status` while walking: overruns 0, i2c_err flat, stack_free_min ~230 B).
+- Not scripted: `gait_check()` range literals in `gait.cpp`; the vbody refuses SET_GAIT with period/duty 0 where the body takes the pattern default.

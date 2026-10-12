@@ -258,25 +258,50 @@ int main() {
     CHECK(i2c_error_count() == 0);                 // and not counted
   }
 
-  // ---- a slow (not dead) bus: every action just inside the limit ----
+  // ---- a slow (not dead) bus: bounded per tick, not per action ----
+  // Since the per-tick time budget (i2c.h i2c_budget_reset, TICK_SPIN_BUDGET
+  // 17000 polls, about 9.6 ms) a slow bus can no longer eat a whole tick
+  // action by action: the transfer that spends the budget ends I2C_TIMEOUT,
+  // and later ones fail I2C_BUDGET without touching the bus until the next
+  // refill.
   {
     reset_all();
     i2c_init();
-    g_twi.slow_polls = SPIN_LIMIT - 1;  // TWINT on the last allowed poll
+    g_twi.slow_polls = 200;  // slow, but a whole tick's burst fits the budget
     uint64_t p0 = g_twi.polls;
     uint8_t d[64] = {};
     // The PCA9685 burst of every tick: START, SLA, register, 64 bytes.
     CHECK(i2c_write(0x40, 0x06, d, 64) == I2C_OK);
-    uint64_t burst = g_twi.polls - p0;
-    CHECK(burst == 67ull * SPIN_LIMIT + 2);  // + the STOP's 2 polls
+    uint64_t fits = g_twi.polls - p0;
+    CHECK(fits > 67ull * 200 && fits < 17000);
     CHECK(i2c_error_count() == 0);
-    // One more poll per action and the first action times out instead.
+    // Every action just inside the per-action limit: the budget runs out
+    // mid-burst, the transfer ends I2C_TIMEOUT (bus recovered, counted) after
+    // about the budget's worth of polls, not after 67 x SPIN_LIMIT.
+    reset_all();
+    i2c_init();
+    g_twi.slow_polls = SPIN_LIMIT - 1;
+    p0 = g_twi.polls;
+    CHECK(i2c_write(0x40, 0x06, d, 64) == I2C_TIMEOUT);
+    uint64_t burst = g_twi.polls - p0;
+    CHECK(burst >= 17000 && burst < 17000 + 2ull * SPIN_LIMIT);
+    CHECK(i2c_error_count() == 1);
+    // The budget is spent: the next transfer is refused before START.
+    uint64_t p1 = g_twi.polls;
+    CHECK(i2c_write_byte(0x40, 0, 0) == I2C_BUDGET);
+    CHECK(g_twi.polls == p1);
+    // A refill (the next tick) lets it through again.
+    i2c_budget_reset();
+    g_twi.slow_polls = 0;
+    CHECK(i2c_write_byte(0x40, 0, 0) == I2C_OK);
+    // One more poll per action and the first action times out on its own.
     reset_all();
     i2c_init();
     g_twi.slow_polls = SPIN_LIMIT;
     CHECK(i2c_write(0x40, 0x06, d, 64) == I2C_TIMEOUT);
-    std::printf("i2c: slow bus, no error: 64-byte PCA burst = %llu TWCR polls (67 actions x %u)\n",
-                (unsigned long long)burst, (unsigned)SPIN_LIMIT);
+    std::printf("i2c: slow bus: a %llu-poll burst fits the tick budget; at %u polls per action the "
+                "burst is cut at the 17000-poll budget (%llu polls)\n", (unsigned long long)fits, (unsigned)(SPIN_LIMIT - 1),
+                (unsigned long long)burst);
   }
 
   return report("hal_i2c");
