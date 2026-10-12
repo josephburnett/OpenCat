@@ -17,16 +17,9 @@ SAN="-fsanitize=address,undefined -fno-sanitize-recover=all"
 WARN="-Wall -Wextra -Werror"
 mkdir -p "$BUILD"
 
-# libasan on 32-bit ARM (Raspberry Pi, armhf) needs libatomic for its 64-bit
-# atomics (__atomic_load_8/__atomic_store_8); probe once whether a plain
-# sanitizer link works and, if not, add -latomic.
-LDLIBS=""
-printf 'int main(){return 0;}\n' > "$BUILD/probe.cpp"
-if ! "$CXX" $SAN "$BUILD/probe.cpp" -o "$BUILD/probe" 2>/dev/null &&
-   "$CXX" $SAN "$BUILD/probe.cpp" -o "$BUILD/probe" -latomic 2>/dev/null; then
-    echo "(sanitizer link needs -latomic here)"
-    LDLIBS="-latomic"
-fi
+# -latomic for the sanitizer link on armhf (the probe is shared with the body's host tests).
+. "$HERE/../body/tools/common.sh"
+LDLIBS="$(kilo_sanitizer_ldlibs "$CXX" "$BUILD")"
 
 echo "== generator up to date"
 "$PYTHON" "$HERE/gen.py" --check
