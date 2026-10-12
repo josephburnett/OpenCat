@@ -2,8 +2,8 @@
 
 Everything needed to rebuild the two machines Kilo's software runs on: a
 Debian dev host (tests, builds) and the Raspberry Pi 2 B that is Kilo's mind.
-The checkouts are still called `~/OpenCat` on both machines: the systemd unit
-and the venv path expect that name (`mind/systemd/kilo.service`), so keep it
+The checkouts are still called `~/OpenCat` on both machines: the systemd units
+and the venv path expect that name (`mind/systemd/`), so keep it
 until that is changed in one go.
 
 ## Dev host (Debian 13)
@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.
 git clone https://github.com/josephburnett/kilo.git ~/OpenCat && cd ~/OpenCat
 python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e mind pytest
 echo 'export PATH="$HOME/OpenCat/.venv/bin:$HOME/.local/bin:$PATH" KILO_PORT=/dev/ttyACM0' >> ~/.bashrc
-mind/systemd/install.sh --start      # user unit, ~/.config/kilo/env, lingering: the daemon starts at boot
+mind/systemd/install.sh --start      # (2026-10-10: the user unit; superseded by the system unit below)
 ```
 
 Then `~/.config/kilo/env` was set to `KILO_RUN_ARGS=--remote --balance 0.99`
@@ -61,7 +61,8 @@ Then `~/.config/kilo/env` was set to `KILO_RUN_ARGS=--remote --balance 0.99`
 `mind/README.md` "Daemon and systemd" explains the flags.
 
 How reproducible this is: `install.sh` scripts the service part (unit, env
-file, lingering, enable) and is idempotent. The rest is the eight lines
+file, enable) and is idempotent; on a fresh card use the system service and
+the boot trim below instead of the user unit. The rest is the eight lines
 above, by hand. Not scripted, and not needed yet: the `raspi-config` UART
 settings for the header path (serial console off, UART on, 1-Wire off,
 `gpio=4=ip,np`), `python3-matplotlib`, `python3-opencv`. Also on the image:
@@ -74,7 +75,7 @@ Gotchas:
 - `sudo` wants a password, so apt installs and reboots need someone at a
   keyboard (or an ssh session with a terminal).
 - While the daemon runs, every `kilo` command goes through its socket; stop
-  it (`systemctl --user stop kilo`) for passive watching (`kilo monitor
+  it (`sudo systemctl stop kilo`) for passive watching (`kilo monitor
   --passive`) or anything that opens the port directly.
 
 Power. The root filesystem is ext4 (journaled) with `fsck.repair=yes` on the
@@ -87,13 +88,89 @@ rule that runs `shutdown` before the switch is flipped). The body does not
 depend on any of this: when the Pi goes quiet it stops within 0.5 s, lies
 down at 1.5 s and goes limp 10 s later.
 
+### The daemon as a system service, and boot time
+
+Why: measured on 2026-10-11, the daemon (`kilo run`, the program that owns
+the serial port to the body and that every `kilo` command talks to) started
+67 s after power. It was a systemd *user* service, and systemd starts a
+user's services only after the network is up (NetworkManager, the program
+that runs the Wi-Fi, took 34 s). It is now a *system* service that runs as
+joe and does not wait for the network at all. Everything below is run on
+the Pi, in an ssh shell, from `~/OpenCat`; `sudo` asks for joe's password.
+
+1. Install the system service (it also switches the old user service and
+   "lingering", the setting that started it at boot, off; settings in
+   `~/.config/kilo/env` are kept):
+   ```sh
+   cd ~/OpenCat && git pull
+   sudo mind/systemd/install.sh --system --start
+   systemctl status kilo        # "active (running)"
+   kilo daemon                  # socket /run/kilo/kilo.sock, port, link state
+   ```
+   Run without `sudo`, `install.sh --system` prints the exact command to run
+   instead. It is safe to run again.
+2. Trim the boot. First look at what would change, then change it:
+   ```sh
+   mind/systemd/trim-boot.sh --dry-run
+   sudo mind/systemd/trim-boot.sh
+   ```
+   It switches off cloud-init (the Pi Imager's first-boot setup, finished
+   long ago; only if the Wi-Fi settings it wrote are saved on disk), masks
+   `NetworkManager-wait-online` and `systemd-networkd-wait-online` (services
+   whose only job is to make other things wait for the network; masked, so
+   nothing can switch them back on), and removes `splash` (the graphical
+   boot screen) from the kernel command line `/boot/firmware/cmdline.txt`,
+   keeping a copy as `cmdline.txt.kilo-backup`. It does not touch
+   NetworkManager, Wi-Fi, ssh or Tailscale, and leaves
+   `rpi-resize-swap-file.service` alone (not known for certain to be safe to
+   switch off; `systemctl cat rpi-resize-swap-file.service` shows what it
+   runs). It prints each change and is safe to run twice.
+3. Reboot (`sudo reboot`), wait until ssh answers again, then:
+   ```sh
+   systemd-analyze                              # total boot time
+   systemd-analyze critical-chain kilo.service  # what kilo.service waited for
+   journalctl -b -u kilo -o short-monotonic | head -3   # first line: seconds since power-on
+   ```
+   Expected: the daemon is up about 15-20 s after power (kernel 8 s, then
+   basic system start, then the 2-3 s Python start of `kilo run`), even
+   while the Wi-Fi is still connecting. Not yet measured on the Pi.
+
+The fallback, if the system service ever misbehaves: `sudo systemctl
+disable --now kilo` and `mind/systemd/install.sh --start` (the user service,
+which starts about a minute after power).
+
+**With no network.** The Wi-Fi dongle may be pulled out: the Pi boots and
+Kilo runs without it, since nothing on the way to `kilo run` waits for the
+network. NetworkManager stays enabled, so plugging the dongle back in brings
+the Wi-Fi back by itself (expect a few seconds to a minute). While there is
+no network there is no ssh: the only controls are the IR remote (needs
+`--remote` in `KILO_RUN_ARGS`) and the behaviour runner (`--behaviour`), and
+the logs in `~/kilo-logs` (`daemon.log`, plus `.kilolog.gz` with
+`--kilolog`) are the only record of what happened until the dongle is back. (Inferred,
+not checked on the Pi: the Pi has no battery clock, so with no network its
+time is not set and the log timestamps carry on from the last time it was
+saved at shutdown.)
+
+**Why NetworkManager takes 34 s** (to look into later; commands only):
+```sh
+journalctl -b -u NetworkManager -o short-monotonic | head -60   # where the gaps are
+systemd-analyze blame | head -20
+systemd-analyze critical-chain NetworkManager.service
+systemctl status systemd-udev-settle.service                    # active = something waits for udev to settle
+journalctl -b -u systemd-udevd -o short-monotonic | tail -20
+dmesg -T | grep -iE 'usb|wlan|80211|firmware|rtl|mt7|brcm'      # the Wi-Fi dongle's driver and firmware load
+dmesg | grep -iE 'firmware' ; lsusb                             # which dongle, and missing firmware files
+nmcli -f GENERAL,WIFI-PROPERTIES device show wlan0 | head -20
+systemctl list-dependencies --reverse network-online.target     # what still asks for the network at boot
+```
+
 ## Day-to-day loop
 
 1. Edit and run the four suites on the dev host. Commit on `main`, push.
 2. On the Pi:
    ```sh
    cd ~/OpenCat && git pull && .venv/bin/pip install -e mind   # pull alone is enough unless pyproject.toml changed
-   systemctl --user restart kilo                                 # if daemon code changed
+   sudo systemctl restart kilo                                   # if daemon code changed
    ```
 3. Firmware: `export PATH=$HOME/.local/bin:$PATH; kilo -v flash` on the Pi
    (builds there in about 25 s, asks the daemon to release the port, flashes,

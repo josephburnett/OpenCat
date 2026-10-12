@@ -314,7 +314,7 @@ re-asserts its own goals. `kilo trick stop` is always allowed.
 **Silent modes.** `kilo monitor --passive` and `kilo posture --then-watch`
 must send nothing and therefore need the port to themselves; with a daemon on
 that port they refuse and say so. Stop the daemon first (`kilo daemon stop`,
-or `systemctl --user stop kilo`).
+or `sudo systemctl stop kilo`).
 
 **Flashing with a daemon.** `kilo flash` builds first, then asks the daemon
 to release the port (`release_port`, 300 s lease), runs avrdude, settles the
@@ -431,25 +431,41 @@ the daemon deletes the oldest kilo logs (`kilo-*`, `behaviour-*`, rotated
 `daemon.log.N`) beyond that, never an open file or one written in the last
 10 minutes.
 
-**systemd: a user service.** `mind/systemd/kilo.service` runs `kilo run`
-as joe's *user* service, with lingering so it starts at boot without a login.
-Why a user service rather than a system unit with `User=joe`: it is installed
-and managed without sudo (`systemctl --user`), it runs with joe's groups
-(`dialout`) and venv, and `$XDG_RUNTIME_DIR` (`/run/user/1000`) is the same
-directory joe's shell sees, so `kilo status` finds the socket with no
-configuration. The cost: lingering must be on (install.sh does it), and the
-P3 "clean Pi shutdown on CRITICAL battery" needs a polkit rule or a sudoers
-line for `systemctl poweroff` from a user service.
+**systemd: a system service running as joe.** `mind/systemd/kilo-system.service`,
+installed by `sudo mind/systemd/install.sh --system` as
+`/etc/systemd/system/kilo.service`, runs `kilo run` as `User=joe`,
+`Group=dialout`, with `RuntimeDirectory=kilo`: the socket is
+`/run/kilo/kilo.sock` (owned by joe, mode 0660), the first place every
+`kilo` command looks, from any shell. Settings stay in
+`~/.config/kilo/env` (absolute path written into the unit by install.sh),
+so they are edited without sudo and shared with the fallback user unit; the
+logs stay in `~/kilo-logs`. Why not the user service it replaces: a user
+manager starts only after `systemd-user-sessions.service`, which is ordered
+after `network.target`, i.e. after NetworkManager has come up (34 s on the
+Pi 2 B), so the daemon started 67 s after power. The system unit has only
+the default dependencies (after `basic.target`) and no network or
+serial-device ordering (the daemon waits for its port itself): it starts
+about 15-20 s after power once the boot is trimmed (docs/setup.md "The daemon as a
+system service, and boot time"), and it starts and runs with no network at all (Wi-Fi dongle
+unplugged). With no network the only controls are the IR remote
+(`--remote`) and the behaviour runner (`--behaviour`), and `~/kilo-logs` is
+the only record until the network is back. A daemon started by hand
+(`kilo run`) or by the user unit listens in `/run/user/<uid>/kilo` (it
+cannot create `/run/kilo`) and refuses to start while another daemon
+answers on a socket the clients would find first. The fallback, a *user*
+service with lingering (`mind/systemd/kilo.service`, `install.sh` without
+`--system`), still works and needs no sudo, but starts a minute late.
 
 ```sh
-mind/systemd/install.sh          # idempotent: unit -> ~/.config/systemd/user/, ~/.config/kilo/env
-                                 # from env.example if missing, lingering, daemon-reload, enable
-mind/systemd/install.sh --start  # ... and (re)start it now
-systemctl --user status kilo
-tail -f ~/kilo-logs/daemon.log   # the daemon's own log: always there
-journalctl --user -u kilo -f     # the same through the journal, when it is readable (below)
-kilo daemon                      # pid, port and link state, clients, holds, behaviour, percepts
-systemctl --user stop kilo       # before `kilo monitor --passive` or the hardware-test steps
+sudo mind/systemd/install.sh --system  # idempotent: unit -> /etc/systemd/system/kilo.service, ~/.config/kilo/env
+                                       # from env.example if missing, user unit + lingering off, daemon-reload, enable
+sudo mind/systemd/install.sh --system --start  # ... and (re)start it now
+mind/systemd/install.sh --system       # not root: prints the sudo command to run
+systemctl status kilo
+tail -f ~/kilo-logs/daemon.log         # the daemon's own log: always there
+journalctl -u kilo -f                  # the same through the journal (joe is in adm)
+kilo daemon                            # pid, socket, port and link state, clients, holds, behaviour, percepts
+sudo systemctl stop kilo               # before `kilo monitor --passive` or the hardware-test steps
 ```
 
 **On the Pi: the behaviour runner under systemd.**
@@ -459,21 +475,21 @@ cd ~/OpenCat && git pull                       # pip install -e: the update is l
 nano ~/.config/kilo/env                        # KILO_PORT=/dev/ttyACM0
                                                # KILO_RUN_ARGS=--behaviour --kilolog
                                                # (or --remote --balance: the remote, balance always on)
-systemctl --user restart kilo
+sudo systemctl restart kilo
 kilo daemon                                    # behaviour running, link up, raw log path
 kilo monitor --percepts                        # percept flags and events, through the daemon
 tail -f ~/kilo-logs/daemon.log                 # daemon log (socket, port, reconnects, runner)
 tail -f ~/kilo-logs/behaviour-*.jsonl          # what the runner chose and why
 kilo log summary ~/kilo-logs/kilo-*.kilolog.gz # after a session: rates, attitude, modes, events
-systemctl --user stop kilo                     # SIGTERM: runner stops, goals dropped, port closed
+sudo systemctl stop kilo                       # SIGTERM: runner stops, goals dropped, port closed
 ```
 
-`journalctl --user -u kilo` answers "No journal files were found" when the
-user journal is volatile or joe may not read it (not in `systemd-journal`).
-`~/kilo-logs/daemon.log` does not depend on either. To get the journal too:
-`journalctl _SYSTEMD_USER_UNIT=kilo.service` (joe is in `adm`), or
-`sudo usermod -aG systemd-journal joe` and, for a journal that survives
-reboots, `sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald`.
+`journalctl -u kilo` reads the system journal (joe is in `adm`); for a
+journal that survives reboots, `sudo mkdir -p /var/log/journal && sudo
+systemctl restart systemd-journald`. `~/kilo-logs/daemon.log` depends on
+neither. With the fallback user unit, `journalctl --user -u kilo` may answer
+"No journal files were found" (volatile user journal); use
+`journalctl _SYSTEMD_USER_UNIT=kilo.service` there.
 
 `~/.config/kilo/env` (systemd `EnvironmentFile` syntax) sets `KILO_PORT`
 (`/dev/ttyACM0`, the CH343 adapter in a Pi USB port, for now; `/dev/ttyAMA0`
@@ -989,8 +1005,8 @@ daemon against direct (same output). `test_settle.py` checks the post-flash
 settle against a model of the line (tty core, cdc-acm, HUPCL, a line-coding
 glitch), flash verification, `kilo flash` with a fake avrdude direct and
 through the daemon, and `kilo monitor --rate`. `test_systemd.py` runs
-install.sh against fake systemctl/loginctl. `test_wiring.py` checks the
-pieces together: socket candidates, the daemon waiting for a missing port and
+install.sh (user and `--system` mode) and trim-boot.sh against fake
+systemctl/loginctl in a fake `/`. `test_wiring.py` checks the pieces together: socket candidates, the daemon waiting for a missing port and
 surviving a replug (a vbody behind a symlink that appears, goes and comes
 back), the real behaviour runner under the daemon (behaviour log, posture
 goals, body events, clean stop), `kilo run --behaviour --kilolog` end to end
@@ -1040,7 +1056,7 @@ kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody 
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
 kilo/vbody/                 virtual body
 firmware/                   stored hex images (legacy firmware)
-systemd/                    kilo.service (user unit), env.example, install.sh
+systemd/                    kilo-system.service (the system unit), kilo.service (fallback user unit), env.example, install.sh, trim-boot.sh
 ```
 
 ## Background clients over ssh

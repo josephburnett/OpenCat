@@ -45,19 +45,23 @@ ALIVE_PERIOD_S = 0.5  # RemoteLink.mark_alive() pings the daemon at most this of
 
 # ---- socket path ------------------------------------------------------------------
 RUN_USER_ROOT = "/run/user"
+SYSTEM_SOCKET = Path("/run/kilo/kilo.sock")  # kilo-system.service: RuntimeDirectory=kilo
 
 
 def socket_candidates(explicit: str | os.PathLike | None = None, *, env: dict[str, str] | None = None,
                       euid: int | None = None, home: str | os.PathLike | None = None,
                       is_dir: Callable[[str], bool] = os.path.isdir) -> list[tuple[Path, str]]:
-    """Every place a daemon may listen, most specific first, as (path, why).
+    """Every place a daemon may listen, most specific first, as (path, why):
+    the client's search order.
 
     ``explicit`` (``--socket``) or ``$KILO_SOCKET`` alone when given;
-    ``/run/kilo/kilo.sock`` for root, then (``sudo kilo ...``) the invoking
-    user's ``/run/user/$SUDO_UID/kilo/kilo.sock``; else ``$XDG_RUNTIME_DIR/kilo/kilo.sock``,
+    ``/run/kilo/kilo.sock`` (the system service's socket, or root's daemon)
+    always first; for root then (``sudo kilo ...``) the invoking user's
+    ``/run/user/$SUDO_UID/kilo/kilo.sock``; else ``$XDG_RUNTIME_DIR/kilo/kilo.sock``,
     then ``/run/user/<uid>/kilo/kilo.sock`` when ``/run/user/<uid>`` exists
     (a non-login SSH shell has no ``$XDG_RUNTIME_DIR``, but the systemd user
-    service listens there), then ``~/.kilo/kilo.sock``."""
+    service listens there), then ``~/.kilo/kilo.sock``. Where a daemon
+    *listens* is ``listen_socket()``."""
     if explicit:
         return [(Path(explicit), "--socket")]
     env = os.environ if env is None else env
@@ -66,14 +70,14 @@ def socket_candidates(explicit: str | os.PathLike | None = None, *, env: dict[st
     if euid is None:
         euid = os.geteuid() if hasattr(os, "geteuid") else -1
     if euid == 0:
-        out0 = [(Path("/run/kilo/kilo.sock"), "root")]
+        out0 = [(SYSTEM_SOCKET, "root")]
         sudo_uid = env.get("SUDO_UID", "")
         if sudo_uid.isdigit() and int(sudo_uid) != 0:
             # `sudo kilo flash`: the invoking user's daemon (systemd user service)
             out0.append((Path(f"{RUN_USER_ROOT}/{sudo_uid}") / "kilo" / "kilo.sock",
                          f"{RUN_USER_ROOT}/{sudo_uid} ($SUDO_UID's runtime dir)"))
         return out0
-    out: list[tuple[Path, str]] = []
+    out: list[tuple[Path, str]] = [(SYSTEM_SOCKET, "system service")]
     if env.get("XDG_RUNTIME_DIR"):
         out.append((Path(env["XDG_RUNTIME_DIR"]) / "kilo" / "kilo.sock", "$XDG_RUNTIME_DIR"))
     run_dir = f"{RUN_USER_ROOT}/{euid}"
@@ -87,11 +91,29 @@ def socket_candidates(explicit: str | os.PathLike | None = None, *, env: dict[st
 def socket_path(explicit: str | os.PathLike | None = None, *, env: dict[str, str] | None = None,
                 euid: int | None = None, home: str | os.PathLike | None = None,
                 is_dir: Callable[[str], bool] = os.path.isdir) -> Path:
-    """Where the daemon listens: the first of ``socket_candidates()``. In
-    order: ``explicit`` (``--socket``), ``$KILO_SOCKET``, ``/run/kilo/kilo.sock``
-    for root, ``$XDG_RUNTIME_DIR/kilo/kilo.sock``, ``/run/user/<uid>/kilo/kilo.sock``
-    if ``/run/user/<uid>`` exists, else ``~/.kilo/kilo.sock``."""
+    """The first place a client looks: the first of ``socket_candidates()``.
+    In order: ``explicit`` (``--socket``), ``$KILO_SOCKET``,
+    ``/run/kilo/kilo.sock``, ``$XDG_RUNTIME_DIR/kilo/kilo.sock``,
+    ``/run/user/<uid>/kilo/kilo.sock`` if ``/run/user/<uid>`` exists, else
+    ``~/.kilo/kilo.sock``."""
     return socket_candidates(explicit, env=env, euid=euid, home=home, is_dir=is_dir)[0][0]
+
+
+def listen_socket(explicit: str | os.PathLike | None = None, *, env: dict[str, str] | None = None,
+                  euid: int | None = None, home: str | os.PathLike | None = None,
+                  is_dir: Callable[[str], bool] = os.path.isdir) -> tuple[Path, str]:
+    """Where ``kilo run`` listens, as (path, why): ``--socket``, else
+    ``$KILO_SOCKET``, else ``$RUNTIME_DIRECTORY/kilo.sock`` (systemd sets it
+    from ``RuntimeDirectory=kilo``: the system service, ``/run/kilo``), else
+    the first client candidate a non-root user can create (``/run/kilo`` is
+    root's, so a hand-started or user-service daemon skips it)."""
+    env = os.environ if env is None else env
+    if not explicit and not env.get("KILO_SOCKET") and env.get("RUNTIME_DIRECTORY"):
+        return Path(env["RUNTIME_DIRECTORY"].split(":")[0]) / "kilo.sock", "$RUNTIME_DIRECTORY (system service)"
+    cands = socket_candidates(explicit, env=env, euid=euid, home=home, is_dir=is_dir)
+    if len(cands) > 1 and cands[0][0] == SYSTEM_SOCKET and cands[0][1] != "root":
+        return cands[1]
+    return cands[0]
 
 
 # ---- JSON helpers -------------------------------------------------------------------

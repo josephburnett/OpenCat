@@ -160,7 +160,7 @@ from kilo.link.serial_link import LinkConfig, LinkError, NotConnected, SerialLin
 from kilo.link.transport import DEFAULT_BAUD, open_port, settle_port
 from kilo.log import LOG_DIR_MAX_BYTES, prune_logs
 from kilo.perception.shared import SharedPercepts
-from kilo.remote import dumps, encode_error, jsonable, socket_candidates
+from kilo.remote import dumps, encode_error, jsonable, listen_socket, socket_candidates
 
 log = logging.getLogger("kilo.daemon")
 
@@ -187,7 +187,7 @@ CALL_REFUSED = frozenset({"posture", "limp", "rest", "stand", "sit", "balance", 
                           "walk", "stop_walk", "wait_gait_stopped", "pose", "release_pose"})
 # Holds that decide what the legs do: when the last one ends the idle timeline runs.
 BODY_HOLDS = ("SET_POSTURE", "TRICK", "SET_GAIT")
-BEHAVIOUR_ACTIVE = ("behaviour runner active; stop it with `kilo daemon stop` (or `systemctl --user stop kilo`) "
+BEHAVIOUR_ACTIVE = ("behaviour runner active; stop it with `kilo daemon stop` (or `sudo systemctl stop kilo`) "
                     "and run `kilo run` without --behaviour, or pass --override (`kilo --override ...`) to "
                     "pause it while this command holds the body")
 
@@ -228,7 +228,8 @@ class Daemon:
         self.port = port
         self.auto_port = auto_port or port is None
         self.baud = baud
-        self.socket_path, self.socket_why = socket_candidates(socket)[0]
+        self.socket_path, self.socket_why = listen_socket(socket)
+        self._socket_explicit = bool(socket) or bool(os.environ.get("KILO_SOCKET"))
         self.logger = logger
         self.wire_logger = wire_logger
         self.factory = transport_factory or self._open_port
@@ -365,6 +366,19 @@ class Daemon:
 
     async def _prepare_socket(self) -> None:
         p = self.socket_path
+        if not self._socket_explicit:
+            # One daemon per body: refuse to start beside one the clients would find
+            # first (the system service on /run/kilo, or a user-service daemon).
+            from kilo.remote import connect
+
+            for other, _why in socket_candidates():
+                if other == p or not other.exists():
+                    continue
+                conn = await asyncio.get_running_loop().run_in_executor(None, connect, other)
+                if conn is not None:
+                    pid = conn.info.get("pid")
+                    conn.close()
+                    raise SystemExit(f"kilo run: a daemon (pid {pid}) already listens on {other}")
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if p.exists() or p.is_symlink():
             from kilo.remote import connect

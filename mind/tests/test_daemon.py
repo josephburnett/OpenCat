@@ -22,7 +22,7 @@ from kilo.body.state import BodyState
 from kilo.daemon import Daemon
 from kilo.link import consts
 from kilo.link.serial_link import CommandError, LinkConfig, LinkError, NotConnected
-from kilo.remote import DaemonError, RemoteBody, connect, socket_candidates, socket_path
+from kilo.remote import DaemonError, RemoteBody, connect, listen_socket, socket_candidates, socket_path
 from kilo.vbody.sim import VirtualBody, open_pty
 
 from conftest import FAST
@@ -89,23 +89,38 @@ def remote(sock):
 # ---- socket path ---------------------------------------------------------------------
 
 def test_socket_path_resolution():
+    sysock = Path("/run/kilo/kilo.sock")
     assert socket_path("/x/y.sock") == Path("/x/y.sock")
     assert socket_path(env={"KILO_SOCKET": "/s"}, euid=1000) == Path("/s")
-    assert socket_path(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=0) == Path("/run/kilo/kilo.sock")
-    assert socket_path(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=1000) == Path(
-        "/run/user/1000/kilo/kilo.sock")
+    assert socket_path(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=0) == sysock
+    # the system service's socket is the first place every client looks
+    assert socket_path(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=1000) == sysock
     no_run = lambda d: False
-    assert socket_path(env={}, euid=1000, home="/home/joe", is_dir=no_run) == Path("/home/joe/.kilo/kilo.sock")
+    assert [p for p, _ in socket_candidates(env={}, euid=1000, home="/home/joe", is_dir=no_run)] == [
+        sysock, Path("/home/joe/.kilo/kilo.sock")]
     # a non-login SSH shell: no $XDG_RUNTIME_DIR, but the systemd user runtime dir exists
     has_run = lambda d: d == "/run/user/1000"
-    assert socket_path(env={}, euid=1000, home="/home/joe", is_dir=has_run) == Path(
-        "/run/user/1000/kilo/kilo.sock")
     assert [p for p, _ in socket_candidates(env={}, euid=1000, home="/home/joe", is_dir=has_run)] == [
-        Path("/run/user/1000/kilo/kilo.sock"), Path("/home/joe/.kilo/kilo.sock")]
+        sysock, Path("/run/user/1000/kilo/kilo.sock"), Path("/home/joe/.kilo/kilo.sock")]
     assert [p for p, _ in socket_candidates(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=1000,
                                             home="/home/joe", is_dir=has_run)] == [
-        Path("/run/user/1000/kilo/kilo.sock"), Path("/home/joe/.kilo/kilo.sock")]  # deduplicated
+        sysock, Path("/run/user/1000/kilo/kilo.sock"), Path("/home/joe/.kilo/kilo.sock")]  # deduplicated
     assert len(socket_candidates(env={"KILO_SOCKET": "/s"}, euid=1000)) == 1
+
+
+def test_listen_socket():
+    """Where `kilo run` listens: the system service binds /run/kilo (systemd's
+    $RUNTIME_DIRECTORY); a hand-started or user-service daemon skips /run/kilo."""
+    has_run = lambda d: d == "/run/user/1000"
+    kw = dict(euid=1000, home="/home/joe", is_dir=has_run)
+    assert listen_socket(env={"RUNTIME_DIRECTORY": "/run/kilo"}, **kw)[0] == Path("/run/kilo/kilo.sock")
+    assert listen_socket(env={}, **kw)[0] == Path("/run/user/1000/kilo/kilo.sock")
+    assert listen_socket(env={"XDG_RUNTIME_DIR": "/run/user/1000"}, **kw)[0] == Path("/run/user/1000/kilo/kilo.sock")
+    assert listen_socket(env={}, euid=1000, home="/home/joe", is_dir=lambda d: False)[0] == Path(
+        "/home/joe/.kilo/kilo.sock")
+    assert listen_socket(env={"KILO_SOCKET": "/s", "RUNTIME_DIRECTORY": "/run/kilo"}, **kw)[0] == Path("/s")
+    assert listen_socket("/x.sock", env={"RUNTIME_DIRECTORY": "/run/kilo"}, **kw)[0] == Path("/x.sock")
+    assert listen_socket(env={}, euid=0)[0] == Path("/run/kilo/kilo.sock")  # root
 
 
 def test_connect_tries_every_candidate(sockdir, monkeypatch, start_daemon):
