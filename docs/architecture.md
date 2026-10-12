@@ -2329,7 +2329,7 @@ mind/                     the Python mind (pip install -e mind)
     body/                 state.py (BodyState)  client.py (BodyClient)
     tools/                flash.py  gpio.py (GPIO4 reset)
     vbody/                sim.py (virtual body on a pty)  __main__.py
-    *daemon.py  tricks/  behaviour/  perception/*
+    *daemon/  tricks/  behaviour/  perception/*
   tests/                  pytest: codec, link rules, state, CLI, flash, vbody,
                           cross-check vs the C dispatch, CLI end to end on a pty
 docs/                     architecture.md  raspberry-pi.md  p0-hardware-test.md  p1-hardware-test.md
@@ -2341,9 +2341,9 @@ arduino-cli compiles `src/` recursively, which is why the logic lives under
 
 **CLI.** `kilo` talks to the daemon over `/run/kilo/kilo.sock` (JSON lines), or
 opens the port directly if the daemon is not running. As built
-(`kilo/daemon.py`, `kilo/remote.py`): the socket is
+(`kilo/daemon/`, `kilo/remote.py`): the socket is
 `$XDG_RUNTIME_DIR/kilo/kilo.sock` for the systemd user service
-(`/run/kilo/kilo.sock` only as root); protocol and ops in mind/README.md
+(`/run/kilo/kilo.sock` only as root); wire format in `kilo/remote.py`, ops in `kilo/daemon/ops.py`, running it in mind/README.md
 "Daemon and systemd".
 
 | Command | Purpose |

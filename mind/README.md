@@ -238,78 +238,57 @@ node; without, it re-runs the port rules on every attempt. A USB adapter can
 come back under another name (`ttyACM1`) if something still holds the old
 node; `KILO_PORT=/dev/serial/by-id/usb-...` pins it by serial number.
 
-**Protocol.** JSON lines. Request `{"id": 7, "op": "param_get", "args": {"id":
-"WD_LIMP_S"}}`, reply `{"id": 7, "ok": true, "result": ...}` or `{"id": 7, "ok":
-false, "error": {"type": "CommandError", "message": ..., "args": [...]}}` (the
-client re-raises the same exception type, so the CLI prints the same errors).
-Ops: `daemon` (pid, port, clients, holds, behaviour), `ping`, `alive`,
-`snapshot`, `wait_ready`, `stats`, `goals`, `posture`, `set_balance`,
-`release`, `cal_get|cal_set|cal_save|cal_revert`, `param_get|param_set|param_list`,
-`pca_read`, `eeprom_read`, `request` (the raw `SerialLink.request()`, for
-queries and commands, not goals), `call` (any other public BodyClient method
-with JSON-able arguments), `subscribe {rate_hz, kinds}` / `unsubscribe`,
-`release_port {lease_s}` / `reacquire_port`, `verify_hello` (for `kilo
-flash`), `percepts` (flags, distance, recent percept events), `shutdown`,
-and the trick ops `trick_upload {name | trick}` (a library name or
-`Trick.to_dict()`; cached), `trick_play {name | trick, mirror, speed,
-repeats, posture, hold_s}` (replies on TRICK_DONE: `{reason, trick_id,
-elapsed_s, expected_ticks, epoch, stopped_by_us}`) and `trick_stop
-{transition_ticks}`, and the gait ops (P2) `walk {stride_mm, turn_mm,
-pattern, period_ms, duty, step_h_mm, body_h_mm, bob, wag, balance}`
-(BodyClient.walk; reads the leg geometry once per body boot),
-`stop_walk {wait_s}` (with `wait_s` the reply waits for GAIT_STOPPED:
-`{stopped, elapsed_s}`), `gait` (BodyClient.gait_state()), `pose
-{pitch_deg, roll_deg, dheight_mm, xshift_mm}` and `release_pose`.
-`posture`, `set_balance`, `walk`, `pose`, `trick_upload` and `trick_play`
-take `override` (see below); `stop_walk` and `trick_stop` are always
-allowed. `call` refuses the goal and trick
-methods (they need the ops' ownership and checks) and coroutines. Ops run in
-order per client, except `trick_play`, which runs as a task of the session
-so pings, a `trick_stop` and the client's own disconnect are still seen
-while the trick plays.
-After `subscribe`, the daemon streams `{"stream": kind, "t": ..., "data":
-...}` lines without an id: `snapshot` (BodyState.snapshot() at `rate_hz`),
-`telemetry` (decimated to `rate_hz`), `event`, `hello`, `reboot`,
-`goals_cleared`, `connection`, `percepts` (`{events, flags}` whenever percept
-events happen; the daemon feeds its Percepts on every TELEMETRY). The loop never blocks: body calls run
-in a thread pool, and a client that does not read loses stream messages
-(counted, then one `dropped` line) instead of stalling anyone; one that does
-not read its replies is disconnected.
+**Where it is written down.** The daemon is the package `kilo/daemon/`; its
+docstrings are the reference and this section only covers running it.
+`kilo/daemon/__init__.py`: the module map and the threading rules (what runs
+on the asyncio loop, what in the thread pool). `kilo/remote.py`: the wire
+format (JSON lines: request, reply, stream). `kilo/daemon/ops.py`: every op
+and its arguments, and how requests share the link (one in flight).
+`kilo/daemon/sessions.py`: holds, leases, the idle REST/LIMP latch, balance
+by default. `kilo/daemon/streams.py`: `subscribe` and the stream kinds.
+`kilo/daemon/behaviour.py`: the behaviour runner contract and `--override`.
+`kilo/daemon/remote_ir.py`, `port.py` (release for flashing), `logs.py`.
 
-**Holds.** A goal a client sets (`posture`, `set_balance`) belongs to that
-client. The daemon keeps it alive while the client stays connected and sends
-something at least every 3 s (`RemoteBody` pings while `kilo posture` or
-`kilo balance` holds). When the client goes away, or goes quiet, the hold
-ends the way `kilo posture --for` ends without a daemon, minus the 0.5 s stop
-stage: the daemon latches REST at once and LIMP 10 s later (`kilo run
---idle-posture rest|limp|none`, `--idle-limp S`), and switches a balance
-enable off (or back to on with `kilo run --balance [KP]`, below). With a
-behaviour runner, the daemon only drops the goal. The idle
-REST is latched whenever a hold that owned the posture (or a trick) ends and
-nobody else owns one, even if another client still holds `set_balance`; a
-balance-only hold that ends switches balance off and leaves the posture
-timeline alone. A walk (`walk`) is held the same way: when its client goes
-away the daemon latches the gait stop (it never just drops a walk), then
-runs the idle REST/LIMP timeline; a pose hold that ends latches the neutral
-pose.
+**Protocol.** A failed op comes back as the same exception type the direct
+path raises, so the CLI prints the same errors through the daemon as without
+it. Ops run in order per client (`trick_play` excepted, so a `trick_stop` or
+a disconnect is still seen while a trick plays). The generic `call` op serves
+only `look`, `release_head` and `ping` (what `RemoteBody` reaches through its
+proxy); goals and tricks have their own ops. The loop never blocks: a client
+that does not read loses stream messages (counted, then one `dropped` line)
+instead of stalling anyone; one that does not read its replies is
+disconnected.
+
+**Holds.** A goal a client sets (`kilo posture`, `kilo balance`, `kilo
+walk`, `kilo pose`, a trick) belongs to that client. The daemon keeps it
+alive while the client stays connected and sends something at least every
+3 s (`RemoteBody` pings while the command holds). When the client goes away,
+or goes quiet, the hold ends the way `kilo posture --for` ends without a
+daemon, minus the 0.5 s stop stage: the daemon latches REST at once and LIMP
+10 s later (`kilo run --idle-posture rest|limp|none`, `--idle-limp S`), a
+walk is stopped first (never just dropped), a pose goes back to neutral, and
+a balance enable is switched off (or back on with `kilo run --balance`,
+below). With a behaviour runner the daemon only drops the goal. The rules for
+several clients at once are in `kilo/daemon/sessions.py`.
 
 **Tricks through the daemon.** `kilo trick upload|play|stop` use the trick
 ops: the daemon uploads (cached), takes `--posture` first, plays the trick on
-its loop and replies on TRICK_DONE. The session owns the trick (`TRICK` in
-`kilo daemon`'s holds) and the end posture it leaves: when the `kilo trick
-play` process exits or is killed, even mid `--repeats 255`, the daemon stops
-the trick and runs the idle REST/LIMP timeline. A second client cannot start
-a trick over a playing one (`kilo trick stop` first). `kilo trick play
---then-watch` needs the port to itself and is refused through the daemon.
+its loop and replies on TRICK_DONE. When the `kilo trick play` process exits
+or is killed, even mid `--repeats 255`, the daemon stops the trick and runs
+the idle REST/LIMP timeline (`kilo daemon` shows `TRICK` in the holds while
+it plays). A second client cannot start a trick over a playing one (`kilo
+trick stop` first). `kilo trick play --then-watch` needs the port to itself
+and is refused through the daemon.
 
 **Behaviour runner and CLI holds.** While `kilo run --behaviour` runs the
-behaviour runner, `kilo posture`, `kilo balance` and `kilo trick
-upload|play` through the daemon are refused ("behaviour runner active; stop
-it with `kilo daemon stop` ... or pass --override"), since both would write
-SET_POSTURE. `kilo --override posture stand` pauses the runner (its running
-behaviour is halted, a trick it plays stopped, nothing is ticked) for as
-long as that command's hold lasts; when the hold ends the runner resumes and
-re-asserts its own goals. `kilo trick stop` is always allowed.
+behaviour runner, `kilo posture`, `kilo balance`, `kilo walk`, `kilo pose`
+and `kilo trick upload|play` through the daemon are refused ("behaviour
+runner active; stop it with `kilo daemon stop` ... or pass --override"),
+since both would drive the legs. `kilo --override posture stand` pauses the
+runner (its running behaviour is halted, a trick it plays stopped, nothing is
+ticked) for as long as that command's hold lasts; when the hold ends the
+runner resumes and re-asserts its own goals. `kilo trick stop` and `kilo
+walk stop` are always allowed.
 
 **Silent modes.** `kilo monitor --passive` and `kilo posture --then-watch`
 must send nothing and therefore need the port to themselves; with a daemon on
@@ -321,39 +300,31 @@ to release the port (`release_port`, 300 s lease), runs avrdude, settles the
 port, asks the daemon to reacquire it and verifies the HELLO on the daemon's
 link. If the flashing client dies (avrdude may still be writing), the daemon
 keeps the port released until the lease ends (or `reacquire_port`); every
-reopen after a release settles the port first. A daemon without a port yet
-(nothing plugged in when it started) is still asked to release, so it does
-not grab the port mid-flash. Without a reachable daemon (`--direct`, a
-daemon of another user, `sudo kilo flash` while the user service runs) the
-port's exclusive lock is checked right before avrdude and a held port is
-refused (`--force` flashes anyway, with a warning). As root, `kilo` also
-looks for the invoking user's daemon at `/run/user/$SUDO_UID/kilo/kilo.sock`.
+reopen after a release settles the port first (`kilo/daemon/port.py`). A
+daemon without a port yet (nothing plugged in when it started) is still
+asked to release, so it does not grab the port mid-flash. Without a
+reachable daemon (`--direct`, a daemon of another user, `sudo kilo flash`
+while the user service runs) the port's exclusive lock is checked right
+before avrdude and a held port is refused (`--force` flashes anyway, with a
+warning). As root, `kilo` also looks for the invoking user's daemon at
+`/run/user/$SUDO_UID/kilo/kilo.sock`.
 
 **Shutdown.** SIGTERM or SIGINT (or `kilo daemon stop`): stop the behaviour
 runner, close clients, drop every goal and go silent so the body's watchdog
 takes over (stop, REST, LIMP), close the port, remove the socket.
 
-**Behaviour runner.** `kilo run --behaviour` imports
-`kilo.behaviour.runner.run_behaviour` lazily and calls
-`run_behaviour(client, state, stop_event, log_dir)` in its own thread:
-`client` is the daemon's `BodyClient`, `state` its `BodyState`, `stop_event` a
-`threading.Event` set at shutdown (return promptly once set), `log_dir` a
-`pathlib.Path` (`--log-dir`, default `~/kilo-logs`). An `async def` runner is
-awaited on the daemon's loop instead (same arguments). When the function
-also takes a `percepts` keyword, the daemon passes its own `SharedPercepts`,
-so the runner and `kilo monitor --percepts` see the same percepts; a
-`paused` keyword gets the `threading.Event` that `--override` sets. The
-runner stamps the link's liveness on every tick (`BodyAdapter.on_tick`, as
-source "mind"); the daemon's pump stamps too, but with a runner only while
-the runner has ticked within the last 1 s (10 s of grace for its first
-tick), so a hung runner trips the body's watchdog (logged once: "behaviour
-runner has not ticked ..."). Threads that merely wait on the body (the
-daemon's pool, `wait_ready`, `cal_save`, the flash verify, a trick's
-`play()`) never stamp. If the import fails the daemon logs it and runs
-without. The packaged runner writes
-`<log-dir>/behaviour-<time>.jsonl` (see Behaviour) and stops within 0.1 s of
-SIGTERM; `$KILO_PERSONALITY` (in `~/.config/kilo/env`) picks another
-personality file.
+**Behaviour runner.** `kilo run --behaviour` runs
+`kilo.behaviour.runner.run_behaviour` in its own thread with the daemon's
+`BodyClient` and its `SharedPercepts` (so the runner and `kilo monitor
+--percepts` see the same percepts); the calling contract is in
+`kilo/daemon/behaviour.py`. The runner stamps the link's liveness on every
+tick; the daemon stamps too, but with a runner only while the runner has
+ticked within the last 1 s (10 s of grace for its first tick), so a hung
+runner trips the body's watchdog (logged once: "behaviour runner has not
+ticked ..."). If the import fails the daemon logs it and runs without. The
+packaged runner writes `<log-dir>/behaviour-<time>.jsonl` (see Behaviour)
+and stops within 0.1 s of SIGTERM; `$KILO_PERSONALITY` (in
+`~/.config/kilo/env`) picks another personality file.
 
 **IR remote.** The body decodes the Petoi IR remote (NEC, on the NyBoard's
 receiver at D4) and relays every key as `EVENT IR_KEY` (arg = the NEC
@@ -404,17 +375,18 @@ trick. What the remote sets is held like the daemon's idle latch: no idle
 REST/LIMP over it, it stays until the next key or a client goal. Keys are
 logged and ignored while the behaviour runner is active, while the port is
 released for flashing, and while a client holds the posture, a trick or a
-walk (the balance key: while a client holds SET_BALANCE). `kilo daemon` shows
-`remote on, last key ...`.
+walk (the balance key: while a client holds SET_BALANCE; the daemon side is
+`kilo/daemon/remote_ir.py`). `kilo daemon` shows `remote on, last key ...`.
 
 **Balance by default.** `kilo run --balance [KP]` (off by default) latches
 SET_BALANCE on with the given Kp (default 0.5, the firmware's; 0.99 levels
 the whole slope and passed H13 on Kilo) at start, again after a port release
 for flashing, and whenever a client's balance hold ends (instead of switching
-balance off). Nobody owns it, like the idle latch, and it is not an epoch
-goal, so the link keeps sending it across a body reboot: Kilo wakes up
-balancing whenever it stands or sits, and walks with the gait's balance flag
-using the same gains. The remote's CH+ toggles it off and on again with that
+balance off). Nobody owns it, like the idle latch: Kilo wakes up balancing
+whenever it stands or sits, and walks with the gait's balance flag using the
+same gains. The body switches balance off on every epoch bump (a fall, the
+watchdog, LOW battery, a reboot; P1 finding B1) and the link's 5 Hz refresh
+switches it back on within about 200 ms. The remote's CH+ toggles it off and on again with that
 Kp; a client's `kilo balance off` holds it off until the client goes away.
 `kilo daemon` shows `balance on by default (Kp ...)`. On the Pi:
 `KILO_RUN_ARGS=--remote --balance 0.99` in `~/.config/kilo/env` (the owner's choice, 2026-10-11).
@@ -1002,7 +974,9 @@ play`), no motion goal into a rebooting body (the vbody's `boot_delay`
 buffers what it hears while it boots), a busy port and a failed verify in
 `kilo flash`, a hung runner tripping the watchdog, `--override`, the logs off
 the control threads, a cancelled `play()`, the port lease, split-owner idle
-latching, the LinkStats race, log pruning. `test_gait.py` covers walking:
+latching, the LinkStats race, log pruning. `test_daemon_call.py` pins the `call`
+op's allow-list; `test_req_lock.py` measures the link's one request in flight
+(printed with `-s`) and the `request` op's timeout cap. `test_gait.py` covers walking:
 the spec ranges, the §3d defaults, the vbody's gait state machine
 (deterministic: STANCE first, the phase step, the one-period ramp-down,
 GAIT_STOPPED once, every refusal, epoch bumps, LIMP, a trick over the gait,
@@ -1035,7 +1009,7 @@ kilo/cli_head.py            `kilo look` (registered by one line in cli.py)
 kilo/cli_walk.py            `kilo walk`, `kilo pose` (registered by one line in cli.py)
 kilo/cli.py                 the `kilo` command
 kilo/cli_tools.py           `kilo log`, `--kilolog`, `monitor --percepts`, `kilo daemon` link lines
-kilo/daemon.py              `kilo run`: owns the port, serves the socket, holds, port release
+kilo/daemon/                `kilo run`: owns the port, serves the socket, holds, port release (map in __init__.py)
 kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody (BodyClient over the socket)
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
 kilo/vbody/                 virtual body

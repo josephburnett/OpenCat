@@ -11,9 +11,11 @@ Wire format, one JSON object per line, UTF-8:
               {"id": 7, "ok": false, "error": {"type": "CommandError", "message": "...",
                                                "args": ["PARAM_SET", 3]}}
     stream    {"stream": "telemetry" | "snapshot" | "event" | "hello" | "reboot"
-                         | "goals_cleared" | "connection" | "dropped", "t": <monotonic>, "data": ...}
+                         | "goals_cleared" | "connection" | "percepts" | "dropped", "t": <monotonic>,
+               "data": ...}
 
-Stream messages only follow a ``subscribe`` request and carry no id.
+Stream messages only follow a ``subscribe`` request and carry no id (kinds and
+their data: kilo.daemon.streams; the ops: kilo.daemon.ops).
 
 ``socket_path()`` is the one resolver both sides use. ``RemoteBody`` has the
 BodyClient methods the CLI calls (and proxies any other public BodyClient
