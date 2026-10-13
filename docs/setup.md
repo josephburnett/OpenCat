@@ -163,11 +163,25 @@ work and are gone after the next reboot. The Wi-Fi profile
 purpose: nothing in daily work changes it, and a power cut can no longer
 empty it.
 
-Not yet checked on the Pi: whether trixie's swap (`rpi-swap`) keeps a swap
-file at `/var/swap`, which the overlay would hold in RAM if it is rewritten
-(`swapon --show`, before and after); and whether the clock service waits for
-its bind mount (`systemctl show -p After,RequiresMountsFor
-systemd-timesyncd`).
+Done on the Pi 2026-10-13 (card step on rtb with a USB reader; `safe-mode.sh
+on` then one reboot): root 16 GiB, `/data` 43 GiB; boot to the daemon 22 s,
+whole boot 40 s; `/data` and the four bind mounts in place; `update.sh` and
+`sudo -n systemctl restart kilo.service` work as before (the rule needs the
+`.service` suffix). Checked at the same time:
+
+- Swap is off in safe mode: `rpi-swap` (zram with `/var/swap` as backing
+  file on the read-only root) stays inactive, `/proc/swaps` is empty. The
+  daemon runs in well under 100 MB; the Pi 2 has 920 MB.
+- The clock service orders after its bind mount
+  (`After=var-lib-systemd-timesync.mount`, `RequiresMountsFor=/var/lib/systemd/timesync`)
+  and writes the clock file on `/data`. The clock still starts at the last
+  saved time and jumps once NTP answers, so the first minute of each boot's
+  journal carries the old time.
+- The RAM overlay held 86 MB after the first boot, all `/var/cache/apt`:
+  `apt-daily` refreshed package lists into RAM. Candidate for the next
+  safe-mode-off window: `systemctl disable --now apt-daily.timer
+  apt-daily-upgrade.timer` (nothing is upgraded unattended in safe mode
+  anyway; it would vanish at reboot).
 
 ### The daemon as a system service, and boot time
 
