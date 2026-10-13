@@ -54,6 +54,28 @@ Kilo attached (bit 0 / bit 16 = under-voltage now / since boot); a USB cable
 with the VBUS wire cut, or a data-only adapter, between Pi and Kilo; power Kilo
 on before the Pi and watch whether the Pi still boots.
 
+Third event, 13:00 PDT, the decisive one. Logger on the Pi (`~/kilo-logs/plugin-watch.log`,
+`plugin-kernel.log`: flags, core voltage, USB count every 0.3 s, synced to /data) and a
+ping from rtb once a second. The owner plugged Kilo in **with Kilo's power switch
+off**:
+
+- 13:00:25.1 the CH343 enumerates (1-1.4); 13:00:25.3 `Undervoltage detected!`,
+  core voltage drops to 1.2000 V (throttled); 13:00:31.6 `Voltage normalised`;
+  `get_throttled` stays 0x50000 (under-voltage and throttling have occurred).
+  The Pi survived this time; no ping lost.
+- `kilo status` 35 s later: firmware build 74347362 running, reset
+  WARM_UNEXPECTED, uptime 35 s, IMU at 100 Hz, **battery 93 mV, flag
+  no_battery, mode LIMP**. Kilo's switch was off, so the NyBoard (MCU, IMU,
+  PCA9685) was running on the Pi's USB 5 V through the adapter's 5 V pin.
+
+That is the mechanism. The adapter ties the Pi's USB 5 V to the NyBoard's 5 V
+rail. With Kilo off, the Pi powers Kilo's board and its supply sags below
+4.63 V (a modest load; the Pi's supply or micro-USB cable is marginal). With
+Kilo on, the two rails are tied and Kilo's servo load pulls the Pi down (last
+night's hang). At boot, USB power-up at 15 s plus the board's inrush resets the
+Pi at 21 s. Same wiring every time; whether the Pi survives is a matter of
+how deep the dip goes.
+
 Ways out, owner's choice (all hardware; the card is safe now, so each
 plug-in costs only a reboot):
 
@@ -65,3 +87,7 @@ plug-in costs only a reboot):
 3. A USB "data-only" blocker on the Pi side: works only if the adapter is
    powered from Kilo's board; if the adapter then fails to enumerate, it was
    powered from USB and (1) or (2) is needed.
+
+Independently: the Pi's own supply path is marginal (6 s under 4.63 V from a
+board-sized load). A short, thick micro-USB cable or a 5.1 V supply would give
+headroom whatever is done about the adapter.
