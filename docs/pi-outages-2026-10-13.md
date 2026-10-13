@@ -15,6 +15,21 @@ as of 2026-10-13 11:45 PDT.
 | -1   | 11:12                    | 21.9 s: `usb 1-1.3: USB disconnect, device number 4` (Wi-Fi dongle). Boot ends.                           |
 | 0    | 11:42 (real time)        | the owner unplugged Kilo's USB cable; the Pi booted cleanly within a minute, Wi-Fi up at 36 s.           |
 
+Second event, same day, with safe mode on (overlay root; boot numbers as of 12:45 PDT):
+
+| boot | when (PDT)              | what the journal shows                                                                                   |
+|------|-------------------------|----------------------------------------------------------------------------------------------------------|
+| -4   | 12:03 → 12:31:45         | safe-mode boot, running 28 min, Wi-Fi and Tailscale up, Kilo unplugged. The owner plugs Kilo in: the journal just stops. No USB enumeration line, no under-voltage line: the Pi reset before anything could be written. |
+| -3, -2, -1 | right after        | three boots with Kilo attached (dongle at 1-1.2, CH343 at 1-1.4), each dead at 21 s, before the mind service (22 s) touches the port; boot -3 shows the dongle being reset on the hub 4 s after enumeration. |
+| 0    | 12:40:55                 | Kilo unplugged, power cycle: clean boot. Re-seating the Wi-Fi dongle while the Pi was in the failed-boot state did nothing, as expected. |
+
+So plugging Kilo into a running Pi resets it outright (the clock file on /data
+puts the Pi alive until 12:31), and the Pi cannot boot while Kilo is attached.
+Nothing in software touches the port before the daemon: ModemManager is not
+installed, no udev rule matches the adapter. The boots die before the daemon
+runs, so this is not the DTR reset of the NyBoard either; it is the two 5 V
+rails meeting through the cable.
+
 Boots -3 to -1 all died at 21–22 s, the moment the mind service starts (23 s in
 boot 0) and opens the serial port. The card changes of the same morning (root
 shrunk to 16 GiB, data partition, bind mounts) are present in boot 0, which works.
@@ -39,4 +54,14 @@ Kilo attached (bit 0 / bit 16 = under-voltage now / since boot); a USB cable
 with the VBUS wire cut, or a data-only adapter, between Pi and Kilo; power Kilo
 on before the Pi and watch whether the Pi still boots.
 
-Not yet done; owner decision needed on the cable.
+Ways out, owner's choice (all hardware; the card is safe now, so each
+plug-in costs only a reboot):
+
+1. Break the 5 V line between the adapter and the NyBoard (pull or tape the
+   5V/VCC pin of the 6-pin header; keep GND, TX, RX, DTR). Each side on its
+   own supply; flashing needs Kilo switched on. Cleanest.
+2. A powered USB hub between the Pi and the cable: the hub's supply feeds the
+   adapter, the Pi's rail is no longer tied to Kilo.
+3. A USB "data-only" blocker on the Pi side: works only if the adapter is
+   powered from Kilo's board; if the adapter then fails to enumerate, it was
+   powered from USB and (1) or (2) is needed.
