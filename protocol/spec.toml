@@ -1012,10 +1012,10 @@ body_h_256 = 205
 offsets = [128, 0, 64, 192]
 
 [gait_patterns.TROT]
-period_ms = 1000
-duty = 179                     # 0.70 of the cycle on the ground, as the legacy trot (2026-10-12); was 140 (0.55)
-stride_mm = 35
-step_h_mm = 12
+period_ms = 600                # 2026-10-13: a fixed short swing. (1 - duty) * period = 150 ms on two feet;
+duty = 192                     # the body tips with a 90 ms time constant on a diagonal pair, so the two-foot
+stride_mm = 25                 # time, not the period, is what must stay short (docs/walking-and-balance.md)
+step_h_mm = 8                  # 12 hit the 10 deg/tick safety slew in a 150 ms swing (test_gait); 8 was clean on the floor (P2)
 body_h_256 = 205
 offsets = [0, 128, 0, 128]
 

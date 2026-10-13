@@ -906,7 +906,7 @@ static void test_telemetry() {
 
 // ---- Output steps at the defaults and the per-tick cost --------------------------
 static void test_defaults_and_cost() {
-  static const int8_t STRIDE[3] = {30, 35, 25};  // §3d's defaults (the mind sends them)
+  static const int8_t STRIDE[3] = {30, 25, 25};  // spec [gait_patterns.*] stride_mm (the mind sends them)
   for (uint8_t pat = 0; pat < 3; pat++) {
     start(gp(1, pat, 0, 0, STRIDE[pat]));
     int T = period_ticks();

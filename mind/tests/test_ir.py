@@ -138,9 +138,9 @@ def test_remote_walking():
     assert key("CH") == "walk forward (walk)"
     assert c.calls[-1] == ("walk", {"pattern": "walk", "stride_mm": 30, "turn_mm": 0})
     assert key("1") == "walk forward (trot)"  # walking: re-sent with the new pattern
-    assert c.calls[-1] == ("walk", {"pattern": "trot", "stride_mm": 35, "turn_mm": 0})
+    assert c.calls[-1] == ("walk", {"pattern": "trot", "stride_mm": 25, "turn_mm": 0})
     key("+")
-    assert c.calls[-1][1]["stride_mm"] == -35
+    assert c.calls[-1][1]["stride_mm"] == -25
     key("|<<")
     assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 20}
     key(">||")

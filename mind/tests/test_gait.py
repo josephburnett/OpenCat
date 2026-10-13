@@ -63,8 +63,8 @@ def _client(leg=(50, 50)):
 
 def test_gait_fields_defaults_per_pattern():
     c = _client()
-    assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 1000, "duty": 179, "stride_mm": 35,
-                               "turn_mm": 0, "step_h_mm": 12, "body_h_mm": 80, "flags": 7}
+    assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 600, "duty": 192, "stride_mm": 25,
+                               "turn_mm": 0, "step_h_mm": 8, "body_h_mm": 80, "flags": 7}
     w = c.gait_fields(pattern="walk")
     assert (w["pattern"], w["period_ms"], w["duty"], w["stride_mm"], w["step_h_mm"]) == (0, 2000, 192, 30, 15)
     cr = c.gait_fields(pattern="crawl", bob=False, wag=False)
@@ -79,7 +79,7 @@ def test_gait_fields_defaults_per_pattern():
 
 
 def test_walk_args():
-    assert walk_args("forward") == {"pattern": "trot", "stride_mm": 35, "turn_mm": 0}
+    assert walk_args("forward") == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0}
     assert walk_args("back", "walk") == {"pattern": "walk", "stride_mm": -30, "turn_mm": 0}
     assert walk_args("back", stride_mm=20, turn_mm=-5) == {"pattern": "trot", "stride_mm": -20, "turn_mm": -5}
     assert walk_args("left") == {"pattern": "trot", "stride_mm": 0, "turn_mm": 20}
