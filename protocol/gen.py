@@ -195,11 +195,14 @@ def validate_shared(spec: dict) -> None:
     [balance], [head]) against each other and the wire ranges."""
     link = spec["link"]
     g = spec["gait"]
-    if set(g) != {"bob_deg", "wag_deg", "stance_h_256"}:
+    if set(g) != {"bob_deg", "wag_deg", "sway_roll_deg", "sway_pitch_deg", "stance_h_256"}:
         raise SpecError("gait: unexpected or missing keys")
     for k in ("bob_deg", "wag_deg"):
         if not 0 <= g[k] <= 90:
             raise SpecError(f"gait.{k}: 0..90")
+    for k in ("sway_roll_deg", "sway_pitch_deg"):
+        if not 0 <= g[k] <= 30:
+            raise SpecError(f"gait.{k}: 0..30")
     if not 1 <= g["stance_h_256"] <= 255:
         raise SpecError("gait.stance_h_256: 1..255")
     pats = spec["gait_patterns"]
@@ -570,6 +573,8 @@ def gen_c_shared(spec: dict, w) -> None:
     w("/* ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ---- */")
     w(f"#define KILO_GAIT_BOB_DEG {g['bob_deg']} /* head bob amplitude, deg */")
     w(f"#define KILO_GAIT_WAG_DEG {g['wag_deg']} /* tail wag amplitude, deg */")
+    w(f"#define KILO_GAIT_SWAY_ROLL_DEG {g['sway_roll_deg']} /* SWAY: roll amplitude, deg */")
+    w(f"#define KILO_GAIT_SWAY_PITCH_DEG {g['sway_pitch_deg']} /* SWAY: pitch amplitude, deg */")
     w(f"#define KILO_GAIT_STANCE_H_256 {g['stance_h_256']} /* STANCE's body height, /256 of L1 + L2 */")
     pats = spec["gait_patterns"]
     w(f"#define KILO_GAIT_PATTERN_COUNT {len(pats)}")
@@ -923,6 +928,8 @@ def gen_py_shared(spec: dict, w) -> None:
     w("# ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ----")
     w(f"GAIT_BOB_DEG = {g['bob_deg']}")
     w(f"GAIT_WAG_DEG = {g['wag_deg']}")
+    w(f"GAIT_SWAY_ROLL_DEG = {g['sway_roll_deg']}")
+    w(f"GAIT_SWAY_PITCH_DEG = {g['sway_pitch_deg']}")
     w(f"GAIT_STANCE_H_256 = {g['stance_h_256']}")
     w("")
     w("")

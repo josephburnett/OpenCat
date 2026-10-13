@@ -156,7 +156,13 @@ ground" if it also watches pitch.
 3. **Sway in the gait** (firmware, moderate): planned roll/pitch locked to
    the leg phases, amplitude from the geometry (about 8–12° roll for the
    walk, less for the trot), ramped with the stride. Makes slow walk and
-   crawl statically stable with balance on.
+   crawl statically stable with balance on. *Done 2026-10-13* (§3d "Sway",
+   not yet on the floor): SET_GAIT flag `SWAY`, on by default for walk and
+   crawl from the mind; 8° roll and 4° pitch away from the lifting leg at
+   its mid-swing (WALK peaks at 12° between its two same-side swings), 0
+   for the trot by construction. The gait also publishes the support state
+   (`Gait::down`, feet on the ground) and the planned attitude
+   (`plan_pitch`, `plan_roll`) for item 4.
 4. **Stance-aware balance** (firmware, moderate): reference = planned
    attitude; correct through stance feet only; hold the slope estimate on
    two feet.

@@ -224,6 +224,7 @@ BALANCE = 0
 BOB = 0
 WAG = 1
 BALANCE = 2
+SWAY = 3                       # planned roll/pitch away from the lifting leg ([gait] sway_*_deg; doc §3d)
 
 [flags.trick_flags]
 BALANCE = 0
@@ -978,6 +979,8 @@ doc = "Knee bend relative to the upper link at joint angle 0 (the calibration po
 [gait]
 bob_deg = 4                    # head bob amplitude: tilt += bob sin(2 * 2 pi phi), scaled by the stride ramp
 wag_deg = 15                   # tail wag amplitude: tail += wag sin(2 pi phi), scaled by the stride ramp
+sway_roll_deg = 8              # SWAY flag: roll away from a lifting leg's side at its mid-swing, scaled by the stride ramp
+sway_pitch_deg = 4             # SWAY flag: pitch away from a lifting leg's end (front/back), likewise
 stance_h_256 = 205             # STANCE's body height when IDLE enters it from another posture: /256 of (L1 + L2), 0.80
 
 # Per pattern, keyed by the [enums.gait_pattern] names (every pattern, in enum

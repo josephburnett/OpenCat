@@ -67,8 +67,11 @@ def test_gait_fields_defaults_per_pattern():
                                "turn_mm": 0, "step_h_mm": 8, "body_h_mm": 80, "flags": 7}
     w = c.gait_fields(pattern="walk")
     assert (w["pattern"], w["period_ms"], w["duty"], w["stride_mm"], w["step_h_mm"]) == (0, 2000, 192, 30, 15)
+    assert w["flags"] == 15  # bob, wag, balance, sway (on by default for walk and crawl)
+    assert c.gait_fields(pattern="walk", sway=False)["flags"] == 7
+    assert c.gait_fields(pattern="trot", sway=True)["flags"] == 15
     cr = c.gait_fields(pattern="crawl", bob=False, wag=False)
-    assert (cr["pattern"], cr["period_ms"], cr["duty"], cr["body_h_mm"], cr["flags"]) == (2, 2000, 218, 70, 4)
+    assert (cr["pattern"], cr["period_ms"], cr["duty"], cr["body_h_mm"], cr["flags"]) == (2, 2000, 218, 70, 12)
     assert _client((60, 70)).gait_fields(pattern="crawl")["body_h_mm"] == 91  # 0.7 x 130
     assert c.gait_fields(stride_mm=-20, turn_mm=10, period_ms=600, run=False, balance=False)["flags"] == 3
     for bad in ({"stride_mm": 61}, {"turn_mm": -41}, {"period_ms": 299}, {"duty": 231}, {"step_h_mm": 41},
@@ -196,7 +199,7 @@ def test_vbody_gait_from_stance_starts_at_once_and_pattern_change():
 def test_vbody_gait_refusals():
     s = Sim()
     for bad in (gait(period_ms=299), gait(duty=231), gait(stride_mm=61), gait(turn_mm=41), gait(step_h_mm=41),
-                gait(pattern=3), gait(flags=8), gait(run=2)):
+                gait(pattern=3), gait(flags=16), gait(run=2)):
         s.now += 1.1  # one GOAL_REFUSED per type per second
         assert evs(s.send(bad)) == [(EV.GOAL_REFUSED, M.SET_GAIT << 8 | R.BAD_ARG)], bad
     s.now += 1.1

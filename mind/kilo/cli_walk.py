@@ -3,7 +3,7 @@ SET_BODY_POSE; docs/architecture.md §3d, P2).
 
     kilo walk [forward|back|left|right|march|stop] [--stride MM] [--turn MM]
               [--pattern trot|walk|crawl] [--period MS] [--duty N] [--step-h MM]
-              [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--for S]
+              [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--for S]
     kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM]
               [--posture stance|...] [--for S]
 
@@ -80,6 +80,8 @@ def add_parser(sub: Any, commands: dict) -> None:
     s.add_argument("--no-bob", action="store_true", help="no head bob")
     s.add_argument("--no-wag", action="store_true", help="no tail wag")
     s.add_argument("--no-balance", action="store_true", help="no balance corrections while walking")
+    s.add_argument("--no-sway", action="store_true",
+                   help="no body sway away from the lifting leg (default: on for walk and crawl)")
     s.add_argument("--for", dest="hold", type=float, default=None, metavar="S",
                    help="walk S seconds, then stop (default: until Ctrl-C)")
     s.add_argument("--wait", type=float, default=None, metavar="S",
@@ -155,7 +157,8 @@ def cmd_walk(args: argparse.Namespace, client: BodyClient) -> int:
             return _stop(client, args.wait)
     kw = walk_args(args.direction, args.pattern, args.stride, args.turn)
     gait = dict(period_ms=args.period, duty=args.duty, step_h_mm=args.step_h, body_h_mm=args.body_h,
-                bob=not args.no_bob, wag=not args.no_wag, balance=not args.no_balance)
+                bob=not args.no_bob, wag=not args.no_wag, balance=not args.no_balance,
+                sway=False if args.no_sway else None)
     print(SAFETY, flush=True)  # out-of-range fields raise ValueError in walk(), before anything is sent
     client.load_geometry()
     rc = EXIT_OK
