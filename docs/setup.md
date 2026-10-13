@@ -147,9 +147,10 @@ the Pi, in an ssh shell, from `~/OpenCat`; `sudo` asks for joe's password.
    systemd-analyze critical-chain kilo.service  # what kilo.service waited for
    journalctl -b -u kilo -o short-monotonic | head -3   # first line: seconds since power-on
    ```
-   Expected: the daemon is up about 15-20 s after power (kernel 8 s, then
-   basic system start, then the 2-3 s Python start of `kilo run`), even
-   while the Wi-Fi is still connecting. Not yet measured on the Pi.
+   Measured on 2026-10-12 after `install.sh --system` and `trim-boot.sh`:
+   kernel 7.8 s, `kilo.service` started at 22 s, first daemon log line at
+   26.6 s after power (the Python start of `kilo run` takes ~4.6 s on the
+   Pi 2 B), Wi-Fi connected on its own; whole boot 38.6 s. Before: 74 s.
 
 The fallback, if the system service ever misbehaves: `sudo systemctl
 disable --now kilo` and `mind/systemd/install.sh --start` (the user service,
