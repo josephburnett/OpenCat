@@ -35,8 +35,11 @@ below 128 B of margin; `STACK_CHECK=0` skips it); `protocol/test.sh` needs the v
 ## The Pi
 
 Raspberry Pi 2 Model B, Raspbian 13 (trixie) 32-bit, user `joe`, hostname
-`kilo`, USB Wi-Fi on the home LAN (`ssh -i ~/.ssh/kilo.local joe@192.168.88.32`;
-the key's public half is in the Pi's `authorized_keys`). Tailscale SSH is
+`kilo`, USB Wi-Fi on the home LAN. Its LAN address comes from DHCP and has
+changed (192.168.88.32, then .27 on 2026-10-12); the stable address is the
+Tailscale one, `ssh -i ~/.ssh/kilo.local joe@100.96.106.5` (the key's public
+half is in the Pi's `authorized_keys`; the Tailscale host key differs from the
+LAN one, so accept it once). Tailscale SSH is
 installed too but asks for a browser re-check now and then, which hangs
 scripts; prefer the LAN.
 
@@ -81,9 +84,17 @@ Gotchas:
   --passive`) or anything that opens the port directly.
 
 Power. The root filesystem is ext4 (journaled) with `fsck.repair=yes` on the
-kernel line and a persistent systemd journal. A sudden power cut is usually
-harmless (the journal replays; this Pi has already recovered from one), but
-repeated cuts wear the SD card and can corrupt it beneath the filesystem.
+kernel line. The systemd journal is *not* persistent (`Storage=auto` and no
+`/var/log/journal`), so each boot's log is gone at the next one; the daemon's
+own `~/kilo-logs/daemon.log` is the only log that survives. A sudden power
+cut is usually harmless (the filesystem journal replays; this Pi has recovered
+from several), but a file being rewritten at that moment can come back empty,
+and repeated cuts wear the SD card. That happened on 2026-10-12: after two
+unclean shutdowns the saved Wi-Fi profile was a 0-byte file, the dongle never
+connected, and the Pi was reachable only by Ethernet cable. Repair, as root
+on the Pi: `sudo mind/systemd/fix-wifi.sh` rebuilds the profile from the
+settings the Pi Imager left in `/boot/firmware/network-config` (the saved
+profile now lives in `/etc/NetworkManager/system-connections/`).
 Before the Pi rides on Kilo's battery: consider the read-only overlay root
 (`raspi-config`), and a clean-shutdown path (a remote key or a low-battery
 rule that runs `shutdown` before the switch is flipped). The body does not
@@ -117,7 +128,7 @@ the Pi, in an ssh shell, from `~/OpenCat`; `sudo` asks for joe's password.
    sudo mind/systemd/trim-boot.sh
    ```
    It switches off cloud-init (the Pi Imager's first-boot setup, finished
-   long ago; only if the Wi-Fi settings it wrote are saved on disk), masks
+   long ago; only if a non-empty Wi-Fi profile is saved on disk), masks
    `NetworkManager-wait-online` and `systemd-networkd-wait-online` (services
    whose only job is to make other things wait for the network; masked, so
    nothing can switch them back on), and removes `splash` (the graphical

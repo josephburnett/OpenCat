@@ -52,14 +52,17 @@ act() {
 state() { systemctl is-enabled "$1" 2>/dev/null || true; }
 
 # ---- cloud-init ------------------------------------------------------------------------
+# A saved Wi-Fi profile is a NON-EMPTY file that names a wifi section: netplan
+# `wifis:` or a NetworkManager keyfile `[wifi]`. (An unclean shutdown on
+# 2026-10-12 left a 0-byte profile behind, which must not count.)
 wifi_on_disk=0
 for f in "$root"/etc/netplan/*.yaml "$root"/etc/NetworkManager/system-connections/*; do
-    [ -e "$f" ] && wifi_on_disk=1 && break
+    [ -s "$f" ] && grep -qsE '^ *wifis:|^\[wifi\]' "$f" && wifi_on_disk=1 && break
 done
 if [ ! -d "$root/etc/cloud" ]; then
     echo "cloud-init: not installed"
 elif [ "$wifi_on_disk" = 0 ]; then
-    echo "cloud-init: LEFT ON: no /etc/netplan/*.yaml and no NetworkManager connection file," >&2
+    echo "cloud-init: LEFT ON: no non-empty Wi-Fi profile in /etc/netplan or /etc/NetworkManager/system-connections," >&2
     echo "  so cloud-init may be what sets up the Wi-Fi at each boot (nmcli connection show)" >&2
 else
     if [ -e "$root/etc/cloud/cloud-init.disabled" ]; then
