@@ -376,7 +376,11 @@ static void stance_sweep(double out[4]) {
 static void test_turn() {
   // In place, + = left: the left feet sweep forward on the ground (the left
   // side backs up), the right feet backward (it advances).
-  start(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 0, 20));
+  // Period 500 ms and duty 140 pinned: these checks are about geometry, and
+  // the foot x is whole mm per tick, so at the slower pattern defaults
+  // (1000 ms, duty 179 since 2026-10-12) the per-tick sweeps are ~0.5 mm and
+  // rounding alone breaks the ratios.
+  start(gp(1, KILO_GAIT_PATTERN_TROT, 500, 140, 0, 20));
   tick(3 * period_ticks());
   double v[4];
   stance_sweep(v);
@@ -385,17 +389,14 @@ static void test_turn() {
   CHECK(v[LEG_LF] > 0.5 && v[LEG_LB] > 0.5 && v[LEG_RF] < -0.5 && v[LEG_RB] < -0.5);
   CHECK(std::fabs(v[LEG_LF] + v[LEG_RF]) < 0.08 * v[LEG_LF] && std::fabs(v[LEG_LB] + v[LEG_RB]) < 0.08 * v[LEG_LB]);
   // Walking 30 and turning right 10: left stride 40, right 20.
-  start(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, -10));
+  start(gp(1, KILO_GAIT_PATTERN_TROT, 500, 140, 30, -10));
   tick(3 * period_ticks());
   stance_sweep(v);
   CHECK(v[LEG_LF] < 0 && v[LEG_RF] < 0);
-  // Tolerance 0.2: the foot x is whole mm per tick, and at the trot's 1000 ms
-  // period the right side sweeps only ~0.5 mm/tick, so rounding alone moves the
-  // ratio by ~0.1 (seen: 1.15 / 0.54 = 2.13 at duty 179).
-  CHECKF(std::fabs(v[LEG_LF] / v[LEG_RF] - 2) < 0.2 && std::fabs(v[LEG_LB] / v[LEG_RB] - 2) < 0.2,
+  CHECKF(std::fabs(v[LEG_LF] / v[LEG_RF] - 2) < 0.1 && std::fabs(v[LEG_LB] / v[LEG_RB] - 2) < 0.1,
          "left/right stance speeds %.2f / %.2f", v[LEG_LF], v[LEG_RF]);
   // The goal slews: a new turn takes effect at 0.5 mm per tick.
-  CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 10)) == GOAL_OK);
+  CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 500, 140, 30, 10)) == GOAL_OK);
   tick();
   CHECK(b.gait.turn == -40 + 2);
   tick(40);
