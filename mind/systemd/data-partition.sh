@@ -65,8 +65,8 @@ fi
 echo "== $dev"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT,MODEL "$dev"
 mounted=$(lsblk -nrpo NAME,MOUNTPOINT "$dev" | awk 'NF > 1 { print "  " $1 " on " $2 }')
-[ -z "$mounted" ] || die "something on $dev is mounted (unmount it first: sudo umount ...):
-$mounted"
+[ -z "$mounted" ] || die "something on $dev is mounted; unmount it first, then run this again:
+$(lsblk -nrpo NAME,MOUNTPOINT "$dev" | awk 'NF > 1 { print "  sudo umount " $2 }')"
 
 case $dev in *[0-9]) pfx=${dev}p ;; *) pfx=$dev ;; esac
 p1=${pfx}1 p2=${pfx}2 p3=${pfx}3
@@ -87,7 +87,18 @@ esac
 m=$(mktemp -d "${TMPDIR:-/tmp}/kilo-card.XXXXXX")
 mounted_here=""
 cleanup() {
-    for d in $mounted_here; do umount "$m/$d" 2>/dev/null || echo "warning: could not unmount $m/$d" >&2; done
+    # an interrupted du/cp may still hold the mount for a moment: retry, then lazy-unmount
+    for d in $mounted_here; do
+        n=0
+        until umount "$m/$d" 2>/dev/null; do
+            n=$((n + 1))
+            if [ "$n" -ge 5 ]; then
+                umount -l "$m/$d" 2>/dev/null || echo "warning: could not unmount $m/$d (sudo umount $m/$d)" >&2
+                break
+            fi
+            sleep 1
+        done
+    done
     for d in boot root data; do [ -d "$m/$d" ] && rmdir "$m/$d" 2>/dev/null; done
     rmdir "$m" 2>/dev/null || true
 }
@@ -113,9 +124,9 @@ unmnt boot
 mnt root "$p2" ro
 [ -f "$m/root/etc/fstab" ] && [ -d "$m/root/home/$user" ] || die "$p2 has no /etc/fstab or no /home/$user"
 dirs="home/$user var/lib/tailscale var/log/journal var/lib/systemd/timesync"
-echo "== to copy from $p2 to /data on $p3"
+echo "== to copy from $p2 to /data on $p3  (measuring sizes over USB: this can take a minute or two)"
 for d in $dirs; do
-    if [ -d "$m/root/$d" ]; then echo "  /$d  ($(du -sh "$m/root/$d" 2>/dev/null | cut -f1))"
+    if [ -d "$m/root/$d" ]; then echo "  /$d  ($(du -sxh "$m/root/$d" 2>/dev/null | cut -f1))"
     else echo "  /$d  (not on the card: created empty)"; fi
 done
 [ -e "$m/root/etc/fake-hwclock.data" ] && echo "  note: /etc/fake-hwclock.data exists; it stays on the read-only root (the clock file /var/lib/systemd/timesync is copied)"
