@@ -1013,7 +1013,7 @@ offsets = [128, 0, 64, 192]
 
 [gait_patterns.TROT]
 period_ms = 1000
-duty = 140
+duty = 179                     # 0.70 of the cycle on the ground, as the legacy trot (2026-10-12); was 140 (0.55)
 stride_mm = 35
 step_h_mm = 12
 body_h_256 = 205

@@ -2455,7 +2455,7 @@ class GaitPatternDefaults:
 
 GAIT_PATTERN_DEFAULTS: dict[int, GaitPatternDefaults] = {
     0: GaitPatternDefaults(0, 'WALK', 2000, 192, 30, 15, 205, (128, 0, 64, 192)),
-    1: GaitPatternDefaults(1, 'TROT', 1000, 140, 35, 12, 205, (0, 128, 0, 128)),
+    1: GaitPatternDefaults(1, 'TROT', 1000, 179, 35, 12, 205, (0, 128, 0, 128)),
     2: GaitPatternDefaults(2, 'CRAWL', 2000, 218, 25, 18, 179, (128, 0, 64, 192)),
 }
 

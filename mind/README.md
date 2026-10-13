@@ -183,7 +183,7 @@ sets the magnitude) and `--turn` (+ = left) bends the path; `left` /
 `right` turn in place (`--turn` magnitude, default 20 mm; `--stride` makes
 it an arc); `march` steps in place. Fields left out take the
 docs/architecture.md §3d defaults of the pattern (walk 2000 ms / duty 192 /
-30 mm / step 15 mm, trot 1000 / 140 / 35 / 12, crawl 2000 / 218 / 25 / 18);
+30 mm / step 15 mm, trot 1000 / 179 / 35 / 12, crawl 2000 / 218 / 25 / 18);
 the body height defaults to 0.8 (crawl 0.7) × (LEG_L1_MM + LEG_L2_MM), read
 from the body's params (Kilo's measured legs are the defaults: 45 + 50 mm,
 so 76 mm; heights are shoulder axle to the centres of the 6 mm-radius foot

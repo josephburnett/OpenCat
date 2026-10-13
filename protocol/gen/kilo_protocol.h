@@ -1085,7 +1085,7 @@ enum kilo_param_id {
 #define KILO_GAIT_WALK_OFFSET_RB 64
 #define KILO_GAIT_WALK_OFFSET_LB 192
 #define KILO_GAIT_TROT_PERIOD_MS 1000
-#define KILO_GAIT_TROT_DUTY 140
+#define KILO_GAIT_TROT_DUTY 179
 #define KILO_GAIT_TROT_STRIDE_MM 35
 #define KILO_GAIT_TROT_STEP_H_MM 12
 #define KILO_GAIT_TROT_BODY_H_256 205
@@ -1107,7 +1107,7 @@ enum kilo_param_id {
    gait_pattern order. */
 #define KILO_GAIT_PATTERN_TABLE_INIT { \
     {2000, 192, 205, {128, 0, 64, 192}}, /* WALK */ \
-    {1000, 140, 205, {0, 128, 0, 128}}, /* TROT */ \
+    {1000, 179, 205, {0, 128, 0, 128}}, /* TROT */ \
     {2000, 218, 179, {128, 0, 64, 192}}, /* CRAWL */ \
 }
 /* Joint limits, whole degrees, by legacy joint id. */

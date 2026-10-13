@@ -63,7 +63,7 @@ def _client(leg=(50, 50)):
 
 def test_gait_fields_defaults_per_pattern():
     c = _client()
-    assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 1000, "duty": 140, "stride_mm": 35,
+    assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 1000, "duty": 179, "stride_mm": 35,
                                "turn_mm": 0, "step_h_mm": 12, "body_h_mm": 80, "flags": 7}
     w = c.gait_fields(pattern="walk")
     assert (w["pattern"], w["period_ms"], w["duty"], w["stride_mm"], w["step_h_mm"]) == (0, 2000, 192, 30, 15)

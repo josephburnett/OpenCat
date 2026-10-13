@@ -546,7 +546,7 @@ to be tuned.
 |---|---|---|---|
 | `pattern` | enum | WALK, TROT, CRAWL | |
 | `period_ms` | ms | 300..2000 | 2000 / 1000 / 2000 (halved on 2026-10-12 after the first remote drive on the floor wobbled and tipped at 1000 / 500 / 1500; 800 / 1200 until 2026-10-11: with Kilo's measured 45 + 50 mm legs those hit the 10°/tick safety slew in the swing) |
-| `duty` | /256 | 128..230 | 192 / 140 / 218 |
+| `duty` | /256 | 128..230 | 192 / 179 / 218 (trot 140 = 0.55 until 2026-10-12; 179 = 0.70 is the legacy trot's ground share, docs/timing-vs-legacy.md) |
 | `stride_mm` | mm, signed | −60..60 | 30 / 35 / 25 |
 | `turn_mm` | mm, signed, + = left | −40..40 | 0 |
 | `step_h_mm` | mm | 0..40 | 15 / 12 / 18 |
