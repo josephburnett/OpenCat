@@ -19,7 +19,11 @@
 # Ordering: the default dependencies only (After=sysinit.target basic.target,
 # stop before shutdown). No After=/Wants= on the serial device: the daemon
 # waits for its port itself (and for a USB replug), and KILO_PORT may be
-# ttyACM0, ttyAMA0 or a /dev/serial/by-id path.
+# ttyACM0, ttyAMA0 or a /dev/serial/by-id path. RequiresMountsFor=@HOME@: with
+# the data partition (data-partition.sh) the home directory is a bind mount
+# from /data; the daemon starts only once it is there, and not at all if it
+# failed (rather than running on the read-only root's stale copy). Without
+# the data partition it only orders after / (and /home if that is a mount).
 #
 # Settings: @HOME@/.config/kilo/env (KILO_PORT, KILO_RUN_ARGS, ...; see
 # env.example), the same file the user unit reads, editable without sudo.
@@ -27,6 +31,7 @@
 Description=Kilo mind daemon (owns the body's serial port: kilo run)
 Documentation=file:@HOME@/OpenCat/mind/README.md
 After=basic.target
+RequiresMountsFor=@HOME@
 
 [Service]
 Type=simple

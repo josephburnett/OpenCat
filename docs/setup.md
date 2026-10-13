@@ -84,9 +84,8 @@ Gotchas:
   --passive`) or anything that opens the port directly.
 
 Power. The root filesystem is ext4 (journaled) with `fsck.repair=yes` on the
-kernel line. The systemd journal is *not* persistent (`Storage=auto` and no
-`/var/log/journal`), so each boot's log is gone at the next one; the daemon's
-own `~/kilo-logs/daemon.log` is the only log that survives. A sudden power
+kernel line. The systemd journal is persistent since `trim-boot.sh` (below);
+before that each boot's log was gone at the next one. A sudden power
 cut is usually harmless (the filesystem journal replays; this Pi has recovered
 from several), but a file being rewritten at that moment can come back empty,
 and repeated cuts wear the SD card. That happened on 2026-10-12: after two
@@ -95,11 +94,80 @@ connected, and the Pi was reachable only by Ethernet cable. Repair, as root
 on the Pi: `sudo mind/systemd/fix-wifi.sh` rebuilds the profile from the
 settings the Pi Imager left in `/boot/firmware/network-config` (the saved
 profile now lives in `/etc/NetworkManager/system-connections/`).
-Before the Pi rides on Kilo's battery: consider the read-only overlay root
-(`raspi-config`), and a clean-shutdown path (a remote key or a low-battery
-rule that runs `shutdown` before the switch is flipped). The body does not
+Safe mode (next section) makes the system read-only against this. Still to do
+before the Pi rides on Kilo's battery: a clean-shutdown path (a remote key or
+a low-battery rule that runs `shutdown` before the switch is flipped). The body does not
 depend on any of this: when the Pi goes quiet it stops within 0.5 s, lies
 down at 1.5 s and goes limp 10 s later.
+
+### Power: safe mode
+
+In safe mode the system files are read-only: the Pi still writes them, but
+into RAM, and those writes are gone at the next boot (the "overlay root").
+What must survive lives on a third partition of the card, `/data`, written
+normally: the home directory (repo, venv, `kilo-logs`, `~/.config/kilo/env`,
+arduino-cli and its cores, ssh keys), Tailscale's identity
+(`/var/lib/tailscale`), the system journal (`/var/log/journal`) and the clock
+file (`/var/lib/systemd/timesync`; the Pi has no battery clock). They are
+"bind mounts": the same folders, shown at their usual paths.
+
+Setting it up, once:
+
+1. On the Pi: `sudo poweroff`; when the green light stops, take the card out.
+2. On a Linux machine with a card reader (rtb has none; the reader used with
+   Raspberry Pi Imager will do), from a checkout of this repo:
+   ```sh
+   lsblk                                                    # the card: about 60G, partitions bootfs and rootfs
+   sudo mind/systemd/data-partition.sh /dev/sdX --dry-run   # shows the card and the plan, changes nothing
+   sudo mind/systemd/data-partition.sh /dev/sdX --yes
+   ```
+   `/dev/sdX` is the whole card (`sdb`, not `sdb1`). It refuses if anything on
+   the card is mounted (desktops mount it on insert: `sudo umount /dev/sdX1
+   /dev/sdX2`), if it is this machine's own disk, or if it does not look like a
+   Raspberry Pi OS card. It shrinks the system partition to 16 GiB (5.7 GiB
+   used), makes `/data` (ext4, label `kilo-data`) from the rest, copies the
+   folders above into it, and adds `/data` and the bind mounts to the card's
+   `/etc/fstab`. Safe to run again. The original folders stay on the system
+   partition, hidden under the mounts: if `/data` ever fails to mount, the Pi
+   still boots and ssh still works (with those old copies), but `kilo.service`
+   does not start (`systemctl status kilo` says why).
+3. Card back in the Pi, power on, then on the Pi:
+   ```sh
+   cd ~/OpenCat && git pull
+   sudo mind/systemd/install.sh --system       # the unit now waits for /home/joe (RequiresMountsFor)
+   mind/systemd/safe-mode.sh status            # /data and the four mounts: "mounted, in fstab"
+   sudo mind/systemd/safe-mode.sh on --dry-run
+   sudo mind/systemd/safe-mode.sh on && sudo reboot
+   mind/systemd/safe-mode.sh status            # "overlay root now: ON", /boot/firmware read-only
+   ```
+   `on` refuses unless `/data` and every bind mount are in place. It uses
+   raspi-config's own switches (`raspi-config nonint enable_bootro` and
+   `enable_overlayfs`; the first time this installs the `overlayroot`
+   package, so it needs the network), then writes
+   `overlayroot=tmpfs:recurse=0` on the kernel line instead of raspi-config's
+   `overlayroot=tmpfs`: without `recurse=0`, `/data` would get a RAM layer too
+   and nothing would survive. `off` is the reverse. Both act at the next reboot.
+
+**Updating in safe mode: no switching needed.** `git pull`,
+`.venv/bin/pip install -e mind`, `kilo flash`, `sudo systemctl restart kilo`
+and edits to `~/.config/kilo/env` write only under `/home/joe` (on `/data`),
+`/run` and `/tmp`, so the day-to-day loop below works as it is, and its
+results survive reboots.
+
+**Needs safe mode off** (`sudo mind/systemd/safe-mode.sh off && sudo reboot`,
+make the change, then `on` and reboot again): `apt`, `install.sh --system`
+(the unit file in `/etc`), `trim-boot.sh`, `fix-wifi.sh` or any Wi-Fi
+change, `raspi-config`, `usermod`, `passwd`. Done in safe mode they appear to
+work and are gone after the next reboot. The Wi-Fi profile
+(`/etc/NetworkManager/system-connections`) stays on the read-only system on
+purpose: nothing in daily work changes it, and a power cut can no longer
+empty it.
+
+Not yet checked on the Pi: whether trixie's swap (`rpi-swap`) keeps a swap
+file at `/var/swap`, which the overlay would hold in RAM if it is rewritten
+(`swapon --show`, before and after); and whether the clock service waits for
+its bind mount (`systemctl show -p After,RequiresMountsFor
+systemd-timesyncd`).
 
 ### The daemon as a system service, and boot time
 
