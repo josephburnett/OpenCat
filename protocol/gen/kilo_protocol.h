@@ -275,6 +275,7 @@ enum kilo_easing {
 #define KILO_GAIT_FLAGS_BOB (1u << 0)
 #define KILO_GAIT_FLAGS_WAG (1u << 1)
 #define KILO_GAIT_FLAGS_BALANCE (1u << 2)
+#define KILO_GAIT_FLAGS_SWAY (1u << 3)
 
 #define KILO_TRICK_FLAGS_BALANCE (1u << 0)
 #define KILO_TRICK_FLAGS_FALL_OK (1u << 1)
@@ -1073,6 +1074,8 @@ enum kilo_param_id {
 /* ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ---- */
 #define KILO_GAIT_BOB_DEG 4 /* head bob amplitude, deg */
 #define KILO_GAIT_WAG_DEG 15 /* tail wag amplitude, deg */
+#define KILO_GAIT_SWAY_ROLL_DEG 8 /* SWAY: roll amplitude, deg */
+#define KILO_GAIT_SWAY_PITCH_DEG 4 /* SWAY: pitch amplitude, deg */
 #define KILO_GAIT_STANCE_H_256 205 /* STANCE's body height, /256 of L1 + L2 */
 #define KILO_GAIT_PATTERN_COUNT 3
 #define KILO_GAIT_WALK_PERIOD_MS 2000

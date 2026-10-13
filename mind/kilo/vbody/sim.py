@@ -122,7 +122,7 @@ P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.Ms
                       P.MsgId.SET_HEAD})
 P2_GOALS = frozenset({P.MsgId.SET_GAIT, P.MsgId.SET_BODY_POSE})
 GAIT_RANGES = consts.field_ranges("SET_GAIT")
-GAIT_FLAGS = int(P.GaitFlags.BOB | P.GaitFlags.WAG | P.GaitFlags.BALANCE)
+GAIT_FLAGS = int(P.GaitFlags.BOB | P.GaitFlags.WAG | P.GaitFlags.BALANCE | P.GaitFlags.SWAY)  # SWAY: accepted, not simulated
 # Leg phase offsets (fractions of a cycle) in the order LF, RF, RB, LB (§3d,
 # spec [gait_patterns.*] offsets /256).
 LEG_OFFSETS = {P.GaitPattern(d.pattern): tuple(o / 256 for o in d.offsets) for d in P.GAIT_PATTERN_DEFAULTS.values()}

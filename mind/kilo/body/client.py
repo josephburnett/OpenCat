@@ -434,14 +434,19 @@ class BodyClient:
     def gait_fields(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = DEFAULT_PATTERN,
                     period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
                     body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
-                    balance: bool = True, run: bool = True) -> dict[str, int]:
+                    balance: bool = True, run: bool = True, sway: bool | None = None) -> dict[str, int]:
         """SET_GAIT's wire fields (no epoch) with the §3d defaults of ``pattern``
-        for every field left None. ValueError outside the spec ranges."""
+        for every field left None. ``sway`` None: on for walk and crawl (one
+        leg at a time: the body leans toward the three feet that stay down),
+        off for the trot (its diagonal pairs cancel: no sway either way).
+        ValueError outside the spec ranges."""
         name = self.pattern_name(pattern)
         d = GAIT_DEFAULTS[name]
         if body_h_mm is None:
             body_h_mm = d["body_h_frac"] * sum(self.leg_mm)
         F = P.GaitFlags
+        if sway is None:
+            sway = name in ("walk", "crawl")
         fields = {"run": 1 if run else 0, "pattern": consts.GAIT_PATTERNS[name],
                   "period_ms": int(round(d["period_ms"] if period_ms is None else period_ms)),
                   "duty": int(round(d["duty"] if duty is None else duty)),
@@ -449,7 +454,8 @@ class BodyClient:
                   "turn_mm": int(round(turn_mm)),
                   "step_h_mm": int(round(d["step_h_mm"] if step_h_mm is None else step_h_mm)),
                   "body_h_mm": int(round(body_h_mm)),
-                  "flags": int((F.BOB if bob else 0) | (F.WAG if wag else 0) | (F.BALANCE if balance else 0))}
+                  "flags": int((F.BOB if bob else 0) | (F.WAG if wag else 0) | (F.BALANCE if balance else 0)
+                               | (F.SWAY if sway else 0))}
         self._check_ranges("SET_GAIT", fields)
         if fields["body_h_mm"] < 1:
             raise ValueError("SET_GAIT body_h_mm must be at least 1 mm")
@@ -458,12 +464,13 @@ class BodyClient:
     def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = DEFAULT_PATTERN,
              period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
              body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
-             balance: bool = True) -> dict[str, int]:
+             balance: bool = True, sway: bool | None = None) -> dict[str, int]:
         """Latch SET_GAIT run=1: walk with ``pattern`` (walk, trot, crawl),
         ``stride_mm`` (signed, + = forward) and ``turn_mm`` (+ = left; with
         stride 0 Kilo turns in place). Fields left None take the §3d defaults
         of the pattern; the body height defaults to a fraction of L1 + L2
-        (``load_geometry()``). Flags: head bob, tail wag, balance.
+        (``load_geometry()``). Flags: head bob, tail wag, balance, sway (None: on
+        for walk and crawl).
 
         A motion goal like a posture: stamped with the current epoch,
         refreshed at 5 Hz, cleared on any epoch change (watchdog, fall, low
@@ -477,7 +484,7 @@ class BodyClient:
         BAD_ARG).
         """
         fields = self.gait_fields(stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm, body_h_mm, bob, wag,
-                                  balance)
+                                  balance, sway=sway)
         self._check_drivable()
         self.link.clear_goal("SET_POSTURE")
         self.link.set_goal("SET_GAIT", **fields)

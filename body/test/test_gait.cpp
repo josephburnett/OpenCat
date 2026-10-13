@@ -6,7 +6,9 @@
 // stride, period changes without a phase jump, head bob and tail wag,
 // refusals, pre-emption by a trick, a reflex and the watchdog, STANCE with
 // the pose terms and the foot nudge, the geometric balance closed through a
-// physical plant, TELEMETRY through the fake link, and the per-tick cost.
+// physical plant, TELEMETRY through the fake link, the support state (feet
+// down), the planned sway (its sign read off the stance feet), and the
+// per-tick cost.
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -487,7 +489,7 @@ static void test_refusals() {
   CHECK(gait(gp(1, 0, 0, 0, 0, 0, 41)) == GOAL_BAD_ARG);
   CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 255)) == GOAL_OK);  // body height: never refused (the IK clamps it)
   CHECK(gait(gp(0, 0)) == GOAL_OK);
-  CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 0, 8)) == GOAL_BAD_ARG);
+  CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 0, 16)) == GOAL_BAD_ARG);
   CHECK(!b.gait.run);
   // STALE; a stop is never stale.
   std::vector<uint8_t> p = gp(1, 1);
@@ -904,11 +906,193 @@ static void test_telemetry() {
   CHECK(refused);
 }
 
+// ---- Support state: which feet are down -------------------------------------
+// The leg's phase this tick and whether it is in its swing (the generator's
+// own definition; armed in steady state).
+static uint16_t leg_p(int leg) {
+  static const uint8_t OFF[3][4] = {
+      {KILO_GAIT_WALK_OFFSET_LF, KILO_GAIT_WALK_OFFSET_RF, KILO_GAIT_WALK_OFFSET_RB, KILO_GAIT_WALK_OFFSET_LB},
+      {KILO_GAIT_TROT_OFFSET_LF, KILO_GAIT_TROT_OFFSET_RF, KILO_GAIT_TROT_OFFSET_RB, KILO_GAIT_TROT_OFFSET_LB},
+      {KILO_GAIT_CRAWL_OFFSET_LF, KILO_GAIT_CRAWL_OFFSET_RF, KILO_GAIT_CRAWL_OFFSET_RB, KILO_GAIT_CRAWL_OFFSET_LB}};
+  return (uint16_t)(b.gait.phi + (OFF[b.gait.pat][leg] << 8));
+}
+static bool in_swing(int leg) { return leg_p(leg) >= (uint16_t)(b.gait.duty << 8); }
+
+static void test_support() {
+  // STANCE: all four down.
+  reset();
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_STAND, 1, 0) == GOAL_OK);
+  tick(5);
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_STANCE, 0, 0) == GOAL_OK);
+  tick(40);
+  CHECK(b.gait.down == 0xF && gait_feet_down(b.gait) == 4);
+  for (uint8_t pat = 0; pat < 3; pat++) {
+    start(gp(1, pat));
+    int T = period_ticks();
+    tick(2 * T);
+    bool ok = true, lift_ok = true;
+    int mid_seen = 0, min_down = 4, max_down = 0;
+    for (int t = 0; t < T; t++) {
+      tick();
+      int n = gait_feet_down(b.gait);
+      min_down = std::min(min_down, n);
+      max_down = std::max(max_down, n);
+      for (int l = 0; l < 4; l++) {
+        bool down = b.gait.down & (1 << l);
+        ok = ok && down == !in_swing(l);
+        lift_ok = lift_ok && !(lifted(l) && down);  // a foot visibly up is never "down"
+        // Mid-swing (within half a tick of phase): that leg alone is up
+        // (WALK, CRAWL) or with its diagonal partner (TROT).
+        uint16_t mid = (uint16_t)(32768u + (b.gait.duty << 7));
+        if (std::abs((int16_t)(leg_p(l) - mid)) <= b.gait.dphi / 2) {
+          mid_seen++;
+          uint8_t want = (uint8_t)(0xF & ~(1 << l));
+          if (pat == KILO_GAIT_PATTERN_TROT) want &= (uint8_t)~(1 << (l ^ 2));  // LF+RB, RF+LB
+          CHECKF(b.gait.down == want, "pattern %d, leg %s mid-swing: down %x", pat, LEG_NAME[l], b.gait.down);
+        }
+      }
+    }
+    std::printf("gait: pattern %d feet down %d..%d over a cycle\n", pat, min_down, max_down);
+    CHECKF(ok && lift_ok, "pattern %d: down bits vs swing phase", pat);
+    CHECK(mid_seen >= 4);
+    if (pat == KILO_GAIT_PATTERN_TROT)
+      CHECK(min_down == 2 && max_down == 4);
+    else
+      CHECK(min_down == 3 && max_down == (pat == KILO_GAIT_PATTERN_CRAWL ? 4 : 3));
+    // After a stop: all four down.
+    CHECK(gait(gp(0, 0)) == GOAL_OK);
+    int t = 0;
+    while (body_gait_running(b) && t++ < 4 * T) tick();
+    CHECK(!body_gait_running(b) && b.gait.down == 0xF && gait_feet_down(b.gait) == 4);
+    tick();
+    CHECK(b.gait.down == 0xF);
+  }
+}
+
+// ---- Sway ----------------------------------------------------------------------------
+// The planned sway in double from the leg phases (gait.h): w_i a raised
+// cosine centred on mid-swing, half-width min(1.5 swings, half a cycle);
+// plan_roll = A_roll sum side_i w_i, plan_pitch = A_pitch sum end_i w_i,
+// times the ramp. a16.
+static void sway_ref(double* roll, double* pitch, double* w_out = nullptr) {
+  double sw = (256 - b.gait.duty) / 256.0, hw = std::fmin(1.5 * sw, 0.5);
+  uint16_t mid = (uint16_t)(32768u + (b.gait.duty << 7));
+  double r = 0, p = 0;
+  for (int l = 0; l < 4; l++) {
+    double d = std::fabs((int16_t)(leg_p(l) - mid) / 65536.0);
+    double w = d < hw ? (1 + std::cos(M_PI * d / hw)) / 2 : 0;
+    if (w_out) w_out[l] = w;
+    r += (leg_left((uint8_t)l) ? -1 : 1) * w;
+    p += (leg_front((uint8_t)l) ? -1 : 1) * w;
+  }
+  double amp = b.gait.amp / 65536.0;
+  *roll = GAIT_SWAY_ROLL_A16 * r * amp;
+  *pitch = GAIT_SWAY_PITCH_A16 * p * amp;
+}
+
+// The body's attitude made by three stance feet with LF up (deg): the plane
+// through RF, RB, LB (pitch: back legs longer = nose down = +; roll: right
+// legs longer = right side up = +, §3f).
+static void stance_attitude_lf_up(double* pitch, double* roll) {
+  double x, z[4];
+  for (int l = 0; l < 4; l++) foot(l, &x, &z[l]);
+  *pitch = std::asin((z[LEG_RB] - z[LEG_RF]) / PARAM(LEG_LB_MM)) / D2R;
+  *roll = std::asin((z[LEG_RB] - z[LEG_LB]) / PARAM(LEG_W_MM)) / D2R;
+}
+
+static void test_sway() {
+  const uint8_t SWAY = KILO_GAIT_FLAGS_BOB | KILO_GAIT_FLAGS_WAG | KILO_GAIT_FLAGS_SWAY;  // no balance: the feet only
+  // WALK and CRAWL at their defaults, and a WALK at duty 140 (the window is
+  // then the whole cycle): the plan follows the model every tick, from the
+  // start of the ramp on (so it fades in with amp), and the peak is the
+  // amplitude.
+  struct Case { uint8_t pat, duty; };
+  static const Case CASES[] = {{KILO_GAIT_PATTERN_WALK, 0}, {KILO_GAIT_PATTERN_CRAWL, 0}, {KILO_GAIT_PATTERN_WALK, 140}};
+  for (const Case& c : CASES) {
+    start(gp(1, c.pat, 0, c.duty, 30, 0, -1, 0, SWAY));
+    CHECK(b.gait.plan_roll == 0 && b.gait.plan_pitch == 0);  // the first gait tick: amp 0
+    int T = period_ticks();
+    double err = 0, peak_r = 0, peak_p = 0, peak_model = 0;
+    int best = 70000;
+    double lean_p = 0, lean_r = 0, plan_p = 0, plan_r = 0;
+    uint8_t down_mid = 0;
+    for (int t = 0; t < 4 * T; t++) {
+      tick();
+      double r, p;
+      sway_ref(&r, &p);
+      err = std::fmax(err, std::fmax(std::fabs(b.gait.plan_roll - r), std::fabs(b.gait.plan_pitch - p)));
+      if (t < 2 * T) continue;
+      peak_model = std::fmax(peak_model, std::fabs(r));
+      peak_r = std::fmax(peak_r, std::fabs(b.gait.plan_roll));
+      peak_p = std::fmax(peak_p, std::fabs(b.gait.plan_pitch));
+      // LF's mid-swing: the body on RF, RB, LB.
+      int16_t d = (int16_t)(leg_p(LEG_LF) - (uint16_t)(32768u + (b.gait.duty << 7)));
+      if (std::abs(d) < best) {
+        best = std::abs(d);
+        stance_attitude_lf_up(&lean_p, &lean_r);
+        plan_p = b.gait.plan_pitch / 16.0;
+        plan_r = b.gait.plan_roll / 16.0;
+        down_mid = b.gait.down;
+      }
+    }
+    std::printf("gait: sway pattern %d duty %d: plan vs model %.2f a16; peak roll %.2f pitch %.2f deg; at LF mid-swing "
+                "the stance feet lean the body pitch %+.2f roll %+.2f deg (plan %+.2f %+.2f)\n",
+                c.pat, b.gait.duty, err, peak_r / 16, peak_p / 16, lean_p, lean_r, plan_p, plan_r);
+    // (The model has w_i = 0 at leg i's mid-stance and 1 at its mid-swing,
+    // so following it every tick, ramp included, is the window's shape and
+    // the fade-in.)
+    CHECK(err <= 3);  // 0.2 deg: the fixed-point window and ramp truncate
+    CHECK(down_mid == 0xE);  // LF up, the other three down
+    // LF lifting: lean RIGHT (right side down: negative roll) and not
+    // forward (back down or level: pitch <= 0), read off the three stance
+    // feet; the roll is the full amplitude at mid-swing (the two
+    // neighbours' windows are equal and their sides cancel).
+    CHECKF(std::fabs(lean_r + KILO_GAIT_SWAY_ROLL_DEG) < 0.5 && lean_p < 0.3, "LF up: pitch %.2f roll %.2f", lean_p,
+           lean_r);
+    CHECK(std::fabs(lean_r - plan_r) < 0.3 && std::fabs(lean_p - plan_p) < 0.3);
+    // At the defaults the back end goes down too (WALK: the neighbours'
+    // windows give back half of it, -A_pitch / 2; CRAWL: -A_pitch).
+    if (c.duty == 0) CHECK(lean_p < -0.4 * KILO_GAIT_SWAY_PITCH_DEG);
+    // The peak: the amplitude at mid-swing, more where two same-side swings'
+    // windows overlap (WALK: 1.5 A between LB's and LF's).
+    CHECK(std::fabs(peak_r - peak_model) <= 3);
+    if (c.pat == KILO_GAIT_PATTERN_CRAWL) CHECK(std::fabs(peak_r - GAIT_SWAY_ROLL_A16) <= 2);
+    if (c.pat == KILO_GAIT_PATTERN_WALK && c.duty == 0) CHECK(std::fabs(peak_r - 1.5 * GAIT_SWAY_ROLL_A16) <= 3);
+    // The stop fades it out; landed, it is 0.
+    CHECK(gait(gp(0, 0)) == GOAL_OK);
+    int t = 0;
+    bool zero_landing = true;
+    while (body_gait_running(b) && t++ < 4 * T) {
+      tick();
+      if (b.gait.state == GS_LAND) zero_landing = zero_landing && b.gait.plan_roll == 0 && b.gait.plan_pitch == 0;
+    }
+    CHECK(zero_landing && b.gait.plan_roll == 0 && b.gait.plan_pitch == 0);
+  }
+  // TROT: the diagonal pairs cancel exactly.
+  start(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 25, 0, -1, 0, SWAY));
+  bool zero = true;
+  for (int t = 0; t < 3 * period_ticks(); t++) {
+    tick();
+    zero = zero && b.gait.plan_roll == 0 && b.gait.plan_pitch == 0;
+  }
+  CHECK(zero);
+  // The flag off: no sway.
+  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, KILO_GAIT_FLAGS_BOB));
+  zero = true;
+  for (int t = 0; t < 3 * period_ticks(); t++) {
+    tick();
+    zero = zero && b.gait.plan_roll == 0 && b.gait.plan_pitch == 0;
+  }
+  CHECK(zero);
+}
+
 // ---- Output steps at the defaults and the per-tick cost --------------------------
 static void test_defaults_and_cost() {
   static const int8_t STRIDE[3] = {30, 25, 25};  // spec [gait_patterns.*] stride_mm (the mind sends them)
-  for (uint8_t pat = 0; pat < 3; pat++) {
-    start(gp(1, pat, 0, 0, STRIDE[pat]));
+  // With and without SWAY (its lean adds leg-length motion).
+  for (int k = 0; k < 6; k++) {
+    uint8_t pat = (uint8_t)(k % 3), flags = (uint8_t)(k < 3 ? 7 : 7 | KILO_GAIT_FLAGS_SWAY);
+    start(gp(1, pat, 0, 0, STRIDE[pat], 0, -1, 0, flags));
     int T = period_ticks();
     tick(2 * T);
     int16_t prev[DRIVEN_COUNT];
@@ -922,9 +1106,10 @@ static void test_defaults_and_cost() {
     // had to clip them.
     bool same = true;
     for (int l = 0; l < 8; l++) same = same && b.arb.out[3 + l] == b.gait.leg[l];
-    std::printf("gait: pattern %d defaults: max leg step %.2f deg/tick\n", pat, worst);
+    std::printf("gait: pattern %d defaults, flags %d: max leg step %.2f deg/tick\n", pat, flags, worst);
     CHECK(same);
-    CHECKF(worst < PARAM(SLEW_MAX_A16) / 16.0, "pattern %d: %.2f deg/tick hits the safety slew", pat, worst);
+    CHECKF(worst < PARAM(SLEW_MAX_A16) / 16.0, "pattern %d flags %d: %.2f deg/tick hits the safety slew", pat, flags,
+           worst);
   }
   // Cost: fx calls in one walking tick (4 legs of IK + the trajectory) vs a
   // STAND tick.
@@ -937,6 +1122,16 @@ static void test_defaults_and_cost() {
   std::printf("gait: one walking tick: %u sin/cos, %u atan2, %u isqrt (+ 4 IK and 2 trajectory int32 divisions)\n",
               sn, at, sq);
   CHECK(at == 12 && sq == 4 && sn <= 16);
+  // With SWAY: at most one cosine more per leg (the window; legs outside it
+  // cost nothing).
+  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, 7 | KILO_GAIT_FLAGS_SWAY));
+  tick(30);
+  a = g_fx_ops;
+  tick();
+  c = g_fx_ops;
+  uint32_t sn2 = c.sin - a.sin;
+  std::printf("gait: one walking tick with sway: %u sin/cos, %u atan2\n", sn2, c.atan2 - a.atan2);
+  CHECK(c.atan2 - a.atan2 == 12 && c.isqrt - a.isqrt == 4 && sn2 <= 16 + 4);
 }
 
 int main() {
@@ -953,6 +1148,8 @@ int main() {
   test_stance_pose();
   test_geometric_balance();
   test_telemetry();
+  test_support();
+  test_sway();
   test_defaults_and_cost();
   return report("gait");
 }

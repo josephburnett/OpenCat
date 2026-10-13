@@ -269,6 +269,7 @@ class GaitFlags(enum.IntFlag):
     BOB = 1 << 0
     WAG = 1 << 1
     BALANCE = 1 << 2
+    SWAY = 1 << 3
 
 
 class TrickFlags(enum.IntFlag):
@@ -2436,6 +2437,8 @@ PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}
 # ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ----
 GAIT_BOB_DEG = 4
 GAIT_WAG_DEG = 15
+GAIT_SWAY_ROLL_DEG = 8
+GAIT_SWAY_PITCH_DEG = 4
 GAIT_STANCE_H_256 = 205
 
 

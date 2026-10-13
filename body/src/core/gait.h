@@ -33,6 +33,29 @@
 // body height 0.5 mm, duty 1/256, pose pitch/roll 0.5 deg, pose height and
 // x-shift 1 mm. The period applies at once (the phase stays continuous).
 //
+// Support state (docs/walking-and-balance.md §4; for a stance-aware balance):
+// `down` has bit i (LF RF RB LB) set when foot i is on the ground this tick:
+// in stance, or in swing but not armed (it never lifted), or the gait off
+// (STANCE: all four).
+//
+// Sway (SET_GAIT flag SWAY): the legs move only fore-aft, so the centre of
+// mass moves sideways only by rolling the body and fore-aft by pitching it.
+// Before a leg lifts the body leans away from it, toward the feet that stay
+// down. Per leg a window w_i in [0, 1], a raised cosine centred on
+// mid-swing, 1.5 swings each side (one swing of lean-in before lift-off,
+// one of decay after touchdown; at most half a cycle, so it is 0 at
+// mid-stance):
+//   plan_roll  = +A_roll  * sum_i side_i w_i * amp   (side -1 left, +1 right)
+//   plan_pitch = +A_pitch * sum_i end_i  w_i * amp   (end -1 front, +1 back)
+// Sign: leaning the body right (right side down) is NEGATIVE roll (§3f:
+// right side up = +roll), and it moves the centre of mass right of the
+// feet (the legs tilt with the body, so the body sits on the low side); so
+// a left leg (side -1) lifting needs -A: +A * side. Likewise a front leg
+// lifting needs the back end down, nose up = NEGATIVE pitch: +A * end. For
+// the trot the two legs of a diagonal pair have the same w and opposite
+// sides and ends: the sum is exactly 0 (a line has no triangle to lean
+// into). plan_* enter H_i with the pose and the balance correction.
+//
 // The Gait struct also holds STANCE's height (h) and the body pose
 // (SET_BODY_POSE), which apply to IDLE STANCE as well as to the gait, and
 // the 8 leg angles of this tick (gait or STANCE; the arbiter reads them).
@@ -47,6 +70,8 @@ enum GaitState : uint8_t { GS_OFF = 0, GS_RUN = 1, GS_STOP = 2, GS_LAND = 3 };
 // (spec [gait]).
 #define GAIT_BOB_A16 (KILO_GAIT_BOB_DEG * 16)
 #define GAIT_WAG_A16 (KILO_GAIT_WAG_DEG * 16)
+#define GAIT_SWAY_ROLL_A16 (KILO_GAIT_SWAY_ROLL_DEG * 16)
+#define GAIT_SWAY_PITCH_A16 (KILO_GAIT_SWAY_PITCH_DEG * 16)
 
 struct Gait {
   // SET_GAIT goal as received (0 = the pattern's default for period,
@@ -61,6 +86,8 @@ struct Gait {
   uint8_t pat;    // the pattern running
   uint8_t armed;  // bit i: leg i may lift (it has been in stance since the start)
   uint8_t geo;    // the geometric balance ran this tick: its corrections enter H_i
+  uint8_t down;   // bit i: foot i is on the ground this tick (bits as armed)
+  int16_t plan_pitch, plan_roll;  // this tick's planned sway, a16 (0 without SWAY or gait)
   uint16_t phi, dphi, amp;  // phase; per tick; start/stop ramp (65535 = full stride)
   uint8_t duty;             // slewed, /256
   int16_t stride, turn, step, h;  // slewed, q2 (h is also STANCE's height)
@@ -68,6 +95,12 @@ struct Gait {
 };
 
 void gait_init(Gait& g);
+
+// Feet on the ground this tick (0..4), from g.down.
+inline uint8_t gait_feet_down(const Gait& g) {
+  uint8_t d = g.down;
+  return (uint8_t)((d & 1) + ((d >> 1) & 1) + ((d >> 2) & 1) + ((d >> 3) & 1));
+}
 
 // SET_GAIT field checks (spec ranges, pattern < 3, known flag bits; 0 is
 // also accepted for period and duty: the pattern's default). body_h_mm has
