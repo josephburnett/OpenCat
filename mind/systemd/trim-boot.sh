@@ -16,6 +16,11 @@
 #   is untouched: Wi-Fi still connects, also when the dongle is plugged in later.
 # - the kernel line (/boot/firmware/cmdline.txt): drops `splash` (the plymouth
 #   boot splash), keeps `quiet`; the old file is kept as cmdline.txt.kilo-backup.
+# - the systemd journal: Raspberry Pi OS ships
+#   /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf (logs live in
+#   RAM and vanish at reboot). Writes /etc/systemd/journald.conf.d/50-kilo.conf
+#   with Storage=persistent so the previous boot's log survives a power cut
+#   (the 2026-10-12 Wi-Fi loss left no trace). Costs a few MB of SD writes/day.
 #
 # What it leaves alone: NetworkManager, wpa_supplicant, ssh, tailscaled, udev,
 # and rpi-resize-swap-file.service (not known for certain to be a one-shot
@@ -55,12 +60,16 @@ state() { systemctl is-enabled "$1" 2>/dev/null || true; }
 # A saved Wi-Fi profile is a NON-EMPTY file that names a wifi section: netplan
 # `wifis:` or a NetworkManager keyfile `[wifi]`. (An unclean shutdown on
 # 2026-10-12 left a 0-byte profile behind, which must not count.)
-wifi_on_disk=0
+wifi_on_disk=0; wifi_unreadable=0
 for f in "$root"/etc/netplan/*.yaml "$root"/etc/NetworkManager/system-connections/*; do
-    [ -s "$f" ] && grep -qsE '^ *wifis:|^\[wifi\]' "$f" && wifi_on_disk=1 && break
+    [ -s "$f" ] || continue
+    [ -r "$f" ] || { wifi_unreadable=1; continue; }   # root-only file in a non-root dry run
+    grep -qsE 'wifis:|^\[wifi\]' "$f" && wifi_on_disk=1 && break
 done
 if [ ! -d "$root/etc/cloud" ]; then
     echo "cloud-init: not installed"
+elif [ "$wifi_on_disk" = 0 ] && [ "$wifi_unreadable" = 1 ]; then
+    echo "cloud-init: cannot tell: a saved network profile exists but is root-only; run the dry run with sudo"
 elif [ "$wifi_on_disk" = 0 ]; then
     echo "cloud-init: LEFT ON: no non-empty Wi-Fi profile in /etc/netplan or /etc/NetworkManager/system-connections," >&2
     echo "  so cloud-init may be what sets up the Wi-Fi at each boot (nmcli connection show)" >&2
@@ -113,6 +122,21 @@ elif tr ' ' '\n' < "$cmdline" | grep -qx splash; then
     fi
 else
     echo "cmdline.txt: no splash"
+fi
+
+# ---- journal on disk -------------------------------------------------------------------
+jconf=$root/etc/systemd/journald.conf.d/50-kilo.conf
+if grep -qs '^Storage=persistent' "$jconf"; then
+    echo "journal: already persistent ($jconf)"
+else
+    changed=$((changed + 1))
+    if [ "$dry" = 1 ]; then
+        echo "would: journal: persistent    (write $jconf: [Journal] Storage=persistent; journald restarts at reboot)"
+    else
+        mkdir -p "$(dirname "$jconf")"
+        printf '[Journal]\nStorage=persistent\n' > "$jconf"
+        echo "journal: persistent    (wrote $jconf; takes effect at reboot)"
+    fi
 fi
 
 echo "rpi-resize-swap-file.service: left alone (look: systemctl cat rpi-resize-swap-file.service)"

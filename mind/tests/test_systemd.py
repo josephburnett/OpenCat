@@ -192,8 +192,12 @@ def test_trim_boot(fake_root):
     assert cmdline.read_text() == original.replace(" splash", "")
     assert " quiet " in cmdline.read_text()
     assert (root / "boot/firmware/cmdline.txt.kilo-backup").read_text() == original
+    # the journal goes to disk (Raspberry Pi OS ships Storage=volatile)
+    jconf = root / "etc/systemd/journald.conf.d/50-kilo.conf"
+    assert jconf.read_text() == "[Journal]\nStorage=persistent\n"
     p = _run("trim-boot.sh", env)  # twice: nothing left to do
     assert p.returncode == 0 and "nothing to change" in p.stdout, p.stdout + p.stderr
+    assert "journal: already persistent" in p.stdout
     assert cmdline.read_text() == original.replace(" splash", "")
     assert (root / "boot/firmware/cmdline.txt.kilo-backup").read_text() == original
 
@@ -207,3 +211,39 @@ def test_trim_boot_keeps_cloud_init_without_wifi_on_disk(fake_root):
     assert p.returncode == 0 and "LEFT ON" in p.stderr
     assert not (root / "etc/cloud/cloud-init.disabled").exists()
     assert "cloud-init-main.service=enabled" in states.read_text()
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
+def test_trim_boot_ignores_an_empty_wifi_profile(fake_root):
+    """2026-10-12: an unclean shutdown left a 0-byte netplan profile; it must not count as saved Wi-Fi."""
+    root, home, env, calls, states = fake_root
+    (root / "etc/cloud").mkdir(parents=True)
+    (root / "etc/netplan").mkdir(parents=True)
+    (root / "etc/netplan/90-NM-75a1216a.yaml").write_text("")
+    (root / "etc/NetworkManager/system-connections").mkdir(parents=True)
+    (root / "etc/NetworkManager/system-connections/Wired.nmconnection").write_text("[connection]\ntype=ethernet\n")
+    states.write_text("cloud-init-main.service=enabled\n")
+    p = _run("trim-boot.sh", env)
+    assert p.returncode == 0 and "LEFT ON" in p.stderr, p.stdout + p.stderr
+    assert not (root / "etc/cloud/cloud-init.disabled").exists()
+    # a real keyfile Wi-Fi profile does count
+    (root / "etc/NetworkManager/system-connections/strathmore.nmconnection").write_text("[connection]\n[wifi]\nssid=x\n")
+    p = _run("trim-boot.sh", env, "--dry-run")
+    assert p.returncode == 0 and "would: cloud-init: disabled" in p.stdout, p.stdout + p.stderr
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or os.geteuid() == 0, reason="needs sh and a non-root user")
+def test_trim_boot_dry_run_says_when_it_cannot_read_the_profile(fake_root):
+    root, home, env, calls, states = fake_root
+    (root / "etc/cloud").mkdir(parents=True)
+    d = root / "etc/NetworkManager/system-connections"
+    d.mkdir(parents=True)
+    f = d / "strathmore.nmconnection"
+    f.write_text("[wifi]\nssid=x\n")
+    f.chmod(0)
+    try:
+        p = _run("trim-boot.sh", env, "--dry-run")
+    finally:
+        f.chmod(0o600)
+    assert p.returncode == 0 and "cannot tell" in p.stdout, p.stdout + p.stderr
+    assert "cloud-init" not in " ".join(x for x in p.stdout.splitlines() if x.startswith("would:"))

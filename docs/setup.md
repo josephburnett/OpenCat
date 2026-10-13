@@ -128,7 +128,10 @@ the Pi, in an ssh shell, from `~/OpenCat`; `sudo` asks for joe's password.
    sudo mind/systemd/trim-boot.sh
    ```
    It switches off cloud-init (the Pi Imager's first-boot setup, finished
-   long ago; only if a non-empty Wi-Fi profile is saved on disk), masks
+   long ago; only if a non-empty Wi-Fi profile is saved on disk, which a
+   dry run can only see with sudo), makes the systemd journal persistent
+   (Raspberry Pi OS keeps it in RAM by default, so a power cut erases the
+   evidence), masks
    `NetworkManager-wait-online` and `systemd-networkd-wait-online` (services
    whose only job is to make other things wait for the network; masked, so
    nothing can switch them back on), and removes `splash` (the graphical
