@@ -79,6 +79,14 @@ case $nparts in
     2) ;;
     3) [ "$(fstype "$p3")" = ext4 ] && [ "$(blkid -p -o value -s LABEL "$p3" 2>/dev/null)" = kilo-data ] \
            || die "$p3 exists and is not ext4 labelled kilo-data: unknown layout, not touching it"
+       # it must sit after p2 and be a real size (an earlier version let sfdisk drop it into the
+       # 7 MiB gap before p1)
+       p3_start=$(lsblk -ndo START "$p3" | tr -d ' ')
+       p2_end=$(( $(lsblk -ndo START "$p2" | tr -d ' ') + $(lsblk -bdno SIZE "$p2" | tr -d ' ') / $(lsblk -dno LOG-SEC "$dev" | tr -d ' ') ))
+       if [ "${p3_start:-0}" -lt "$p2_end" ] || [ "$(lsblk -bdno SIZE "$p3" | tr -d ' ')" -lt 2147483648 ]; then
+           die "$p3 is misplaced or tiny (starts at sector ${p3_start:-?}, p2 ends at $p2_end; $(gib "$(lsblk -bdno SIZE "$p3" | tr -d ' ')")).
+Delete it and run this again (only an empty or half-copied /data is lost):  sudo sfdisk --delete $dev 3"
+       fi
        have_p3=1 ;;
     *) die "$dev has $nparts partitions; expected 2 (or 3 after an earlier run)" ;;
 esac
@@ -136,6 +144,8 @@ unmnt root
 logsec=$(lsblk -dno LOG-SEC "$dev" | tr -d ' ')
 disk_bytes=$(lsblk -bdno SIZE "$dev" | tr -d ' ')
 p2_bytes=$(lsblk -bdno SIZE "$p2" | tr -d ' ')
+p2_start=$(lsblk -ndo START "$p2" | tr -d ' ')
+[ "${p2_start:-0}" -gt 0 ] || die "cannot read the start sector of $p2 (lsblk -ndo START $p2)"
 # fs_bytes and used_bytes from the superblock
 eval "$(dumpe2fs -h "$p2" 2>/dev/null | awk -F: '
     /^Block count/ { c = $2 } /^Block size/ { s = $2 } /^Free blocks/ { f = $2 }
@@ -143,6 +153,9 @@ eval "$(dumpe2fs -h "$p2" 2>/dev/null | awk -F: '
 [ "${fs_bytes:-0}" -gt 0 ] || die "cannot read the ext4 superblock of $p2 (dumpe2fs -h $p2)"
 target_bytes=$((target_gib * 1073741824))
 target_sectors=$((target_bytes / logsec))
+# p3 starts right after the shrunk p2; given explicitly, or sfdisk would use the first free
+# gap on the card (there is one of 7 MiB before p1)
+p3_start=$((p2_start + target_sectors))
 
 echo "== plan ($dev: $(gib "$disk_bytes"); p2 partition $(gib "$p2_bytes"), filesystem $(gib "$fs_bytes"), used $(gib "$used_bytes"))"
 if [ "$fs_bytes" -gt "$target_bytes" ] || [ "$p2_bytes" -gt "$target_bytes" ]; then
@@ -154,7 +167,7 @@ fi
 [ "$fs_bytes" -le "$target_bytes" ] || { echo "  e2fsck -f -p $p2; resize2fs $p2 ${target_gib}G   (shrink the root filesystem)"; }
 [ "$p2_bytes" -le "$target_bytes" ] || { echo "  sfdisk -N 2 $dev: p2 size $target_sectors sectors (${target_gib} GiB), same start"; }
 if [ "$have_p3" = 0 ]; then
-    echo "  sfdisk --append $dev: p3 over the rest of the card ($(gib $((disk_bytes - target_bytes))) - alignment)"
+    echo "  sfdisk --append $dev: p3 from sector $p3_start (right after p2) to the end of the card ($(gib $((disk_bytes - target_bytes))) - alignment)"
     echo "  mkfs.ext4 -L kilo-data $p3"
 else
     echo "  $p3: already there (ext4, kilo-data), kept"
@@ -185,11 +198,12 @@ if [ "$p2_bytes" -gt "$target_bytes" ]; then
 fi
 if [ "$have_p3" = 0 ]; then
     if [ "$(lsblk -dno TYPE "$p3" 2>/dev/null)" != part ]; then
-        say "sfdisk --append $dev  (p3, Linux, the rest of the card)"
-        echo ",,L" | sfdisk --append "$dev"
+        say "sfdisk --append $dev  (p3, Linux, from sector $p3_start to the end of the card)"
+        echo "$p3_start,,L" | sfdisk --append "$dev"
         udevadm settle || true
     fi
     [ "$(lsblk -dno TYPE "$p3" 2>/dev/null)" = part ] || die "$p3 did not appear; unplug and replug the reader, then run this again"
+    [ "$(lsblk -ndo START "$p3" | tr -d ' ')" = "$p3_start" ] || die "$p3 does not start at sector $p3_start as asked; not formatting it. Look with: sudo sfdisk -l $dev"
     if [ -z "$(fstype "$p3")" ]; then
         say "mkfs.ext4 -L kilo-data $p3"
         mkfs.ext4 -q -L kilo-data "$p3"

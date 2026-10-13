@@ -491,6 +491,7 @@ case "$*" in
       for p in "{st}"/size.sdz?; do q=${{p##*.}}; echo "/dev/$q $(cat "{st}/mp.$q" 2>/dev/null)"; done ;;
   *"-nrpo NAME,TYPE"*) echo "/dev/sdz disk"; for p in "{st}"/size.sdz?; do echo "/dev/${{p##*.}} part"; done ;;
   *LOG-SEC*) echo 512 ;;
+  *"-ndo START"*) case "$n" in sdz1) echo 16384 ;; sdz2) echo 1064960 ;; sdz3) cat "{st}/start.sdz3" ;; esac ;;
   *"-bdno SIZE"*) cat "{st}/size.$n" ;;
   *) echo "NAME SIZE TYPE (fake lsblk of $n)" ;;
 esac
@@ -506,7 +507,7 @@ esac
     _shim(bindir, "sfdisk", log + f'''read line; echo "  stdin: $line" >> "{calls}"
 case "$1" in
   -N) echo $(( ${{line#, }} * 512 )) > "{st}/size.sdz2" ;;
-  --append) echo $(( 59 * {GIB} - $(cat "{st}/size.sdz2") - (513 << 20) )) > "{st}/size.sdz3"; mkdir -p "{f}/sdz3" ;;
+  --append) echo $(( 59 * {GIB} - $(cat "{st}/size.sdz2") - (513 << 20) )) > "{st}/size.sdz3"; echo "${{line%%,*}}" > "{st}/start.sdz3"; mkdir -p "{f}/sdz3" ;;
 esac
 ''')
     _shim(bindir, "mkfs.ext4", log + last + f'echo ext4 > "{st}/fstype.$n"; echo "$3" > "{st}/label.$n"\n')
@@ -587,7 +588,8 @@ def test_data_partition_full_run_then_again(card):
     steps = [x for x in calls.read_text().splitlines() if not x.startswith(("mount", "  stdin"))]
     assert steps == ["e2fsck -f -p /dev/sdz2", "resize2fs /dev/sdz2 16G", "sfdisk -N 2 /dev/sdz",
                      "sfdisk --append /dev/sdz", "mkfs.ext4 -q -L kilo-data /dev/sdz3"]
-    assert "  stdin: , 33554432" in calls.read_text() and "  stdin: ,,L" in calls.read_text()
+    # p3 starts right after the shrunk p2 (1064960 + 33554432), not in the first free gap
+    assert "  stdin: , 33554432" in calls.read_text() and "  stdin: 34619392,,L" in calls.read_text()
     assert (st / "size.sdz2").read_text().strip() == str(16 * GIB)
     d = f / "sdz3"
     assert (d / "home/joe/.config/kilo/env").read_text() == "KILO_RUN_ARGS=--remote\n"
@@ -614,6 +616,24 @@ def test_data_partition_full_run_then_again(card):
     assert "kept /data/home/joe" in p.stdout and "all lines already there" in p.stdout
     assert (d / "home/joe/.config/kilo/env").read_text() == "changed on the Pi\n"
     assert (f / "sdz2/etc/fstab").read_text() == fstab
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
+def test_data_partition_refuses_a_misplaced_p3(card):
+    """A 7 MiB p3 in the gap before p1 (what an earlier version produced): refuse, say how to delete it."""
+    f, st, env, calls, scratch = card
+    (st / "size.sdz2").write_text(f"{16 * GIB}\n")
+    (st / "blocks.sdz2").write_text(f"{16 * GIB // 4096}\n")
+    (st / "size.sdz3").write_text(f"{7 << 20}\n")
+    (st / "start.sdz3").write_text("2048\n")
+    (st / "fstype.sdz3").write_text("ext4\n")
+    (st / "label.sdz3").write_text("kilo-data\n")
+    (f / "sdz3").mkdir()
+    p = _run("data-partition.sh", env, "/dev/sdz", "--yes")
+    assert p.returncode == 1
+    assert "misplaced or tiny" in p.stderr and "sudo sfdisk --delete /dev/sdz 3" in p.stderr
+    assert not calls.exists()  # refused before touching anything, not even a mount
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
