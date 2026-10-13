@@ -192,3 +192,27 @@ standing part of the model. The gait's phase machinery, foot paths, IK and
 start/stop handling carry over unchanged; sway and the support state are
 additions, not a rewrite. The legacy firmware never had any of this either:
 it stayed up by being fast.
+
+## 7. Measured on the floor, 2026-10-13 16:50 PDT (step 1 of section 5)
+
+Remote drive, balance on, firmware 74347362 (no sway yet), the mind at
+df578c4 (trot period 600, duty 192, stride 25, step 8 = 150 ms on two feet).
+Roll from `kilo monitor --json` at 25 Hz (`~/kilo-logs/monitor-20261013-164821.jsonl`):
+
+| what                          | roll (deg)       | pitch (deg)  | result                                   |
+|-------------------------------|------------------|--------------|------------------------------------------|
+| standing before               | 0.6 .. 1.0       | 2.5 .. 2.7   |                                          |
+| trot forward, 5 s             | -1.5 .. 3.4 (sd 1.2) | 0.4 .. 2.7 | "much less wobble, stayed on his feet"   |
+| trot backward, 6 s            | -3.4 .. 3.6 (sd 1.6) | 0.2 .. 4.5 | walked                                   |
+| crawl, marching in place (x2) | +9.8 then -124   |              | FELL to the left within 2 s, both times  |
+
+The trot at 150 ms on two feet holds within ±3.5° of roll where the 300 ms
+trot reached -16.5° and fell (P2 results, 800 ms / 0.55). Section 2's
+arithmetic holds on the robot.
+
+The crawl fell as section 3 predicts for a three-foot gait with no sway:
+the centre of mass sits on the edge of the support triangle, and a 300 ms
+swing (period 2000, duty 0.85) with the body low and the step 18 mm high
+tips it. That is what the sway (section 4, item 1; merged 405d139, not yet
+flashed) is for. Until it is flashed, crawl and walk are expected to tip;
+the trot is the gait to drive with.
