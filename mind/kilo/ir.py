@@ -71,14 +71,17 @@ def describe(arg: int) -> str:
 
 @dataclass(frozen=True)
 class Action:
-    kind: str        # "posture" | "trick" | "balance_toggle" | "walk" | "gait_pattern" | "ignore"
-    name: str = ""   # the posture or trick name, the walk direction, the gait pattern
+    kind: str        # "posture" | "trick" | "balance_toggle" | "walk" | "gait_pattern" | "speed" | "ignore"
+    name: str = ""   # the posture or trick name, the walk direction, the gait pattern, slower / faster
 
 
 # kilo run --remote. The direction keys walk (P2) with the selected pattern
 # until another key, like the legacy firmware; 100+ / 200+ / 1 select the
-# pattern; EQ (calibrate) and 9 (last skill) do nothing.
+# pattern; EQ (calibrate) and 9 (last skill) step the speed down and up
+# (SPEED_FACTORS of the pattern's default speed; kilo.body.client.gait_timing).
 WALK_DIRECTIONS = ("forward", "backward", "left", "right", "march")
+SPEED_FACTORS = (0.5, 0.7, 1.0, 1.4, 2.0)
+DEFAULT_SPEED_STEP = 2  # 1.0: the pattern's spec defaults
 _IGNORE = Action("ignore")
 ACTIONS: dict[str, Action] = {
     "CH-": Action("posture", "rest"),
@@ -100,8 +103,8 @@ ACTIONS: dict[str, Action] = {
     "100+": Action("gait_pattern", "crawl"),
     "200+": Action("gait_pattern", "walk"),
     "1": Action("gait_pattern", "trot"),
-    "EQ": _IGNORE,
-    "9": _IGNORE,
+    "EQ": Action("speed", "slower"),
+    "9": Action("speed", "faster"),
 }
 
 
@@ -127,9 +130,11 @@ class RemoteControl:
     not hold the trick yet, cached otherwise) and are not waited for.
 
     Walking (P2): a direction key walks with the selected pattern (default
-    trot) and its default stride (``kilo.body.client.walk_args``) until
-    another key; 100+ / 200+ / 1 select crawl / walk / trot and, while
-    walking, re-send the walk with the new pattern. A posture or trick key
+    trot) at the selected speed (``kilo.body.client.walk_args`` with
+    ``speed_mm_s``: SPEED_FACTORS[speed_step] x the pattern's default speed,
+    clamped by ``gait_timing``) until another key; 100+ / 200+ / 1 select
+    crawl / walk / trot, EQ / 9 step the speed down / up (stopping at the
+    ends), and both re-send the walk while walking. A posture or trick key
     stops the gait first (``stop_walk``: the stop goal is latched, not waited
     for; the body's TRICK owner pre-empts the legs anyway, and a posture
     refreshed at 5 Hz is what the body takes after the stop's hand-over to
@@ -145,6 +150,7 @@ class RemoteControl:
         self.sleep = sleep
         self.balance_kp = BALANCE_KP if balance_kp is None else balance_kp  # CH+ on: the daemon's --balance Kp
         self.pattern = "trot"
+        self.speed_step = DEFAULT_SPEED_STEP  # index into SPEED_FACTORS, kept across patterns and walks
         self.direction: str | None = None  # the walk the remote started, None when not walking
 
     def balance_enabled(self) -> bool:
@@ -160,13 +166,27 @@ class RemoteControl:
             self.client.stop_walk()
         self.direction = None
 
+    def speed_mm_s(self) -> float:
+        """The speed asked for: the step's factor of the pattern's default speed."""
+        from kilo.body.client import gait_default_speed
+
+        return SPEED_FACTORS[self.speed_step] * gait_default_speed(self.pattern)
+
     def _walk(self, direction: str) -> None:
         from kilo.body.client import walk_args
 
         if self.client.state.mode == "TRICK":
             self.client.stop_trick()
-        self.client.walk(**walk_args(direction, self.pattern))
+        self.client.walk(**walk_args(direction, self.pattern, speed_mm_s=self.speed_mm_s()))
         self.direction = direction
+
+    def _rewalk(self) -> bool:
+        """Re-send the remote's walk with the current pattern and speed, if it walks."""
+        g = self.client.link.goals().get("SET_GAIT")
+        if self.direction is not None and g is not None and g.fields.get("run"):
+            self._walk(self.direction)
+            return True
+        return False
 
     def perform(self, action: Action) -> str:
         c = self.client
@@ -175,11 +195,18 @@ class RemoteControl:
             return f"walk {action.name} ({self.pattern})"
         if action.kind == "gait_pattern":
             self.pattern = action.name
-            g = c.link.goals().get("SET_GAIT")
-            if self.direction is not None and g is not None and g.fields.get("run"):
-                self._walk(self.direction)
+            if self._rewalk():
                 return f"walk {self.direction} ({self.pattern})"
             return f"pattern {self.pattern}"
+        if action.kind == "speed":
+            from kilo.body.client import gait_speed, gait_timing
+
+            step = self.speed_step + (1 if action.name == "faster" else -1)
+            self.speed_step = min(max(step, 0), len(SPEED_FACTORS) - 1)
+            t = gait_timing(self.pattern, self.speed_mm_s())
+            text = (f"speed {SPEED_FACTORS[self.speed_step]:g}x ({self.pattern} "
+                    f"{gait_speed(t['period_ms'], t['duty'], t['stride_mm']):.0f} mm/s)")
+            return (f"walk {self.direction} " if self._rewalk() else "") + text
         if action.kind == "posture":
             self._stop_walking()
             if c.state.mode == "TRICK":

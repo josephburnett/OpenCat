@@ -71,26 +71,118 @@ GAIT_STOP_MARGIN_S = 1.5  # wait_gait_stopped(): one period of ramp-down, the ha
 WALK_DIRECTIONS = ("forward", "back", "backward", "left", "right", "march")
 
 
+# Speed (docs/walking-and-balance.md §2, §3): the swing time is fixed and speed
+# comes from the stride and the stance time. On a diagonal pair the body tips
+# with a 90 ms time constant, so the trot's time on two feet must stay short
+# whatever the speed; a longer period with the same duty would lengthen it.
+#   swing_ms   per pattern, the spec default's (1 - duty) x period: trot 150 ms,
+#              walk 500, crawl 297. Walk and crawl keep three feet down, and
+#              their higher steps (15, 18 mm) need the longer swing to stay
+#              under the 10 deg/tick safety slew; the trot's 25 mm stride in
+#              150 ms is 9.6 deg/tick, so its swing must not get shorter.
+#   stance_ms  = stride_mm / speed, period = swing + stance, duty = stance / period.
+# Slower than the longest stance allows (duty 230/256, period 2000 ms), the
+# stride shrinks (down to GAIT_STRIDE_MIN_MM) instead; faster than the default
+# stride at the shortest stance allows, the speed is capped. The shortest
+# stance is set by GAIT_DUTY_MIN: the trot keeps four-foot phases (duty >= 0.6),
+# walk and crawl three feet down (duty >= 0.75). The spec defaults are each
+# pattern's default speed (trot 25 mm / 450 ms = 56 mm/s, walk 20, crawl 15).
+_GAIT_RANGES = consts.field_ranges("SET_GAIT")
+GAIT_DUTY_MIN = {"walk": 192, "trot": 154, "crawl": 192}  # /256: 0.75, 0.6, 0.75
+GAIT_STRIDE_MIN_MM = 8
+
+
+def gait_swing_ms(pattern: str | int) -> float:
+    """The pattern's fixed swing time: its spec default (1 - duty) x period."""
+    d = GAIT_DEFAULTS[BodyClient.pattern_name(pattern)]
+    return d["period_ms"] * (256 - d["duty"]) / 256
+
+
+def gait_default_speed(pattern: str | int) -> float:
+    """The speed (mm/s) that reproduces the pattern's spec defaults."""
+    d = GAIT_DEFAULTS[BodyClient.pattern_name(pattern)]
+    return gait_speed(d["period_ms"], d["duty"], d["stride_mm"])
+
+
+def gait_speed(period_ms: float, duty: float, stride_mm: float) -> float:
+    """Ground speed (mm/s) of a gait: |stride| over the stance time."""
+    return abs(stride_mm) / (period_ms * duty / 256) * 1000
+
+
+def _stance_limits(name: str, swing_ms: float) -> tuple[float, float]:
+    """(shortest, longest) stance in ms for a swing: the duty and period ranges."""
+    p_lo, p_hi = _GAIT_RANGES["period_ms"]
+    d_lo, d_hi = max(GAIT_DUTY_MIN[name], _GAIT_RANGES["duty"][0]), _GAIT_RANGES["duty"][1]
+    if not 0 < swing_ms < p_hi:
+        raise ValueError(f"swing_ms must be between 0 and {p_hi} (got {swing_ms})")
+    lo = max(swing_ms * d_lo / (256 - d_lo), p_lo - swing_ms)
+    hi = min(swing_ms * d_hi / (256 - d_hi), p_hi - swing_ms)
+    if lo > hi:
+        raise ValueError(f"no stance time fits a {swing_ms:g} ms swing for {name}")
+    return lo, hi
+
+
+def gait_speed_range(pattern: str | int, swing_ms: float | None = None) -> tuple[float, float]:
+    """(slowest, fastest) speed in mm/s that gait_timing() gives."""
+    name = BodyClient.pattern_name(pattern)
+    lo, hi = _stance_limits(name, gait_swing_ms(name) if swing_ms is None else swing_ms)
+    return GAIT_STRIDE_MIN_MM / hi * 1000, GAIT_DEFAULTS[name]["stride_mm"] / lo * 1000
+
+
+def gait_timing(pattern: str | int, speed_mm_s: float | None = None,
+                swing_ms: float | None = None) -> dict[str, int]:
+    """SET_GAIT period_ms, duty and stride_mm (a magnitude) for walking at
+    ``speed_mm_s`` (default: the pattern's default speed) with a fixed swing
+    time (default: the pattern's, gait_swing_ms()). Outside
+    gait_speed_range() the speed is clamped; every output is within the
+    SET_GAIT ranges."""
+    name = BodyClient.pattern_name(pattern)
+    swing = gait_swing_ms(name) if swing_ms is None else float(swing_ms)
+    stance_lo, stance_hi = _stance_limits(name, swing)
+    stride_def = GAIT_DEFAULTS[name]["stride_mm"]
+    v = gait_default_speed(name) if speed_mm_s is None else abs(float(speed_mm_s))
+    stance = stride_def / v * 1000 if v > 0 else float("inf")
+    stride = float(stride_def)
+    if stance > stance_hi:  # slow: the longest stance, and a shorter stride
+        stance = stance_hi
+        stride = max(GAIT_STRIDE_MIN_MM, v * stance_hi / 1000)
+    stance = max(stance, stance_lo)  # fast: the shortest stance caps the speed
+    period = swing + stance
+    d_lo, d_hi = max(GAIT_DUTY_MIN[name], _GAIT_RANGES["duty"][0]), _GAIT_RANGES["duty"][1]
+    p_lo, p_hi = _GAIT_RANGES["period_ms"]
+    return {"period_ms": min(max(int(round(period)), p_lo), p_hi),
+            "duty": min(max(int(round(256 * stance / period)), d_lo), d_hi),
+            "stride_mm": int(round(stride))}
+
+
 def walk_args(direction: str, pattern: str = DEFAULT_PATTERN, stride_mm: float | None = None,
-              turn_mm: float | None = None) -> dict[str, Any]:
+              turn_mm: float | None = None, speed_mm_s: float | None = None) -> dict[str, Any]:
     """walk() arguments for a direction (`kilo walk`, the IR remote).
 
     forward / back(ward): the stride (default: the pattern's) forward or
     backward, ``turn_mm`` as given (signed, + = left: an arc), default 0.
     left / right: turn in place by ``turn_mm`` (magnitude, default
     DEFAULT_TURN_MM) to that side; a ``stride_mm`` makes it an arc.
-    march: stride 0, turn 0 (stepping in place)."""
+    march: stride 0, turn 0 (stepping in place).
+
+    With ``speed_mm_s`` the result also has ``period_ms`` and ``duty`` from
+    gait_timing(), and forward / back take its stride unless ``stride_mm``
+    is given (turning and marching keep their strides, at that cadence)."""
     d = direction.lower()
     if d not in WALK_DIRECTIONS:
         raise ValueError(f"unknown direction {direction!r} (known: {', '.join(WALK_DIRECTIONS)})")
     pattern = BodyClient.pattern_name(pattern)
+    timing = None if speed_mm_s is None else gait_timing(pattern, speed_mm_s)
+    extra = {} if timing is None else {"period_ms": timing["period_ms"], "duty": timing["duty"]}
     if d in ("forward", "back", "backward"):
-        s = abs(GAIT_DEFAULTS[pattern]["stride_mm"] if stride_mm is None else stride_mm)
-        return {"pattern": pattern, "stride_mm": s if d == "forward" else -s, "turn_mm": turn_mm or 0}
+        if stride_mm is None:
+            stride_mm = GAIT_DEFAULTS[pattern]["stride_mm"] if timing is None else timing["stride_mm"]
+        s = abs(stride_mm)
+        return {"pattern": pattern, "stride_mm": s if d == "forward" else -s, "turn_mm": turn_mm or 0, **extra}
     if d in ("left", "right"):
         t = abs(DEFAULT_TURN_MM if turn_mm is None else turn_mm)
-        return {"pattern": pattern, "stride_mm": stride_mm or 0, "turn_mm": t if d == "left" else -t}
-    return {"pattern": pattern, "stride_mm": 0, "turn_mm": 0}
+        return {"pattern": pattern, "stride_mm": stride_mm or 0, "turn_mm": t if d == "left" else -t, **extra}
+    return {"pattern": pattern, "stride_mm": 0, "turn_mm": 0, **extra}
 
 
 # Tricks: TRICK_PLAY speed_q6 range (0.25x .. 3.98x) and the play() timeout margin.

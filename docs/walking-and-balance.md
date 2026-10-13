@@ -153,6 +153,15 @@ ground" if it also watches pitch.
 2. **Speed mapping in the mind** (small): the remote's speed keys and
    `kilo walk` set stride and stance time with a fixed swing, instead of a
    period. Continuous speed, two-foot time constant.
+   **Done (2026-10-13)**: `kilo.body.client.gait_timing(pattern, speed)`,
+   `kilo walk --speed MM_S`, and the remote's EQ / 9 (slower / faster, 0.5x
+   to 2x of the default speed). Each pattern keeps its default's swing time
+   (trot 150 ms; walk 500 and crawl 297 ms, which their higher steps need
+   under the slew limit), stance = stride / speed, period = swing + stance.
+   Below the longest stance (duty 230/256 or period 2000 ms; the trot's is
+   1327 ms) the stride shrinks to as little as 8 mm; above the default
+   stride at the shortest stance (duty 0.6 trot, 0.75 walk/crawl) the speed
+   is capped. Trot 6..110 mm/s, default 56 (600 / 192 / 25 mm).
 3. **Sway in the gait** (firmware, moderate): planned roll/pitch locked to
    the leg phases, amplitude from the geometry (about 8–12° roll for the
    walk, less for the trot), ramped with the stride. Makes slow walk and

@@ -58,7 +58,7 @@ EXPECTED = {
     "7": ("trick", "wash_face"), "8": ("trick", "butt_up"), "CH+": ("balance_toggle", ""),
     "CH": ("walk", "forward"), "|<<": ("walk", "left"), ">||": ("walk", "right"), "+": ("walk", "backward"),
     "0": ("walk", "march"), "100+": ("gait_pattern", "crawl"), "200+": ("gait_pattern", "walk"),
-    "1": ("gait_pattern", "trot"), "EQ": ("ignore", ""), "9": ("ignore", ""),
+    "1": ("gait_pattern", "trot"), "EQ": ("speed", "slower"), "9": ("speed", "faster"),
 }
 
 
@@ -136,17 +136,19 @@ def test_remote_walking():
     key = lambda label: rc.perform(ir.action_for(ir.BY_LABEL[label].command))
     assert key("200+") == "pattern walk" and c.calls == []  # not walking: only stored
     assert key("CH") == "walk forward (walk)"
-    assert c.calls[-1] == ("walk", {"pattern": "walk", "stride_mm": 30, "turn_mm": 0})
+    assert c.calls[-1] == ("walk", {"pattern": "walk", "stride_mm": 30, "turn_mm": 0, "period_ms": 2000,
+                                    "duty": 192})  # the default speed: the spec defaults
     assert key("1") == "walk forward (trot)"  # walking: re-sent with the new pattern
-    assert c.calls[-1] == ("walk", {"pattern": "trot", "stride_mm": 25, "turn_mm": 0})
+    assert c.calls[-1] == ("walk", {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 600,
+                                    "duty": 192})
     key("+")
     assert c.calls[-1][1]["stride_mm"] == -25
     key("|<<")
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 20}
+    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 20, "period_ms": 600, "duty": 192}
     key(">||")
     assert c.calls[-1][1]["turn_mm"] == -20
     key("0")
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 0}
+    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 0, "period_ms": 600, "duty": 192}
     key("100+")
     assert c.calls[-1][1]["pattern"] == "crawl"
     n = len(c.calls)
@@ -157,6 +159,30 @@ def test_remote_walking():
     n = len(c.calls)
     key("4")  # a trick key stops it too
     assert c.calls[n:] == [("stop_walk",), ("start_trick", "hi")]
+
+
+def test_remote_speed_keys():
+    c = FakeClient()
+    rc = ir.RemoteControl(c)
+    key = lambda label: rc.perform(ir.action_for(ir.BY_LABEL[label].command))
+    assert key("9") == "speed 1.4x (trot 78 mm/s)" and c.calls == []  # not walking: only stored
+    assert key("CH") == "walk forward (trot)"
+    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 471, "duty": 175}
+    assert key("9") == "walk forward speed 2x (trot 111 mm/s)"  # walking: re-sent at the new speed
+    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 376, "duty": 154}
+    assert key("9") == "walk forward speed 2x (trot 111 mm/s)"  # the top step
+    for _ in range(5):
+        key("EQ")
+    assert rc.speed_step == 0
+    f = c.calls[-1][1]  # half the default speed: the same 150 ms swing, a longer stance
+    assert (f["stride_mm"], f["period_ms"], f["duty"]) == (25, 1050, 219)
+    assert key("200+") == "walk forward (walk)"  # the walk is at its longest stance: a shorter stride
+    assert c.calls[-1][1] == {"pattern": "walk", "stride_mm": 15, "turn_mm": 0, "period_ms": 2000, "duty": 192}
+    key("0")  # march: stride 0 at the speed's cadence
+    assert c.calls[-1][1] == {"pattern": "walk", "stride_mm": 0, "turn_mm": 0, "period_ms": 2000, "duty": 192}
+    n = len(c.calls)
+    key("2")
+    assert key("EQ") == "speed 0.5x (walk 10 mm/s)" and len(c.calls) == n + 2  # stopped: only stored
 
 
 @pytest.mark.parametrize("balance,on", [(None, True), (0, True), (1, False)])

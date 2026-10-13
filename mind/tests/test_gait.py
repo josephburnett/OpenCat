@@ -17,7 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from kilo.behaviour.adapter import BodyAdapter
-from kilo.body.client import GAIT_DEFAULTS, BodyClient, walk_args
+from kilo.body.client import (GAIT_DEFAULTS, GAIT_DUTY_MIN, GAIT_STRIDE_MIN_MM, BodyClient, gait_default_speed,
+                              gait_speed, gait_speed_range, gait_swing_ms, gait_timing, walk_args)
 from kilo.cli import _event_text, parse_args, render_monitor
 from kilo.link import consts
 from kilo.link.serial_link import Goal, LinkConfig, SerialLink, _is_motion
@@ -87,6 +88,75 @@ def test_walk_args():
     assert walk_args("march", "crawl", 40, 10) == {"pattern": "crawl", "stride_mm": 0, "turn_mm": 0}
     with pytest.raises(ValueError):
         walk_args("up")
+    # with a speed: period and duty from gait_timing, the stride too unless given
+    assert walk_args("forward", speed_mm_s=gait_default_speed("trot")) == {
+        "pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 600, "duty": 192}
+    assert walk_args("back", speed_mm_s=10) == {"pattern": "trot", "stride_mm": -13, "turn_mm": 0,
+                                                "period_ms": 1477, "duty": 230}
+    assert walk_args("back", stride_mm=20, speed_mm_s=10)["stride_mm"] == -20
+    assert walk_args("march", speed_mm_s=80) == {"pattern": "trot", "stride_mm": 0, "turn_mm": 0,
+                                                 "period_ms": 462, "duty": 173}
+    assert walk_args("left", "walk", speed_mm_s=10) == {"pattern": "walk", "stride_mm": 0, "turn_mm": 20,
+                                                        "period_ms": 2000, "duty": 192}
+
+
+# ---- speed: a fixed swing, stride and stance from the speed (docs/walking-and-balance.md §3) ----
+
+SPEEDS = [0, 0.5, 1, 2, 3.7] + [x / 4 for x in range(20, 800)] + [250, 1000, 1e6]
+
+
+def test_gait_timing_defaults_reproduce_the_spec():
+    assert gait_swing_ms("trot") == 150 and gait_swing_ms("walk") == 500
+    assert gait_default_speed("trot") == pytest.approx(25 / 0.45)  # 56 mm/s
+    for name, d in GAIT_DEFAULTS.items():
+        want = {"period_ms": d["period_ms"], "duty": d["duty"], "stride_mm": d["stride_mm"]}
+        assert gait_timing(name) == want
+        assert gait_timing(name, gait_default_speed(name)) == want
+        assert gait_timing(name.upper(), gait_default_speed(name)) == want
+    assert gait_timing("trot", 56) == {"period_ms": 596, "duty": 192, "stride_mm": 25}
+
+
+@pytest.mark.parametrize("name", list(GAIT_DEFAULTS))
+def test_gait_timing_clamps(name):
+    rng = consts.field_ranges("SET_GAIT")
+    d = GAIT_DEFAULTS[name]
+    swing = gait_swing_ms(name)
+    lo, hi = gait_speed_range(name)
+    prev = None
+    for v in SPEEDS:
+        t = gait_timing(name, v)
+        p, du, s = t["period_ms"], t["duty"], t["stride_mm"]
+        for k in t:  # inside the SET_GAIT ranges
+            assert rng[k][0] <= t[k] <= rng[k][1], (v, t)
+        assert GAIT_DUTY_MIN[name] <= du  # trot: four-foot phases; walk, crawl: three feet down
+        assert GAIT_STRIDE_MIN_MM <= s <= d["stride_mm"]  # never a longer stride than the default
+        assert p * (256 - du) / 256 == pytest.approx(swing, abs=4)  # the swing time is constant
+        assert gait_speed(p, du, s) == pytest.approx(min(max(v, lo), hi), rel=0.05, abs=0.6)
+        if prev is not None:  # monotonic: faster = a longer (or equal) stride, a shorter (or equal) stance
+            assert s >= prev["stride_mm"] and p <= prev["period_ms"] and du <= prev["duty"], (v, prev, t)
+            if s > prev["stride_mm"]:  # the stride grows only while the stance is at its longest
+                assert p == prev["period_ms"]
+        prev = t
+    # slow: the stride shrinks at the longest stance, not a longer stance; fast: capped
+    slow, slower = gait_timing(name, lo * 2), gait_timing(name, lo * 1.5)
+    assert slower["stride_mm"] < slow["stride_mm"] and slower["period_ms"] == slow["period_ms"]
+    assert gait_timing(name, 0) == gait_timing(name, lo / 2) and gait_timing(name, 0)["stride_mm"] == 8
+    assert gait_timing(name, hi * 10) == gait_timing(name, hi)
+    assert gait_timing(name, -20) == gait_timing(name, 20)  # a magnitude
+
+
+def test_gait_timing_trot_numbers():
+    lo, hi = gait_speed_range("trot")
+    assert lo == pytest.approx(6.0, abs=0.1) and hi == pytest.approx(110, abs=1)  # 0.1x .. 2x the default
+    assert gait_timing("trot", 1) == {"period_ms": 1477, "duty": 230, "stride_mm": 8}  # duty 230: 150/26*256
+    assert gait_timing("trot", 500) == {"period_ms": 376, "duty": 154, "stride_mm": 25}  # duty 0.6
+    assert gait_speed_range("walk")[1] == pytest.approx(20)  # walk: at its period and duty limits already
+    with pytest.raises(ValueError):
+        gait_timing("trot", 50, swing_ms=0)
+    with pytest.raises(ValueError):
+        gait_timing("walk", 50, swing_ms=1900)  # no stance fits
+    assert gait_timing("trot", 50, swing_ms=200)["period_ms"] * (256 - gait_timing("trot", 50, swing_ms=200)[
+        "duty"]) / 256 == pytest.approx(200, abs=4)
 
 
 def test_a_gait_stop_is_not_held_back_before_contact():
@@ -459,12 +529,36 @@ def test_cli_parsing():
     assert (a.direction, a.pattern, a.turn, a.period, a.duty, a.step_h, a.body_h, a.no_bob, a.no_wag,
             a.no_balance, a.hold) == ("left", "crawl", 15, 900, 200, 10, 70, True, True, True, 3)
     assert parse_args(["walk", "stop"]).direction == "stop"
+    assert parse_args(["walk", "--speed", "80"]).speed == 80
     with pytest.raises(SystemExit):
         parse_args(["walk", "--pattern", "gallop"])
     a = parse_args(["pose", "--pitch", "5", "--roll", "-2", "--height", "-4", "--xshift", "3", "--for", "1"])
     assert (a.action, a.pitch, a.roll, a.height, a.xshift, a.hold) == ("set", 5, -2, -4, 3, 1)
     assert parse_args(["pose", "release"]).action == "release"
     assert parse_args(["posture", "stance"]).name == "stance"
+
+
+def test_walk_fields_speed_and_overrides():
+    from kilo.cli_walk import walk_fields
+
+    def fields(*argv):
+        kw, gait = walk_fields(parse_args(["walk", *argv]))
+        return {**kw, "period_ms": gait["period_ms"], "duty": gait["duty"]}
+
+    assert fields() == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 600, "duty": 192}
+    assert fields("--pattern", "crawl") == {"pattern": "crawl", "stride_mm": 25, "turn_mm": 0,
+                                            "period_ms": 2000, "duty": 218}
+    assert fields("--speed", "80") == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 462,
+                                       "duty": 173}
+    assert fields("--speed", "10", "back") == {"pattern": "trot", "stride_mm": -13, "turn_mm": 0,
+                                               "period_ms": 1477, "duty": 230}
+    # explicit fields win, one by one
+    assert fields("--speed", "80", "--stride", "20") == {"pattern": "trot", "stride_mm": 20, "turn_mm": 0,
+                                                         "period_ms": 462, "duty": 173}
+    assert fields("--speed", "80", "--period", "900")["period_ms"] == 900
+    assert fields("--speed", "80", "--duty", "200")["duty"] == 200
+    assert fields("--period", "1000", "--duty", "179") == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0,
+                                                           "period_ms": 1000, "duty": 179}
 
 
 def _kilo(path, *args, timeout=20):

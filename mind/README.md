@@ -167,8 +167,8 @@ rule: Kilo fell off a desk once). `kilo walk` prints that reminder before
 every walk.
 
 ```sh
-kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--stride MM] [--turn MM]
-          [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
+kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--speed MM_S] [--stride MM]
+          [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
           [--for S] [--wait S]
 kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]
 kilo posture stance          # the IK standing posture the gait starts from and hands over to
@@ -181,8 +181,24 @@ body ramps the stride down over one period and hands over to STANCE.
 `forward` (the default) and `back` use the pattern's stride (`--stride`
 sets the magnitude) and `--turn` (+ = left) bends the path; `left` /
 `right` turn in place (`--turn` magnitude, default 20 mm; `--stride` makes
-it an arc); `march` steps in place. Fields left out take the
-docs/architecture.md §3d defaults of the pattern (walk 2000 ms / duty 192 /
+it an arc); `march` steps in place.
+
+`--speed MM_S` is the speed knob (docs/walking-and-balance.md §2, §3): each
+pattern keeps a fixed swing time, its default's (1 − duty) × period (trot
+150 ms, walk 500, crawl 297), and the speed sets the stride and the stance
+time: stance = stride / speed, period = swing + stance, duty = stance /
+period (`kilo.body.client.gait_timing`). Slower than the longest stance
+allows (duty 230/256, period 2000 ms) the stride shrinks, down to 8 mm;
+faster than the default stride at the shortest stance allows (duty 0.6 for
+the trot, which keeps four-foot phases; 0.75 for walk and crawl, three feet
+down) the speed is capped. Ranges: trot 6..110 mm/s (default 56), walk
+5..20 (default 20: the walk is at its period and duty limits already, so it
+only gets slower, by a shorter stride), crawl 5..28 (default 15). `--stride`,
+`--period` and `--duty` override the speed's values field by field; the
+default speed gives the defaults below. `left` / `right` / `march` take the
+speed's cadence with their own strides.
+
+Fields left out take the docs/architecture.md §3d defaults of the pattern (walk 2000 ms / duty 192 /
 30 mm / step 15 mm, trot 600 / 192 / 25 / 8, crawl 2000 / 218 / 25 / 18);
 the body height defaults to 0.8 (crawl 0.7) × (LEG_L1_MM + LEG_L2_MM), read
 from the body's params (Kilo's measured legs are the defaults: 45 + 50 mm,
@@ -208,7 +224,9 @@ GAIT_STOPPED and SET_GAIT refusals.
 
 In Python: `BodyClient.walk(stride_mm=None, turn_mm=0, pattern="trot",
 period_ms=None, duty=None, step_h_mm=None, body_h_mm=None, bob=True,
-wag=True, balance=True)` (returns the wire fields), `stop_walk(wait_s=None)`
+wag=True, balance=True)` (returns the wire fields; `gait_timing(pattern,
+speed_mm_s)` gives period, duty and stride for a speed, `walk_args(direction,
+pattern, speed_mm_s=...)` the walk() arguments), `stop_walk(wait_s=None)`
 (returns the GAIT_STOPPED count for `wait_gait_stopped(n, timeout)` or, with
 `wait_s`, whether it stopped), `await walk_until_stopped(n, timeout)`,
 `gait_state()`, `load_geometry()`, `pose(...)`, `release_pose()`. SET_GAIT
@@ -355,7 +373,7 @@ keys through the daemon's own BodyClient:
 | >\|\| | 0xC2 | right | turn right in place |
 | - | 0xE0 | pause/limp | posture limp |
 | + | 0xA8 | backward | walk backward |
-| EQ | 0x90 | calibrate | ignored |
+| EQ | 0x90 | calibrate | slower (one speed step down) |
 | 0 | 0x68 | stepping | march in place (stride 0) |
 | 100+ | 0x98 | crawl | select crawl |
 | 200+ | 0xB0 | walk | select walk |
@@ -367,13 +385,18 @@ keys through the daemon's own BodyClient:
 | 6 | 0x5A | pee | trick pee |
 | 7 | 0x42 | wash face | trick wash_face |
 | 8 | 0x4A | butt-up | trick butt_up |
-| 9 | 0x52 | last skill | ignored |
+| 9 | 0x52 | last skill | faster (one speed step up) |
 
 **The direction keys make Kilo walk: use the remote with Kilo on the floor
 only, never on a desk.** A direction key walks (SET_GAIT) with the selected
 pattern and keeps walking until another key, like the legacy firmware; a
 pattern key while walking re-sends the walk with the new pattern (the body
-stops and restarts), otherwise it only selects. A posture or trick key
+stops and restarts), otherwise it only selects. EQ / 9 step the speed down /
+up through 0.5, 0.7, 1, 1.4 and 2 × the pattern's default speed (start: 1,
+the defaults; the step is kept across patterns and walks, and stops at the
+ends), as `kilo walk --speed` does it: a fixed swing, the stride and stance
+from the speed, clamped (the trot's 2× is its 110 mm/s cap, the walk does
+not go faster than its default); while walking the walk is re-sent at once. A posture or trick key
 stops the gait first (the stop is latched; the trick takes the legs at
 once, a posture is what the body takes after the stop's hand-over to
 STANCE); `-` (limp) stops everything at once.

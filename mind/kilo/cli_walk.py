@@ -1,7 +1,7 @@
 """`kilo walk ...` and `kilo pose ...`: the gait and the body pose (SET_GAIT,
 SET_BODY_POSE; docs/architecture.md §3d, P2).
 
-    kilo walk [forward|back|left|right|march|stop] [--stride MM] [--turn MM]
+    kilo walk [forward|back|left|right|march|stop] [--speed MM_S] [--stride MM] [--turn MM]
               [--pattern trot|walk|crawl] [--period MS] [--duty N] [--step-h MM]
               [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--for S]
     kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM]
@@ -13,8 +13,11 @@ for EVENT GAIT_STOPPED: the body ramps the stride down over one period and
 hands over to STANCE. Directions: forward / back with the pattern's default
 stride (``--stride``), ``--turn`` (+ = left) bends the path; left / right
 turn in place (``--turn`` magnitude, default 20 mm; ``--stride`` makes an
-arc); march steps in place. Fields left out take the §3d defaults of the
-pattern. ``kilo walk stop`` stops whoever walks (a client of the daemon, the
+arc); march steps in place. ``--speed`` sets the stride, period and duty
+with the pattern's fixed swing time (``kilo.body.client.gait_timing``; the
+default speed gives the §3d defaults); ``--stride``, ``--period`` and
+``--duty`` override it field by field. Other fields left out take the §3d
+defaults of the pattern. ``kilo walk stop`` stops whoever walks (a client of the daemon, the
 IR remote) and waits for GAIT_STOPPED. The body moves to STANCE first from
 any other posture. A refusal (EVENT GOAL_REFUSED for SET_GAIT: UNKNOWN_TYPE
 from a firmware without the gait, STALE, FALLEN, LOW_BATT, UNCALIBRATED) or
@@ -42,7 +45,8 @@ import threading
 import time
 from typing import Any, Iterator
 
-from kilo.body.client import DEFAULT_PATTERN, DEFAULT_TURN_MM, GAIT_PATTERN_CHOICES, BodyClient, walk_args
+from kilo.body.client import (DEFAULT_PATTERN, DEFAULT_TURN_MM, GAIT_PATTERN_CHOICES, BodyClient,
+                              gait_default_speed, gait_speed, gait_speed_range, walk_args)
 from kilo.link import consts
 from kilo.protocol import kilo_protocol as P
 
@@ -67,13 +71,19 @@ def add_parser(sub: Any, commands: dict) -> None:
                         "or stop (stop any walk and wait for GAIT_STOPPED)")
     s.add_argument("--pattern", choices=GAIT_PATTERN_CHOICES, default=DEFAULT_PATTERN,
                    help=f"gait pattern (default {DEFAULT_PATTERN})")
+    s.add_argument("--speed", type=float, default=None, metavar="MM_S",
+                   help="speed in mm/s with the pattern's fixed swing time: sets stride, period and duty "
+                        "(default: the pattern's, " + ", ".join(
+                            f"{p} {gait_default_speed(p):.0f} ({lo:.0f}..{hi:.0f})"
+                            for p in GAIT_PATTERN_CHOICES for lo, hi in [gait_speed_range(p)]) + ")")
     s.add_argument("--stride", type=float, default=None, metavar="MM",
-                   help="stride in mm (default: the pattern's; forward/back take its magnitude)")
+                   help="stride in mm, overrides --speed's (forward/back take its magnitude)")
     s.add_argument("--turn", type=float, default=None, metavar="MM",
                    help=f"turn in mm, + = left (forward/back: an arc; left/right: the magnitude, "
                         f"default {DEFAULT_TURN_MM})")
-    s.add_argument("--period", type=int, default=None, metavar="MS", help="cycle period in ms")
-    s.add_argument("--duty", type=int, default=None, metavar="N", help="stance fraction in 1/256")
+    s.add_argument("--period", type=int, default=None, metavar="MS", help="cycle period in ms, overrides --speed's")
+    s.add_argument("--duty", type=int, default=None, metavar="N",
+                   help="stance fraction in 1/256, overrides --speed's")
     s.add_argument("--step-h", type=float, default=None, metavar="MM", help="foot lift in mm")
     s.add_argument("--body-h", type=float, default=None, metavar="MM",
                    help="body height in mm (default: a fraction of LEG_L1_MM + LEG_L2_MM)")
@@ -148,14 +158,25 @@ def _stop(client: Any, wait: float | None) -> int:
     return EXIT_ERR
 
 
+def walk_fields(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+    """walk() arguments for `kilo walk`: the direction's (walk_args) and the
+    gait's. --speed (default: the pattern's) sets stride, period and duty;
+    --stride, --period and --duty win where given."""
+    speed = gait_default_speed(args.pattern) if args.speed is None else args.speed
+    kw = walk_args(args.direction, args.pattern, args.stride, args.turn, speed_mm_s=speed)
+    period, duty = kw.pop("period_ms"), kw.pop("duty")
+    gait = dict(period_ms=period if args.period is None else args.period,
+                duty=duty if args.duty is None else args.duty, step_h_mm=args.step_h, body_h_mm=args.body_h,
+                bob=not args.no_bob, wag=not args.no_wag, balance=not args.no_balance)
+    return kw, gait
+
+
 def cmd_walk(args: argparse.Namespace, client: BodyClient) -> int:
     client.wait_ready(args.timeout)
     if args.direction == "stop":
         with _sigterm_interrupts():
             return _stop(client, args.wait)
-    kw = walk_args(args.direction, args.pattern, args.stride, args.turn)
-    gait = dict(period_ms=args.period, duty=args.duty, step_h_mm=args.step_h, body_h_mm=args.body_h,
-                bob=not args.no_bob, wag=not args.no_wag, balance=not args.no_balance)
+    kw, gait = walk_fields(args)
     print(SAFETY, flush=True)  # out-of-range fields raise ValueError in walk(), before anything is sent
     client.load_geometry()
     rc = EXIT_OK
@@ -164,7 +185,10 @@ def cmd_walk(args: argparse.Namespace, client: BodyClient) -> int:
         try:
             f = client.walk(**kw, **gait)
             print(f"walking {args.direction}: {kw['pattern']} stride {f['stride_mm']} mm, turn {f['turn_mm']} mm, "
-                  f"period {f['period_ms']} ms, duty {f['duty']}/256, step {f['step_h_mm']} mm, body "
+                  f"period {f['period_ms']} ms, duty {f['duty']}/256 (swing "
+                  f"{f['period_ms'] * (256 - f['duty']) / 256:.0f} ms"
+                  + (f", {gait_speed(f['period_ms'], f['duty'], f['stride_mm']):.0f} mm/s" if f['stride_mm'] else "")
+                  + f"), step {f['step_h_mm']} mm, body "
                   f"{f['body_h_mm']} mm" + (f" for {args.hold:g} s" if args.hold is not None
                                              else " (Ctrl-C to stop)"), flush=True)
             end = None if args.hold is None else t0 + args.hold
