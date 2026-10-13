@@ -128,12 +128,20 @@ static void test_swing_order() {
     start(gp(1, pat));
     int T = period_ticks();
     tick(3 * T);  // the ramp is long over
+    // Exactly two cycles of phase, not 2 * T ticks: dphi rounds, so a tick
+    // window can straddle a third lift-off (seen at period 1000: 10 instead of 8).
+    uint16_t prev_phi = b.gait.phi;
+    while (true) { tick(); if (b.gait.phi < prev_phi) break; prev_phi = b.gait.phi; }  // just wrapped
     std::vector<std::pair<int, int>> lifts;  // (tick, leg)
     bool was[4];
     for (int l = 0; l < 4; l++) was[l] = lifted(l);
     int max_up = 0;
-    for (int t = 0; t < 2 * T; t++) {
+    int wraps = 0;
+    prev_phi = b.gait.phi;
+    for (int t = 0; wraps < 2; t++) {
       tick();
+      if (b.gait.phi < prev_phi) wraps++;
+      prev_phi = b.gait.phi;
       int up = 0;
       for (int l = 0; l < 4; l++) {
         bool now = lifted(l);

@@ -148,9 +148,9 @@ Setting it up, once:
    `overlayroot=tmpfs`: without `recurse=0`, `/data` would get a RAM layer too
    and nothing would survive. `off` is the reverse. Both act at the next reboot.
 
-**Updating in safe mode: no switching needed.** `git pull`,
-`.venv/bin/pip install -e mind`, `kilo flash`, `sudo systemctl restart kilo`
-and edits to `~/.config/kilo/env` write only under `/home/joe` (on `/data`),
+**Updating in safe mode: no switching needed.** `mind/systemd/update.sh`
+(`git pull`, `.venv/bin/pip install -e mind`, `sudo -n systemctl restart kilo`),
+`kilo flash` and edits to `~/.config/kilo/env` write only under `/home/joe` (on `/data`),
 `/run` and `/tmp`, so the day-to-day loop below works as it is, and its
 results survive reboots.
 
@@ -252,11 +252,14 @@ systemctl list-dependencies --reverse network-online.target     # what still ask
 ## Day-to-day loop
 
 1. Edit and run the four suites on the dev host. Commit on `main`, push.
-2. On the Pi:
+2. On the Pi, one command, no password (the system-service install adds a
+   sudoers rule that lets joe restart, start and stop `kilo.service` only):
    ```sh
-   cd ~/OpenCat && git pull && .venv/bin/pip install -e mind   # pull alone is enough unless pyproject.toml changed
-   sudo systemctl restart kilo                                   # if daemon code changed
+   ~/OpenCat/mind/systemd/update.sh            # git pull, pip if needed, restart the daemon if needed
+   ~/OpenCat/mind/systemd/update.sh --flash    # also rebuild and flash the firmware when body/ changed
    ```
+   By hand, that is `git pull`, `.venv/bin/pip install -e mind` (only when
+   `mind/pyproject.toml` changed) and `sudo -n systemctl restart kilo`.
 3. Firmware: `export PATH=$HOME/.local/bin:$PATH; kilo -v flash` on the Pi
    (builds there in about 25 s, asks the daemon to release the port, flashes,
    verifies the HELLO). Check with the owner before anything that moves Kilo.

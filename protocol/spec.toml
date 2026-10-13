@@ -995,12 +995,16 @@ stance_h_256 = 205             # STANCE's body height when IDLE enters it from a
 #               when phi + offset crosses duty, so a larger offset swings earlier:
 #               WALK/CRAWL give LB -> LF -> RB -> RF (the lateral sequence), TROT
 #               the diagonal pairs LF+RB, RF+LB.
-# Periods: WALK 1000 and CRAWL 1500 (§3d first said 800 / 1200): with Kilo's
-# measured legs (45 + 50 mm) the shorter periods asked the knees for 9.3 and
-# 10.0 deg per tick at the default stride and step height, i.e. the safety
-# slew (SLEW_MAX_A16, 10 deg/tick) would have clipped the crawl's swing.
+# Periods: WALK 2000, TROT 1000, CRAWL 2000 (the SET_GAIT maximum) since
+# 2026-10-12: the owner's first floor drive with the remote at WALK 1000 /
+# TROT 500 / CRAWL 1500 was "way too fast", wobbling and tipping, so every
+# cycle is about half as fast (the owner's choice; balance stays on while
+# walking). History: §3d first said 800 / 1200; with Kilo's measured legs
+# (45 + 50 mm) those asked the knees for 9.3 and 10.0 deg per tick at the
+# default stride and step height, i.e. the safety slew (SLEW_MAX_A16,
+# 10 deg/tick) would have clipped the crawl's swing.
 [gait_patterns.WALK]
-period_ms = 1000
+period_ms = 2000
 duty = 192
 stride_mm = 30
 step_h_mm = 15
@@ -1008,7 +1012,7 @@ body_h_256 = 205
 offsets = [128, 0, 64, 192]
 
 [gait_patterns.TROT]
-period_ms = 500
+period_ms = 1000
 duty = 140
 stride_mm = 35
 step_h_mm = 12
@@ -1016,7 +1020,7 @@ body_h_256 = 205
 offsets = [0, 128, 0, 128]
 
 [gait_patterns.CRAWL]
-period_ms = 1500
+period_ms = 2000
 duty = 218
 stride_mm = 25
 step_h_mm = 18

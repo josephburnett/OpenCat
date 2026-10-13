@@ -115,6 +115,7 @@ def test_install_system_mode(fake_root):
     (wants / "kilo.service").symlink_to("../kilo.service")  # the old user unit, enabled
     (root / "var/lib/systemd/linger").mkdir(parents=True)
     (root / "var/lib/systemd/linger/joe").write_text("")
+    (root / "etc/sudoers.d").mkdir(parents=True, exist_ok=True)
     p = _run("install.sh", env, "--system")
     assert p.returncode == 0, p.stderr
     unit = (root / "etc/systemd/system/kilo.service").read_text()
@@ -130,6 +131,12 @@ def test_install_system_mode(fake_root):
     assert "systemctl daemon-reload" in log and "systemctl enable kilo.service" in log
     assert not any(x.startswith("systemctl restart") for x in log)
     assert any(x.startswith("chown joe: ") and x.endswith("/.config/kilo/env") for x in log)
+    # joe may restart/start/stop the service without a password (update.sh), and nothing else
+    rule_file = root / "etc/sudoers.d/kilo"
+    rule = rule_file.read_text()
+    assert "joe ALL=(root) NOPASSWD: " in rule and rule.count("kilo.service") == 3
+    assert all(w in rule for w in ("restart kilo.service", "start kilo.service", "stop kilo.service"))
+    assert "ALL ALL" not in rule and rule_file.stat().st_mode & 0o777 == 0o440
     (home / ".config/kilo/env").write_text("KILO_PORT=/dev/ttyAMA0\n")
     p = _run("install.sh", env, "--system", "--start")
     assert p.returncode == 0 and "unit unchanged" in p.stdout and "kept" in p.stdout, p.stderr
@@ -607,3 +614,39 @@ def test_data_partition_full_run_then_again(card):
     assert "kept /data/home/joe" in p.stdout and "all lines already there" in p.stdout
     assert (d / "home/joe/.config/kilo/env").read_text() == "changed on the Pi\n"
     assert (f / "sdz2/etc/fstab").read_text() == fstab
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_update_dry_run_reports_what_would_change(tmp_path):
+    """update.sh --dry-run: fetches, lists the incoming commits, says what it would do, changes nothing."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(tmp_path)}
+
+    def git(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
+    work = tmp_path / "work"
+    git("clone", "-q", str(origin), str(work), cwd=tmp_path)
+    (work / "mind/systemd").mkdir(parents=True)
+    shutil.copy(SYSTEMD / "update.sh", work / "mind/systemd/update.sh")
+    (work / "mind/pyproject.toml").write_text("[project]\n")
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "one", cwd=work)
+    git("push", "-q", "origin", "HEAD:main", cwd=work)
+    other = tmp_path / "other"  # upstream moves on: pyproject and a mind file change
+    git("clone", "-q", str(origin), str(other), cwd=tmp_path)
+    (other / "mind/pyproject.toml").write_text("[project]\nname = 'kilo'\n")
+    (other / "mind/x.py").write_text("x = 1\n")
+    git("add", "-A", cwd=other)
+    git("commit", "-q", "-m", "two", cwd=other)
+    git("push", "-q", "origin", "HEAD:main", cwd=other)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True).stdout
+    p = subprocess.run(["sh", str(work / "mind/systemd/update.sh"), "--dry-run"], cwd=work, env=env,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "would: git pull --ff-only" in p.stdout and "two" in p.stdout
+    assert "pip install" in p.stdout and "would:" in p.stdout
+    assert "would: sudo -n systemctl restart kilo.service" in p.stdout or "restart needs a password" in p.stderr
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True).stdout == head

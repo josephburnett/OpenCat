@@ -1075,7 +1075,7 @@ enum kilo_param_id {
 #define KILO_GAIT_WAG_DEG 15 /* tail wag amplitude, deg */
 #define KILO_GAIT_STANCE_H_256 205 /* STANCE's body height, /256 of L1 + L2 */
 #define KILO_GAIT_PATTERN_COUNT 3
-#define KILO_GAIT_WALK_PERIOD_MS 1000
+#define KILO_GAIT_WALK_PERIOD_MS 2000
 #define KILO_GAIT_WALK_DUTY 192
 #define KILO_GAIT_WALK_STRIDE_MM 30
 #define KILO_GAIT_WALK_STEP_H_MM 15
@@ -1084,7 +1084,7 @@ enum kilo_param_id {
 #define KILO_GAIT_WALK_OFFSET_RF 0
 #define KILO_GAIT_WALK_OFFSET_RB 64
 #define KILO_GAIT_WALK_OFFSET_LB 192
-#define KILO_GAIT_TROT_PERIOD_MS 500
+#define KILO_GAIT_TROT_PERIOD_MS 1000
 #define KILO_GAIT_TROT_DUTY 140
 #define KILO_GAIT_TROT_STRIDE_MM 35
 #define KILO_GAIT_TROT_STEP_H_MM 12
@@ -1093,7 +1093,7 @@ enum kilo_param_id {
 #define KILO_GAIT_TROT_OFFSET_RF 128
 #define KILO_GAIT_TROT_OFFSET_RB 0
 #define KILO_GAIT_TROT_OFFSET_LB 128
-#define KILO_GAIT_CRAWL_PERIOD_MS 1500
+#define KILO_GAIT_CRAWL_PERIOD_MS 2000
 #define KILO_GAIT_CRAWL_DUTY 218
 #define KILO_GAIT_CRAWL_STRIDE_MM 25
 #define KILO_GAIT_CRAWL_STEP_H_MM 18
@@ -1106,9 +1106,9 @@ enum kilo_param_id {
    uint8_t duty, body_h_256; uint8_t offsets[4] (LF RF RB LB)}, in enum
    gait_pattern order. */
 #define KILO_GAIT_PATTERN_TABLE_INIT { \
-    {1000, 192, 205, {128, 0, 64, 192}}, /* WALK */ \
-    {500, 140, 205, {0, 128, 0, 128}}, /* TROT */ \
-    {1500, 218, 179, {128, 0, 64, 192}}, /* CRAWL */ \
+    {2000, 192, 205, {128, 0, 64, 192}}, /* WALK */ \
+    {1000, 140, 205, {0, 128, 0, 128}}, /* TROT */ \
+    {2000, 218, 179, {128, 0, 64, 192}}, /* CRAWL */ \
 }
 /* Joint limits, whole degrees, by legacy joint id. */
 #define KILO_JOINT_HEAD_PAN_ID 0

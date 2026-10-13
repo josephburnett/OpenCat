@@ -10,6 +10,8 @@
 #   in /run/kilo, settings from ~NAME/.config/kilo/env;
 # - creates ~NAME/.config/kilo/env from env.example if missing, ~NAME/kilo-logs;
 # - disables and stops the user unit and turns lingering off, if present;
+# - /etc/sudoers.d/kilo: NAME may `systemctl restart|start|stop kilo.service`
+#   without a password (so update.sh needs no root);
 # - systemctl daemon-reload, enable kilo.service; (re)starts it only with --start.
 #
 # Without --system (the fallback): kilo.service as NAME's *user* service in
@@ -116,6 +118,26 @@ if [ "$system" = 1 ]; then
             loginctl show-user "$target_user" -p Linger 2>/dev/null | grep -q '=yes'; then
         loginctl disable-linger "$target_user"
         echo "turned lingering off for $target_user (not needed by a system unit)"
+    fi
+
+    # Let NAME restart/start/stop the service without a password (sudoers.d
+    # rule for those three systemctl commands only), so a code update needs no
+    # root: mind/systemd/update.sh does git pull, pip, `sudo -n systemctl restart kilo`.
+    sudoers_dir=$sysroot/etc/sudoers.d
+    if [ -d "$sudoers_dir" ]; then
+        sc=$(command -v systemctl || echo /usr/bin/systemctl)
+        printf '# Kilo (mind/systemd/install.sh --system): %s may restart the daemon without a password.\n%s ALL=(root) NOPASSWD: %s restart kilo.service, %s start kilo.service, %s stop kilo.service\n' \
+            "$target_user" "$target_user" "$sc" "$sc" "$sc" > "$tmp"
+        if command -v visudo >/dev/null && ! visudo -cf "$tmp" >/dev/null 2>&1; then
+            echo "warning: the sudoers rule did not validate (visudo -cf); not installed" >&2
+        elif cmp -s "$tmp" "$sudoers_dir/kilo"; then
+            echo "sudoers rule unchanged: $sudoers_dir/kilo"
+        else
+            install -m 0440 "$tmp" "$sudoers_dir/kilo"
+            echo "installed $sudoers_dir/kilo ($target_user: systemctl restart|start|stop kilo.service without a password)"
+        fi
+    else
+        echo "warning: no /etc/sudoers.d: restarting the daemon will keep needing a password" >&2
     fi
 
     systemctl daemon-reload
