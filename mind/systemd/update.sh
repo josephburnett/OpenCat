@@ -52,7 +52,9 @@ if in_changed '^mind/pyproject.toml'; then
     run "$pip" install -q -e mind
 fi
 if in_changed '^mind/' || in_changed '^protocol/'; then
-    if sudo -n true 2>/dev/null; then
+    # the sudoers rule allows only these systemctl commands, so ask about that command
+    # (sudo -n true would fail even with the rule in place)
+    if sudo -n -l systemctl restart kilo.service >/dev/null 2>&1; then
         run sudo -n systemctl restart kilo.service
     else
         echo "restart needs a password here (no sudoers rule: sudo mind/systemd/install.sh --system adds it): run  sudo systemctl restart kilo" >&2
