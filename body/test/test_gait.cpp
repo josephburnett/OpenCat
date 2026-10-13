@@ -389,7 +389,10 @@ static void test_turn() {
   tick(3 * period_ticks());
   stance_sweep(v);
   CHECK(v[LEG_LF] < 0 && v[LEG_RF] < 0);
-  CHECKF(std::fabs(v[LEG_LF] / v[LEG_RF] - 2) < 0.1 && std::fabs(v[LEG_LB] / v[LEG_RB] - 2) < 0.1,
+  // Tolerance 0.2: the foot x is whole mm per tick, and at the trot's 1000 ms
+  // period the right side sweeps only ~0.5 mm/tick, so rounding alone moves the
+  // ratio by ~0.1 (seen: 1.15 / 0.54 = 2.13 at duty 179).
+  CHECKF(std::fabs(v[LEG_LF] / v[LEG_RF] - 2) < 0.2 && std::fabs(v[LEG_LB] / v[LEG_RB] - 2) < 0.2,
          "left/right stance speeds %.2f / %.2f", v[LEG_LF], v[LEG_RF]);
   // The goal slews: a new turn takes effect at 0.5 mm per tick.
   CHECK(gait(gp(1, KILO_GAIT_PATTERN_TROT, 0, 0, 30, 10)) == GOAL_OK);
