@@ -1,0 +1,179 @@
+# Walking and balance: what we have, why the trot tips, what the model should be
+
+Written 2026-10-13 after the first floor drives (trot at 1000 ms with
+balance on: "wobbles so much when walking that he tipped over"; tricks fine).
+Numbers use Kilo's measured geometry: legs 45 + 50 mm, body 123 mm long,
+feet 65 mm apart, body height 0.80 × 95 = 76 mm, centre of mass about 80 mm
+up. Code: `body/src/core/gait.cpp`, `balance.cpp`, `body.cpp` (the wiring);
+design: `docs/architecture.md` §3d, §3f.
+
+## 1. What we have
+
+**The gait** is open loop. Each leg follows a fixed foot path in its own
+plane (back along the ground in stance, a cosine arc in swing), timed by a
+global phase. Nothing about it depends on what the body is doing. It knows
+the body height and a commanded pose (pitch, roll) and that is all.
+
+**The balance** is a slow leveller. Once per 20 ms tick it takes the measured
+pitch and roll, subtracts its own correction and the commanded pose to get a
+"ground slope", and asks for leg-length changes (front/back, left/right)
+that would level the body on that slope. Between the sensor and the legs
+there is a 2° dead band, a low-pass (about 60 ms), a slew of 1° per tick
+(50°/s), a clamp of 15°, and the servos themselves (about 150 ms). The loop
+takes roughly 250 ms to act on what it sees.
+
+**The coupling** is one number pair: the balance's pitch/roll corrections
+are added to the gait's pose terms, so the stance feet get longer or shorter.
+The balance does not know which feet are on the ground, where the gait is in
+its cycle, or what the body is about to do. The gait does not know the
+balance exists. The balance also cannot tell the body's own rocking (caused
+by the gait) from a slope: it levels against both, late.
+
+That design is right for standing on a slope, which is what it was built and
+tested for (H13: level within the dead band at Kp 0.99). It was never a
+walking stabiliser, and the numbers below say it cannot be one.
+
+## 2. Why the trot tips, in numbers
+
+A trot stands on a diagonal pair of feet while the other pair swings. On a
+diagonal pair the body is an inverted pendulum pivoting about the line
+between those two feet: nothing holds it up sideways. For a centre of mass
+h ≈ 80 mm above the ground the fall grows as e^(t/τ) with
+
+    τ = sqrt(h / g) = sqrt(0.08 / 9.81) ≈ 90 ms.
+
+Every 90 ms on two feet multiplies the tilt by 2.7. The diagonal-only time
+per step is (1 − duty) × period:
+
+| trot setting                | two feet only | tilt growth | result (observed)           |
+|-----------------------------|---------------|-------------|-----------------------------|
+| legacy, ≈250 ms, duty 0.70  | ≈75 ms        | × 2.3       | shuffles, stays up          |
+| 800 ms, duty 0.55 (P2 test) | 360 ms        | × 55        | fell in 3 s                 |
+| 500 ms, duty 0.55 (evening) | 225 ms        | × 12        | wobbled, fell once          |
+| 1000 ms, duty 0.70 (now)    | 300 ms        | × 28        | wobbles, tips over          |
+
+A 1° lean at lift-off becomes 28° by touchdown. The next pair catches it,
+over-corrects, and the rock grows: that is the wobble. The balance loop,
+at ≈250 ms from seeing to acting, is three times slower than the fall; and
+on a diagonal pair, changing the lengths of the two stance legs does not
+produce a torque about the line they stand on. Through the gains it does
+not matter: no gain on this loop stabilises a 300 ms diagonal stance. The
+balance can only level the body during the four-foot phases, and with its
+delay it is often pushing the wrong way by the time the legs move, which is
+the "balance may feed the rocking" of the P2 results.
+
+**So slowing the trot down made it less stable, not more.** Period is the
+wrong knob. The thing that must stay short is the time on two feet.
+
+## 3. What "speed" should change
+
+Keep the swing short and fixed, and get speed from the stride and the
+stance time:
+
+    swing time   T_sw  fixed, 150–200 ms (short enough for τ = 90 ms, long
+                       enough for the 10°/tick servo slew: a 25 mm stride
+                       in 150 ms is about 6°/tick at the shoulder)
+    stance time  T_st  = stride / speed
+    period       = T_sw + T_st,   duty = T_st / period
+
+At walking pace (say 50 mm/s, stride 25 mm) that is a 500 ms stance, period
+650 ms, duty 0.77. At a crawl (10 mm/s) a 2.5 s stance, duty 0.94: a slow
+gait with quick steps and long four-foot phases, which is what the stock
+firmware's shuffle looks like. Speed then modulates continuously, and the
+two-foot time never grows. The current remote maps the key to a period;
+that mapping is what the mind should change (the body already accepts any
+period/duty per goal, with phase continuity).
+
+Walk and crawl (one leg at a time, three feet down) have no diagonal phase
+and can be as slow as you like, if the centre of mass is inside the
+triangle of the three stance feet. On a cat 65 mm wide that triangle's edge
+runs right under the body's centre line, so an unmoved body sits on the
+edge: marginal. That is where sway comes in (section 4).
+
+## 4. The model that should exist
+
+One shared state, written by the gait and read by the balance:
+
+- **Support state**: which feet are on the ground this tick and where they
+  are (the gait knows: stance/swing per leg, foot x and z). From it, the
+  support polygon (four feet, a triangle, or a diagonal line).
+- **Expected attitude**: what the body will do because of the gait itself
+  (the planned sway and the bob), so the balance corrects deviations from
+  the plan, not the plan.
+
+And two couplings instead of one:
+
+**Gait → balance.** The balance becomes stance-aware. It corrects only
+through feet that are down. Its reference is the planned attitude, not 0.
+Its "slope" estimate is frozen while on two feet and updated on four. Its
+delay chain (dead band, low-pass, slew) is sized for levelling, which is
+fine; it is simply not asked to catch falls.
+
+**Balance → gait.** Three things the gait does for balance:
+
+1. **Sway (feedforward).** Before a foot lifts, roll the body toward the
+   feet that stay down, and pitch toward the end that keeps both feet. On a
+   cat whose legs move only fore-aft (two servos per leg, no sideways foot
+   motion) rolling the body is the only way to move the centre of mass
+   sideways: 10° of roll moves it about 80 mm × sin 10° ≈ 14 mm, from the
+   triangle's edge to well inside it. The gait already has the pose terms to
+   do this (the same leg-length channel the balance uses); what is missing
+   is a roll/pitch pattern locked to the leg phases. This is what makes a
+   slow walk statically stable, and what lets "balance on" and "walking" be
+   one thing.
+2. **Early touchdown (feedback).** If the body starts tipping toward the
+   swinging side faster than a threshold, end the swing now: put the foot
+   down where it is. A foot on the ground is the only thing that stops a
+   sideways fall on this cat; nothing else can. This is a reflex at tick
+   rate (20 ms), inside the fall's 90 ms, and it is what the fast legacy
+   trot gets for free from its 75 ms swings.
+3. **Forward placement (capture point).** Fore-aft falls can be caught by
+   landing the swing foot further ahead or behind, by about
+   τ × forward velocity of the tilt. The legs can do this (it is the one
+   axis they move in). Lower priority: pitch falls are rarer here than roll
+   falls because the body is long and narrow.
+
+**Terrain** (the goal: balance on all the time, uneven ground) falls out of
+the same state. A swing foot that meets the ground early, or late, changes
+the measured attitude at touchdown; the stance-aware balance then adjusts
+that leg's length in the next four-foot phase, which is the slope
+correction we already have, applied per step. Without foot contact sensing
+(Kilo has none) the touchdown height is a guess; the IMU jolt at contact
+and the attitude change after it are the available signals, and the early
+touchdown reflex above doubles as "stop pushing when the foot has found
+ground" if it also watches pitch.
+
+## 5. What this means in practice, in order
+
+1. **Parameters only, next drive** (no code): a trot with a fixed short
+   swing. Period 600 ms, duty 192 (0.75): swing 150 ms, four-foot phases of
+   150 ms, stride 20–25 mm. Expect much less wobble than 1000/0.70. This is
+   a test of section 2, not a fix. Measure: roll amplitude per cycle from
+   telemetry (`kilo monitor`), on the stand and on the floor.
+2. **Speed mapping in the mind** (small): the remote's speed keys and
+   `kilo walk` set stride and stance time with a fixed swing, instead of a
+   period. Continuous speed, two-foot time constant.
+3. **Sway in the gait** (firmware, moderate): planned roll/pitch locked to
+   the leg phases, amplitude from the geometry (about 8–12° roll for the
+   walk, less for the trot), ramped with the stride. Makes slow walk and
+   crawl statically stable with balance on.
+4. **Stance-aware balance** (firmware, moderate): reference = planned
+   attitude; correct through stance feet only; hold the slope estimate on
+   two feet.
+5. **Early touchdown reflex** (firmware, small once 4 exists): tipping
+   toward the swing side ends the swing. The piece that lets the trot
+   survive a misstep or a bump.
+6. **Forward placement and terrain** later, on the same state.
+
+Each step is testable on the stand first (legs in the air: cadence, servo
+slew, sway pattern) and then on the floor with the roll trace as the
+number that must go down.
+
+## 6. What stays as it is
+
+The leveller itself (controller, gains, sign conventions, the geometric
+pose terms) is correct and measured; it becomes the four-foot-phase and
+standing part of the model. The gait's phase machinery, foot paths, IK and
+start/stop handling carry over unchanged; sway and the support state are
+additions, not a rewrite. The legacy firmware never had any of this either:
+it stayed up by being fast.
