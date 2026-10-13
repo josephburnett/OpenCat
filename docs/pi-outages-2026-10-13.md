@@ -1,0 +1,42 @@
+# Pi outages while Kilo is on the USB cable (evidence, 2026-10-12/13)
+
+The Pi (own enclosure, own power supply) talks to Kilo over a USB cable to the
+CH343 serial adapter (`/dev/ttyACM0`). Three times the Pi went down or would not
+boot; each time Kilo was on that cable. This is what the Pi's own journal
+(persistent since the boot trim) shows. Boot numbers are `journalctl --list-boots`
+as of 2026-10-13 11:45 PDT.
+
+| boot | when (PDT)              | what the journal shows                                                                                   |
+|------|-------------------------|----------------------------------------------------------------------------------------------------------|
+| -5   | 10-12 21:04 → hung ~20:27 next day | last line of the boot: `usb 1-1.5: USB disconnect, device number 5` (1-1.5 = the CH343, Kilo). Then nothing: the Pi was dead until power-cycled. |
+| -4   | 10-13 06:51 → shutdown 11:17 | 153 s: daemon connects to Kilo. 156.5 s: Kilo's adapter disconnects by itself. 158.2 s: kernel `hwmon hwmon1: Undervoltage detected!`. 162.3 s: `Voltage normalised`. Adapter re-enumerates. |
+| -3   | 11:12 (clock stale)      | 20.9 s: `usb 1-1.3: reset high-speed USB device number 4` (1-1.3 = the Wi-Fi dongle). Boot ends (power loss / reset). |
+| -2   | 11:12                    | boot ends at 22.4 s, right after the journal flush.                                                      |
+| -1   | 11:12                    | 21.9 s: `usb 1-1.3: USB disconnect, device number 4` (Wi-Fi dongle). Boot ends.                           |
+| 0    | 11:42 (real time)        | the owner unplugged Kilo's USB cable; the Pi booted cleanly within a minute, Wi-Fi up at 36 s.           |
+
+Boots -3 to -1 all died at 21–22 s, the moment the mind service starts (23 s in
+boot 0) and opens the serial port. The card changes of the same morning (root
+shrunk to 16 GiB, data partition, bind mounts) are present in boot 0, which works.
+
+What this is evidence of: an electrical interaction over the USB cable between
+Kilo and the Pi. USB devices on the Pi's hub reset or drop, the Pi's 5 V rail
+sags below 4.63 V (`Undervoltage detected!`), and the SoC resets. It is not
+evidence of which side causes it. Candidates, in the order to check:
+
+1. The adapter's 5 V wire. If the CH343 adapter passes USB VBUS to the NyBoard's
+   5 V rail (or the NyBoard's 5 V to the Pi's VBUS), the two supplies are tied
+   together through a thin cable. Servo load on Kilo then sags the Pi, and a Pi
+   boot (USB power-up) hits Kilo's rail. Check: does the adapter's header to the
+   NyBoard carry VCC/5V, and is the adapter powered from Kilo or from the Pi?
+2. The Pi's supply. Pi 2 B + Ethernet + RT5370 dongle + CH343 can exceed a weak
+   USB supply; the under-voltage line says the rail did sag at least once.
+3. Not the SD card or software: boot 0 runs the same card and code as the three
+   failed boots; the only difference is the cable.
+
+How to test without guessing: `vcgencmd get_throttled` after a session with
+Kilo attached (bit 0 / bit 16 = under-voltage now / since boot); a USB cable
+with the VBUS wire cut, or a data-only adapter, between Pi and Kilo; power Kilo
+on before the Pi and watch whether the Pi still boots.
+
+Not yet done; owner decision needed on the cable.
