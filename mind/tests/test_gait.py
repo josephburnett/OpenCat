@@ -164,9 +164,9 @@ def test_gait_timing_clamps(name):
 
 def test_gait_timing_trot_numbers():
     lo, hi = gait_speed_range("trot")
-    assert lo == pytest.approx(6.0, abs=0.1) and hi == pytest.approx(110, abs=1)  # 0.1x .. 2x the default
+    assert lo == pytest.approx(6.0, abs=0.1) and hi == pytest.approx(90, abs=1)  # 0.1x .. 1.6x the default (duty 0.65 keeps 3 ticks on four feet)
     assert gait_timing("trot", 1) == {"period_ms": 1477, "duty": 230, "stride_mm": 8}  # duty 230: 150/26*256
-    assert gait_timing("trot", 500) == {"period_ms": 376, "duty": 154, "stride_mm": 25}  # duty 0.6
+    assert gait_timing("trot", 500) == {"period_ms": 427, "duty": 166, "stride_mm": 25}  # duty 0.65: 3 ticks on four feet
     assert gait_speed_range("walk")[1] == pytest.approx(20)  # walk: at its period and duty limits already
     with pytest.raises(ValueError):
         gait_timing("trot", 50, swing_ms=0)
@@ -408,6 +408,23 @@ def rig():
 
 def _received(vb, name):
     return [P.MESSAGES[M[name]].unpack(p) for n, _, p in list(vb.received) if n == name]
+
+
+@pytest.mark.slow
+def test_walk_and_stop_drop_newer_flags_for_an_older_body(rig):
+    """A body on protocol 1.4 refuses SET_GAIT bits 3-5 (BAD_ARG): walk() and a
+    stop built from the defaults (no walk sent in this process) both drop them."""
+    import dataclasses
+    client, vb = rig
+    client.wait_ready(2)
+    client.state.hello = dataclasses.replace(client.state.hello, proto_minor=4)
+    f = client.walk(pattern="walk")
+    assert f["flags"] & 0b111000 == 0 and f["flags"] == 7
+    client._gait_fields = None
+    client.stop_walk()
+    assert client.link.goals()["SET_GAIT"].fields["flags"] & 0b111000 == 0
+    client.state.hello = dataclasses.replace(client.state.hello, proto_minor=P.PROTO_MINOR)
+    assert client.walk(pattern="walk")["flags"] == 31
 
 
 @pytest.mark.slow

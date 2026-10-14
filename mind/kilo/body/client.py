@@ -100,11 +100,15 @@ WALK_DIRECTIONS = ("forward", "back", "backward", "left", "right", "march")
 # Slower than the longest stance allows (duty 230/256, period 2000 ms), the
 # stride shrinks (down to GAIT_STRIDE_MIN_MM) instead; faster than the default
 # stride at the shortest stance allows, the speed is capped. The shortest
-# stance is set by GAIT_DUTY_MIN: the trot keeps four-foot phases (duty >= 0.6),
+# stance is set by GAIT_DUTY_MIN: the trot keeps four-foot phases (duty >= 0.65),
 # walk and crawl three feet down (duty >= 0.75). The spec defaults are each
 # pattern's default speed (trot 25 mm / 450 ms = 56 mm/s, walk 20, crawl 15).
 _GAIT_RANGES = consts.field_ranges("SET_GAIT")
-GAIT_DUTY_MIN = {"walk": 192, "trot": 154, "crawl": 192}  # /256: 0.75, 0.6, 0.75
+# trot 166 (0.65), not 154: the stance-aware balance only runs on 3-4 feet and
+# holds 2 ticks after a pair lands, so the trot's four-foot phase (stance -
+# swing)/2 must stay above 3 ticks (60 ms): at 166 it is 63 ms (period 426 ms,
+# top speed about 90 mm/s); at 154 it was 38 ms and the balance stayed frozen.
+GAIT_DUTY_MIN = {"walk": 192, "trot": 166, "crawl": 192}  # /256: 0.75, 0.65, 0.75
 GAIT_STRIDE_MIN_MM = 8
 
 
@@ -529,6 +533,9 @@ class BodyClient:
         ``wait_gait_stopped()``; with it, waits up to ``wait_s`` seconds and
         returns whether the gait stopped."""
         fields = dict(self._gait_fields or self.gait_fields(stride_mm=0))
+        hello = self.state.hello  # a stop built from the defaults carries the newer flag bits too
+        if hello is not None and hello.proto_major == P.PROTO_MAJOR:
+            fields["flags"] = gait_flags_for(fields["flags"], hello.proto_minor)
         fields["run"] = 0
         with self._trick_lock:
             n = len(self._gait_stopped)

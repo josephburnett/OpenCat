@@ -160,8 +160,10 @@ ground" if it also watches pitch.
    under the slew limit), stance = stride / speed, period = swing + stance.
    Below the longest stance (duty 230/256 or period 2000 ms; the trot's is
    1327 ms) the stride shrinks to as little as 8 mm; above the default
-   stride at the shortest stance (duty 0.6 trot, 0.75 walk/crawl) the speed
-   is capped. Trot 6..110 mm/s, default 56 (600 / 192 / 25 mm).
+   stride at the shortest stance (duty 0.65 trot, 0.75 walk/crawl) the speed
+   is capped. Trot 6..90 mm/s, default 56 (600 / 192 / 25 mm). The trot's
+   0.65 keeps three ticks on four feet, which the stance-aware balance needs
+   to run at all (review 2026-10-13).
 3. **Sway in the gait** (firmware, moderate): planned roll/pitch locked to
    the leg phases, amplitude from the geometry (about 8–12° roll for the
    walk, less for the trot), ramped with the stride. Makes slow walk and

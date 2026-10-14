@@ -168,9 +168,9 @@ def test_remote_speed_keys():
     assert key("9") == "speed 1.4x (trot 78 mm/s)" and c.calls == []  # not walking: only stored
     assert key("CH") == "walk forward (trot)"
     assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 471, "duty": 175}
-    assert key("9") == "walk forward speed 2x (trot 111 mm/s)"  # walking: re-sent at the new speed
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 376, "duty": 154}
-    assert key("9") == "walk forward speed 2x (trot 111 mm/s)"  # the top step
+    assert key("9") == "walk forward speed 2x (trot 90 mm/s)"  # walking: re-sent at the new speed
+    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 427, "duty": 166}
+    assert key("9") == "walk forward speed 2x (trot 90 mm/s)"  # the top step
     for _ in range(5):
         key("EQ")
     assert rc.speed_step == 0

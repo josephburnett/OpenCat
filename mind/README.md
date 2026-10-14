@@ -190,9 +190,9 @@ pattern keeps a fixed swing time, its default's (1 − duty) × period (trot
 time: stance = stride / speed, period = swing + stance, duty = stance /
 period (`kilo.body.client.gait_timing`). Slower than the longest stance
 allows (duty 230/256, period 2000 ms) the stride shrinks, down to 8 mm;
-faster than the default stride at the shortest stance allows (duty 0.6 for
+faster than the default stride at the shortest stance allows (duty 0.65 for
 the trot, which keeps four-foot phases; 0.75 for walk and crawl, three feet
-down) the speed is capped. Ranges: trot 6..110 mm/s (default 56), walk
+down) the speed is capped. Ranges: trot 6..90 mm/s (default 56), walk
 5..20 (default 20: the walk is at its period and duty limits already, so it
 only gets slower, by a shorter stride), crawl 5..28 (default 15). `--stride`,
 `--period` and `--duty` override the speed's values field by field; the
@@ -401,7 +401,7 @@ stops and restarts), otherwise it only selects. EQ / 9 step the speed down /
 up through 0.5, 0.7, 1, 1.4 and 2 × the pattern's default speed (start: 1,
 the defaults; the step is kept across patterns and walks, and stops at the
 ends), as `kilo walk --speed` does it: a fixed swing, the stride and stance
-from the speed, clamped (the trot's 2× is its 110 mm/s cap, the walk does
+from the speed, clamped (the trot's 2× is its 90 mm/s cap, the walk does
 not go faster than its default); while walking the walk is re-sent at once. A posture or trick key
 stops the gait first (the stop is latched; the trick takes the legs at
 once, a posture is what the body takes after the stop's hand-over to
