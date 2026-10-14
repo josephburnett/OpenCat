@@ -46,7 +46,7 @@ uint8_t gait_check(const uint8_t* p) {
   uint16_t per = rd16(p + 3);
   int8_t stride = (int8_t)p[6], turn = (int8_t)p[7];
   bool bad = p[1] > 1 || p[2] > 2 || (per && (per < 300 || per > 2000)) || (p[5] && (p[5] < 128 || p[5] > 230)) ||
-             stride < -60 || stride > 60 || turn < -40 || turn > 40 || p[8] > 40 || (p[10] & ~15u);
+             stride < -60 || stride > 60 || turn < -40 || turn > 40 || p[8] > 40 || (p[10] & ~31u);
   return bad ? 2 : 0;  // GOAL_BAD_ARG : GOAL_OK (core/body.h)
 }
 
@@ -129,8 +129,17 @@ KILO_NOINLINE static int16_t sway_ramp(int32_t v, uint16_t amp) { return (int16_
 // Leg i's phase this tick.
 static uint16_t leg_phase(const Gait& g, uint8_t leg) { return (uint16_t)(g.phi + (PAT_U8(g.pat, off[leg]) << 8)); }
 
-void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch) {
+void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* att) {
   bool run = g.state != GS_OFF;
+  // Early touchdown (gait.h): the legs on the side (end) the body tips
+  // toward, bits as armed (LF RF RB LB; left = LF LB 0x9, front = LF RF 0x3).
+  uint8_t tip = 0;
+  if (att && g.state == GS_RUN && (g.flags & KILO_GAIT_FLAGS_CATCH)) {
+    if (att->rate_roll > GAIT_TOUCHDOWN_A16S) tip = 0x9;
+    if (att->rate_roll < -GAIT_TOUCHDOWN_A16S) tip = 0x6;
+    if (att->rate_pitch > GAIT_TOUCHDOWN_A16S) tip |= 0x3;
+    if (att->rate_pitch < -GAIT_TOUCHDOWN_A16S) tip |= 0xC;
+  }
   uint16_t b16 = (uint16_t)(g.duty << 8);
   // 1/beta and 1/(1 - beta) as 2^30 / x, so each leg's s is a multiply
   // (two divisions per tick, not eight). duty is 128..230, so b16 >= 32768
@@ -200,7 +209,9 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch) {
         e = (Q14_ONE - fx_cos(a)) / 2 - 8192;  // (1 - cos pi s)/2 - 1/2
         // Lift h (1 - cos 2 pi s)/2: zero vertical speed at lift-off and
         // touchdown, the full height at mid-swing (§3d writes h sin pi s,
-        // whose vertical speed is largest at lift-off; see gait.h).
+        // whose vertical speed is largest at lift-off; see gait.h). Tipping
+        // toward this leg: down now, for the rest of the swing.
+        if (tip & bit) g.armed &= (uint8_t)~bit;
         if (g.armed & bit) {
           z = (int16_t)(z - (((int32_t)g.step * (Q14_ONE - fx_cos((int16_t)(2 * a)))) >> 15));
           down &= (uint8_t)~bit;  // armed in swing: in the air

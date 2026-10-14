@@ -251,6 +251,7 @@ class TelemetryFlags(enum.IntFlag):
     NO_BATTERY = 1 << 9
     EEPROM_PENDING = 1 << 10
     DIST_FRESH = 1 << 11
+    BALANCE_HELD = 1 << 12
 
 
 class HelloCaps(enum.IntFlag):
@@ -270,6 +271,7 @@ class GaitFlags(enum.IntFlag):
     WAG = 1 << 1
     BALANCE = 1 << 2
     SWAY = 1 << 3
+    CATCH = 1 << 4
 
 
 class TrickFlags(enum.IntFlag):
@@ -2439,6 +2441,7 @@ GAIT_BOB_DEG = 4
 GAIT_WAG_DEG = 15
 GAIT_SWAY_ROLL_DEG = 8
 GAIT_SWAY_PITCH_DEG = 4
+GAIT_TOUCHDOWN_RATE_DPS = 90
 GAIT_STANCE_H_256 = 205
 
 

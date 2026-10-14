@@ -142,6 +142,9 @@ GoalResult body_goal_balance(Body& b, const uint8_t p[5]);
 // eligible (doc §3c: IDLE SIT or STAND, settled, no REFLEX) and no IMU_FAULT.
 // TELEMETRY flags bit 0.
 inline bool body_balance_active(const Body& b) { return b.bal.active; }
+// The geometric balance holds its corrections this tick (on two feet, or
+// just after; body_tick).
+inline bool body_balance_held(const Body& b) { return b.bal.active && b.bal.hold; }
 // TRICK_PLAY (payload: epoch, trick_id, speed_q6, flags). Returns the ACK
 // status: STALE, NO_TRICK, BAD_ARG, BUSY (a trick plays), REFUSED_FALLEN
 // (the fall reflex holds the joints), LOW_BATT, BUSY (another reflex holds

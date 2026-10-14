@@ -174,10 +174,21 @@ ground" if it also watches pitch.
    (`plan_pitch`, `plan_roll`) for item 4.
 4. **Stance-aware balance** (firmware, moderate): reference = planned
    attitude; correct through stance feet only; hold the slope estimate on
-   two feet.
+   two feet. *Done 2026-10-13* (§3f "Stance-aware under the gait", not yet
+   on the floor): in a host plant that falls on a diagonal, the walk with
+   sway at Kp ≈ 1 now follows its plan within 1° with corrections ≤ 1.8°
+   (they were 10.8°, fighting the sway), and on a trot the corrections hold
+   on two feet and 2 ticks after (measured: the lean per step stops
+   improving past 2) while a 10° slope is still levelled to 2.65° at every
+   lift-off.
 5. **Early touchdown reflex** (firmware, small once 4 exists): tipping
    toward the swing side ends the swing. The piece that lets the trot
-   survive a misstep or a bump.
+   survive a misstep or a bump. *Done 2026-10-13* (§3d "Early touchdown",
+   SET_GAIT flag `CATCH`, on by default, `kilo walk --no-catch`): at 90°/s
+   toward a swinging leg; in the plant normal walking peaks at 40°/s (walk)
+   and 65°/s (trot on a 5° slope) and never triggers, and a 60°/s shove on
+   the trot lands the leg on the falling side and halves the lean (7.3° vs
+   15.5°).
 6. **Forward placement and terrain** later, on the same state.
 
 Each step is testable on the stand first (legs in the air: cadence, servo

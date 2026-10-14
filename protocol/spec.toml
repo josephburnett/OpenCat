@@ -209,6 +209,7 @@ OVERRUN = 8
 NO_BATTERY = 9
 EEPROM_PENDING = 10
 DIST_FRESH = 11
+BALANCE_HELD = 12              # the geometric balance holds its corrections (on two feet, and just after; doc §3f)
 
 [flags.hello_caps]
 BUZZER = 0
@@ -225,6 +226,7 @@ BOB = 0
 WAG = 1
 BALANCE = 2
 SWAY = 3                       # planned roll/pitch away from the lifting leg ([gait] sway_*_deg; doc §3d)
+CATCH = 4                      # early touchdown: a swing ends when the body tips toward its leg ([gait] touchdown_rate_dps; doc §3d)
 
 [flags.trick_flags]
 BALANCE = 0
@@ -981,6 +983,7 @@ bob_deg = 4                    # head bob amplitude: tilt += bob sin(2 * 2 pi ph
 wag_deg = 15                   # tail wag amplitude: tail += wag sin(2 pi phi), scaled by the stride ramp
 sway_roll_deg = 8              # SWAY flag: roll away from a lifting leg's side at its mid-swing, scaled by the stride ramp
 sway_pitch_deg = 4             # SWAY flag: pitch away from a lifting leg's end (front/back), likewise
+touchdown_rate_dps = 90        # CATCH flag: a swinging leg lands at once when the body's roll (pitch) rate toward its side (end) exceeds this
 stance_h_256 = 205             # STANCE's body height when IDLE enters it from another posture: /256 of (L1 + L2), 0.80
 
 # Per pattern, keyed by the [enums.gait_pattern] names (every pattern, in enum

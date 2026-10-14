@@ -551,7 +551,7 @@ to be tuned.
 | `turn_mm` | mm, signed, + = left | −40..40 | 0 |
 | `step_h_mm` | mm | 0..40 | 15 / 8 / 18 (trot 12 until 2026-10-13: 12 hits the 10°/tick slew in a 150 ms swing) |
 | `body_h_mm` | mm | IK workspace | 0.80 / 0.80 / 0.70 × (L1+L2) |
-| `flags` | bits | head bob, tail wag, balance, sway | all on (the mind leaves sway off for the trot, where it is 0 anyway) |
+| `flags` | bits | head bob, tail wag, balance, sway, catch (early touchdown) | all on (the mind leaves sway off for the trot, where it is 0 anyway) |
 
 `SET_BODY_POSE` (pitch, roll, height delta, x-shift) applies on top. It also
 drives IDLE STANCE.
@@ -719,6 +719,41 @@ the text above:
   double model every tick (ramp included) within 3 a16, and at LF's
   mid-swing the plane of the three stance feet reads the body −8° roll.
   The vbody simulator accepts the flag but does not simulate it.
+- **Early touchdown** (flag `CATCH`, bit 4; added 2026-10-13,
+  docs/walking-and-balance.md §4). A foot on the ground is the only thing
+  that stops a sideways fall on this cat, and on a diagonal the body tips
+  with a 90 ms time constant, faster than the balance can act. While the
+  gait runs (`GS_RUN`; never during the stop, which puts every foot down
+  anyway), a leg in its swing lands at once when the body tips toward it
+  faster than `touchdown_rate_dps` (spec `[gait]`, 90°/s): its `armed` bit
+  is cleared, so for the rest of that swing `z = H_i` (no further lift) and
+  its `down` bit is set (the balance sees three feet again); the next
+  stance arms it again. Its x keeps the swing's path, on the ground (holding
+  x would need a stored x per leg and a jump at the next stance). Sign (§3f:
+  right side up = +roll, nose down = +pitch): a rising roll is the left
+  side dropping, a fall toward the LEFT legs, so a left leg lands on
+  `rate_roll > +thr` and a right leg on `rate_roll < −thr`; a front leg on
+  `rate_pitch > +thr` (nose dropping), a back leg on `rate_pitch < −thr`.
+  The rates are the DMP gyro's (`Attitude`), none with `IMU_FAULT`. Cost:
+  four compares per tick, no RAM (the `armed` bit is the state). Threshold:
+  above everything normal walking makes in the host plant (below), with
+  room: the WALK's sway reaches 40°/s toward a swinging leg, the CRAWL 14,
+  the TROT on a 5° slope at Kp ≈ 1 65°/s (the 2° dead band left by the
+  balance grows ×2.75 over the 150 ms diagonal); 90°/s is a fall that
+  started from about 3° of lean at lift-off, or a shove. Host test
+  (`test_gait.cpp`, a plant that falls as an inverted pendulum about the
+  diagonal on two feet, and on three when the lean is toward the missing
+  corner): the reflex lands exactly the swinging leg on the side or end
+  tipped toward, within the tick, at its `H_i`, and nothing else; nothing at
+  the threshold, for the other sign, with the flag off, with `IMU_FAULT`,
+  or during the stop; no catch in any pattern with sway at Kp ≈ 1 on a
+  level floor or a 5° slope; a 60°/s shove on the trot's diagonal lands a
+  leg on the side it falls toward first and the lean peaks at 7.3° instead
+  of 15.5° (with the sign flipped the plant falls as far as without). At
+  the default Kp 0.5 a 5° slope leaves 3.5° of lean, which the trot's
+  diagonal grows to 11.7° at 121°/s: the reflex fires there, which is
+  right (that is a fall). The vbody simulator accepts the flag but does not
+  simulate it.
 - **TELEMETRY.** Mode GAIT, flag GAIT and leg-owner nibble GAIT from the
   moment the run goal is accepted (including the move to STANCE); head
   nibble GAIT while bob or wag is on; `gait_phase = φ >> 8` while the gait
@@ -916,6 +951,53 @@ reads the body's tilt off the commanded feet with a 0.15 s servo lag):
 at the 2° dead band for leg responses 0.7×, 1× and 1.6×; a flipped sensor
 runs away to the clamp. At the default Kp 0.5 half the slope remains: H13
 on Kilo is to be run with `kp_q8` 255 (`docs/p2-hardware-test.md`).
+
+*Stance-aware under the gait* (added 2026-10-13,
+docs/walking-and-balance.md §4, §5 item 4). Two changes in `body_tick`,
+the controller unchanged:
+- **The plan is the reference.** `slope = measured − corr − pose − plan`,
+  with `plan` the gait's planned sway (`Gait::plan_pitch`, `plan_roll`,
+  0 without `SWAY`), so the body ends at `pose + plan + slope·(1 − Kp)`: the
+  sway is the target, not a disturbance. Host test (WALK and CRAWL with
+  sway on a level floor, Kp 255/256, the stance-aware plant below): the
+  body follows the plan through the plant's 150 ms servo lag within 1.0°
+  (WALK) and 1.9° (CRAWL), the corrections stay at or under 1.8° and 3.3°,
+  and the WALK leans 11.2° of its planned 11.9°. With the old reference
+  the balance fought the sway: corrections up to 10.8° and 6.4°, the WALK's
+  lean cut to 4.7°. What is left is the servo lag itself (the plan leads
+  the body by about 150 ms and the lean changes sides at up to 40°/s);
+  a reference lagged like the servos would halve it in the plant (4 B of
+  RAM), left out until the lag is measured on Kilo.
+- **Held on two feet.** While fewer than three feet are down
+  (`gait_feet_down`, the last tick's support, the one the measured
+  attitude answers) the body pivots on a diagonal and reads its own fall,
+  not the slope; acting on it 250 ms later pushes the wrong way. So the
+  corrections are held (no update and no decay) there and for
+  `BAL_HOLD_TICKS` (2) ticks after the third foot lands, while the body
+  settles from the rock. `Balance::hold` counts that down (1 B);
+  TELEMETRY flags bit 12 `BALANCE_HELD` reports a held tick (with
+  `BALANCE_ACTIVE`). The hold-over was measured in the plant (landing
+  settle 2 ticks): on a 5° slope at Kp 0.5 the TROT's largest lean per
+  step is 12.9° with no hold-over, 12.0° with 1 tick, 11.65° with 2 and
+  11.6° with 3 to 6; with no hold at all the roll correction swings
+  −7.3..−2.4° every step instead of holding −3.3°. Host test: on a trot
+  the corrections never change on a held tick and do on the others; a
+  10° slope tilting to 14° under a trot is taken up on four feet and the
+  body is level within 2.65° at every lift-off; STANCE is never held.
+
+The stance-aware plant (`test_gait.cpp`): the support is the gait's
+`down`; on four feet the body lies on their plane, on three on the plane
+through them, reached through the 150 ms servo lag; on a diagonal pair, or
+on three feet leaning toward the missing corner past a margin, it is an
+inverted pendulum about the diagonal (roll, τ = 90 ms, exact per tick),
+and back on a support it settles onto the feet in 2 ticks; the IMU reads
+the world attitude and its rates. A finding from it for the sway (not
+changed here): WALK's lean crosses zero exactly at the lift-offs where it
+changes sides (LF down and RB up, RF down and LB up), so with the servo
+lag the body still leans 2 to 3° toward the leg that lifts: a plant that
+tips at 2° of lean toward the missing corner falls there (at 3° it
+holds). A sway phase-advanced by the servo lag, or one that does not cross
+zero at a lift-off, would fix it.
 
 **Joint-space mapping** (`balance_map`). The per-joint gains are the legacy
 `adaptiveParameterArray` {roll, pitch} factors in PROGMEM, which are also
@@ -1425,7 +1507,7 @@ marks a payload that starts with an epoch byte.
 | 14 | batt_mv | u16 | Filtered |
 | 16 | mode | u8 | 0 BOOT, 1 LIMP, 2 IDLE, 3 GAIT, 4 TRICK, 5 FALLEN, 6 RECOVERING, 7 LOW_BATT, 8 CALIB, 9 LINK_LOST |
 | 17 | owners | u8 | Low nibble: leg owner. High nibble: head owner (4 = Pi hold). |
-| 18 | flags | u16 | bit 0 balance active, 1 IMU_FAULT, 2 servos powered, 3 gait, 4 trick, 5 head held, 6 batt warn, 7 link ok, 8 overrun, 9 NO_BATTERY, 10 EEPROM pending, 11 dist fresh |
+| 18 | flags | u16 | bit 0 balance active, 1 IMU_FAULT, 2 servos powered, 3 gait, 4 trick, 5 head held, 6 batt warn, 7 link ok, 8 overrun, 9 NO_BATTERY, 10 EEPROM pending, 11 dist fresh, 12 balance held (the geometric balance holds its corrections on two feet, §3f) |
 | 20 | last_rx_seq | u8 | |
 | 21 | trick_frame | u8 | 0xFF = none |
 | 22 | gait_phase | u8 | φ >> 8 |
@@ -2194,7 +2276,7 @@ this table. Offsets are within the payload. `E` = epoch u8.
 | 0x03 PING | `token u16` | 2 |
 | 0x04 SET_STREAM | `telem_div u8` (0 off, default 2 → 25 Hz), `joints_div u8`, `imu_raw_div u8` | 3 |
 | 0x10 SET_POSTURE | `E`, `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE, 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = param `POSTURE_TICKS`, 25), `flags u8` (bit 0 balance; BALANCE = STAND + this bit) | 4 |
-| 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance, 3 sway) | 11 |
+| 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance, 3 sway, 4 catch) | 11 |
 | 0x12 SET_HEAD | `E`, `mode u8` (0 release, 1 hold), `pan i16`, `tilt i16`, `tail i16` (a16; −32768 = not held), `max_speed_dps u16` (0 = safety slew only) | 10 |
 | 0x13 SET_BODY_POSE | `E`, `pitch i16`, `roll i16` (a16), `dheight_mm i8`, `xshift_mm i8` | 7 |
 | 0x14 SET_BALANCE | `enable u8`, `kp_q8 u8`, `kd_ms u8`, `deadband_deg u8`, `max_corr_deg u8` | 5 |
@@ -2433,7 +2515,7 @@ reference; this table is the overview.
 | `kilo status [--json]`, `kilo monitor [--passive] [--percepts]` | HELLO, state, link and body stats; live telemetry table (`--passive`: sends nothing, prints what the body does on its own) |
 | `kilo posture limp\|rest\|stand\|sit\|balance\|stance\|calib\|zero [--for S] [--pca] [--then-watch T]` | Hold a posture (`balance` = STAND + flag; `stance` = the IK standing posture) |
 | `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
-| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--speed MM_S] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--for S] [--wait S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. `--speed` sets stride, period and duty with the pattern's fixed swing time (docs/walking-and-balance.md §3; `--stride`/`--period`/`--duty` override). On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
+| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--speed MM_S] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--for S] [--wait S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. `--speed` sets stride, period and duty with the pattern's fixed swing time (docs/walking-and-balance.md §3; `--stride`/`--period`/`--duty` override). `--no-sway` / `--no-catch` turn off the sway and the early-touchdown reflex (§3d). On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
 | `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]` | Body pose over STANCE and the gait (P2, `SET_BODY_POSE`) |
 | `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit). *`kilo eyes`, `kilo beep`*: not yet (the messages exist; no CLI, no WS2812 driver) |
 | `kilo trick list\|show NAME\|upload NAME [--force]\|play NAME [--mirror] [--speed X] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); *`import-legacy FILE` and `edit NAME`* later (the library itself is regenerated from the legacy skills by `python -m kilo.tricks.import_legacy`) |
@@ -2457,7 +2539,7 @@ reference; this table is the overview.
 | joints | Transfer function vs a transcription of legacy float `writeAngle`, using the dumped EEPROM: all 16 joints × every whole degree in limits; exact or ±1 count (listed). Limits, slew. |
 | config | Migration accept/reject paths; torn write at every byte offset recovers to the other slot; sequence wrap |
 | ik | Round trip on a 1 mm grid ≤ 0.25 mm; ≤ 0.25° vs double; reach clamp; legacy postures plausible. P2: `body/test/test_ik.cpp` (0.11 mm / 0.07° at 50/50 mm; 7 geometries incl. the params' extremes under the sanitizers; clamp on the ray; `up`/`sit`/`rest` FK; STANCE within the joint limits) |
-| gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change. P2: `body/test/test_gait.cpp`, all of these except the 3°/tick (8.8 / 6.7 / 9.6°/tick at §3d's defaults, below the 10°/tick slew; see 3d), plus zero foot velocity at lift-off/touchdown, the stop's landing and single `GAIT_STOPPED`, pattern change, bob/wag amplitudes, refusals, pending start, pre-emption by a trick, a reflex and the watchdog, STANCE pose terms and foot nudge, geometric balance closed through a plant, TELEMETRY through the link, the support state (feet down) and the sway (sign from the stance feet), fx cost per tick |
+| gait | Swing order and pairs per pattern; stance speed constant ±2%; ≤ 3°/tick output step at defaults; clean start/stop; turn sign; no phase jump on period change. P2: `body/test/test_gait.cpp`, all of these except the 3°/tick (8.8 / 6.7 / 9.6°/tick at §3d's defaults, below the 10°/tick slew; see 3d), plus zero foot velocity at lift-off/touchdown, the stop's landing and single `GAIT_STOPPED`, pattern change, bob/wag amplitudes, refusals, pending start, pre-emption by a trick, a reflex and the watchdog, STANCE pose terms and foot nudge, geometric balance closed through a plant, TELEMETRY through the link, the support state (feet down) and the sway (sign from the stance feet), the stance-aware balance (plan reference, two-foot hold) and the early touchdown against a plant that falls on a diagonal, fx cost per tick |
 | keyframe | Tick-exact dur/hold; easing endpoints; −128; loops; mirror (incl. roll ref); speed. P1: `body/test/test_keyframe.cpp` (also upload edge cases, crossfades, end posture, TRICK_DONE reasons, gating, per-frame balance, and all 13 library tricks within the joint limits with the JSON's timing) |
 | arbiter | Per-joint priority; crossfade length/monotonicity; head and balance gating; epoch refusal and LIMP/REST exemption. P1 head layer in `body/test/test_reflex.cpp`: slew, timeout, release crossfade, epoch release, no balance on held joints, precedence with TRICK and REFLEX, TELEMETRY |
 | balance | Toy-plant closed loop converges; every sign flip diverges; dead band; saturation; slew. Gain table = legacy `adaptiveParameterArray` = Kilo's EEPROM; mapping vs legacy `adjust()` ≤ 0.07° (grid), controller vs legacy ≤ 1° (0.16°); physical direction vs the posture tables; gating by owner, posture, request, epoch bump, IMU_FAULT |
