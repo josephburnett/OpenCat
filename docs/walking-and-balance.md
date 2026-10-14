@@ -186,9 +186,13 @@ ground" if it also watches pitch.
    survive a misstep or a bump. *Done 2026-10-13* (§3d "Early touchdown",
    SET_GAIT flag `CATCH`, on by default, `kilo walk --no-catch`): at 90°/s
    toward a swinging leg; in the plant normal walking peaks at 40°/s (walk)
-   and 65°/s (trot on a 5° slope) and never triggers, and a 60°/s shove on
-   the trot lands the leg on the falling side and halves the lean (7.3° vs
-   15.5°).
+   and 65°/s (trot on a 5° slope) and never triggers. Since the same day it
+   waits for a second tick over the threshold and lowers the caught foot
+   over a few ticks with its x held; a 60°/s shove on the trot then catches
+   the leg on the falling side late in its swing, and the lean is 12.2° vs
+   15.5° in the plant that counts a foot down on its command, unchanged
+   (19.6°) when the foot must first reach the ground through the servo lag
+   (the earlier 7.3° assumed a caught foot carried the body at once).
 6. **Forward placement and terrain** later, on the same state.
    *Forward placement done 2026-10-13* (§3d "Forward placement", SET_GAIT
    flag `PLACE`, off by default until a floor run compares `kilo walk --place` with the default): at a lift-off the

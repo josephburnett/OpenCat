@@ -739,18 +739,29 @@ the text above:
   that stops a sideways fall on this cat, and on a diagonal the body tips
   with a 90 ms time constant, faster than the balance can act. While the
   gait runs (`GS_RUN`; never during the stop, which puts every foot down
-  anyway), a leg in its swing lands at once when the body tips toward it
-  faster than `touchdown_rate_dps` (spec `[gait]`, 90°/s): its `armed` bit
-  is cleared, so for the rest of that swing `z = H_i` (no further lift) and
-  its `down` bit is set (the balance sees three feet again); the next
-  stance arms it again. Its x keeps the swing's path, on the ground (holding
-  x would need a stored x per leg and a jump at the next stance). Sign (§3f:
+  anyway), a leg in its swing comes down when the body tips toward it
+  faster than `touchdown_rate_dps` (spec `[gait]`, 90°/s) on two ticks in
+  a row (one raw gyro sample may be a footfall or a servo jerk; 1 B,
+  `Gait::tip_last`). Its `armed` bit is cleared and `Gait::caught` keeps πs
+  at the catch in degrees (4 B; 0 = none) until its next lift-off. For the
+  rest of that swing its x is held where it was (`x0 + S·e_c + P·(e_c + ½)`)
+  and its z comes down through the rest of the lift profile from the
+  catch's height (a catch before mid-swing is mirrored to the same height
+  on the way down), at twice the swing's pace (`CATCH_DESCENT`: the joint
+  steps stay within the gait's own, 5.6°/tick WALK, 8.75 CRAWL; 3× hits
+  8.1 and the 10°/tick safety slew), zero speed at the ground; its `down`
+  bit is set once its commanded lift is 0. The stance after it starts
+  there: the placement term carries `P' = P + (S + P)(e_c − ½)`, taken back
+  as `P'·(e + ½)` along that stance, so x never steps more than a stance
+  step (0.6 mm/tick at the defaults; until 2026-10-13 the caught foot was
+  dropped to `H_i` in one tick, 15-18 mm, and then dragged forward along
+  the swing's path while it carried the body). Sign (§3f:
   right side up = +roll, nose down = +pitch): a rising roll is the left
   side dropping, a fall toward the LEFT legs, so a left leg lands on
   `rate_roll > +thr` and a right leg on `rate_roll < −thr`; a front leg on
   `rate_pitch > +thr` (nose dropping), a back leg on `rate_pitch < −thr`.
   The rates are the DMP gyro's (`Attitude`), none with `IMU_FAULT`. Cost:
-  four compares per tick, no RAM (the `armed` bit is the state). Threshold:
+  four compares per tick, one cosine per caught leg, 5 B. Threshold:
   above everything normal walking makes in the host plant (below), with
   room: the WALK's sway reaches 40°/s toward a swinging leg, the CRAWL 14,
   the TROT on a 5° slope at Kp ≈ 1 65°/s (the 2° dead band left by the
@@ -758,13 +769,21 @@ the text above:
   started from about 3° of lean at lift-off, or a shove. Host test
   (`test_gait.cpp`, a plant that falls as an inverted pendulum about the
   diagonal on two feet, and on three when the lean is toward the missing
-  corner): the reflex lands exactly the swinging leg on the side or end
-  tipped toward, within the tick, at its `H_i`, and nothing else; nothing at
-  the threshold, for the other sign, with the flag off, with `IMU_FAULT`,
-  or during the stop; no catch in any pattern with sway at Kp ≈ 1 on a
-  level floor or a 5° slope; a 60°/s shove on the trot's diagonal lands a
-  leg on the side it falls toward first and the lean peaks at 7.3° instead
-  of 15.5° (with the sign flipped the plant falls as far as without). At
+  corner): the reflex catches exactly the swinging leg on the side or end
+  tipped toward, on the second tick over the threshold, where its path was,
+  and nothing else; nothing for a one-tick spike, every other tick over it,
+  at the threshold, for the other sign, with the flag off, with
+  `IMU_FAULT`, or during the stop; caught at mid-swing (WALK, CRAWL) x
+  holds, z falls monotonically, down once there, the next stance starts
+  without a step; no catch in any pattern with sway at Kp ≈ 1 on a level
+  floor or a 5° slope. A 60°/s shove on the trot's diagonal catches a leg
+  on the side it falls toward first, late in its 150 ms swing (the second
+  tick): with the gait's own `down` as the support the lean peaks at 12.2°
+  instead of 15.5°; with a support that waits for the servo-lagged foot
+  (τ 0.15 s) to come within 3 mm of the ground the reflex changes nothing
+  (19.6° both), within 2 mm the body falls over without it and leans 39°
+  with it. (The 7.3° measured before 2026-10-13 came from a foot that was
+  down, and carried the body, on the tick of the catch.) At
   the default Kp 0.5 a 5° slope leaves 3.5° of lean, which the trot's
   diagonal grows to 11.7° at 121°/s: the reflex fires there, which is
   right (that is a fall). The vbody simulator accepts the flag but does not
@@ -798,7 +817,12 @@ the text above:
   exactly `place_i` at touchdown and back on its path by the next lift-off,
   the other feet untouched; the clamp both ways; nothing with the flag off,
   with `IMU_FAULT`, during the stop, or for a leg caught at its lift-off; a
-  leg caught mid-swing keeps its shift (no jump).
+  leg caught mid-swing keeps its shift (no jump). The shift is scaled by
+  the start/stop ramp (`amp`), like the stride: a stop shorter than a
+  period (one before the start ramp finished) leaves legs that never lift
+  during it with their shifts, and at amp 0 they no longer move the feet,
+  so the hand-over to STANCE moves nothing (0.75 mm before); `place` and
+  `caught` are cleared at the hand-over and at the start.
   No false action: normal walking with sway, catch and placement on a level
   floor and 5° slopes (the stance-aware plant's rates) shifts at most
   1.25 mm (WALK), 0.25 (TROT), 0.75 (CRAWL). **Finding**: in a capture plant
@@ -1041,13 +1065,24 @@ the controller unchanged:
   settle 2 ticks): on a 5° slope at Kp 0.5 the TROT's largest lean per
   step is 12.9° with no hold-over, 12.0° with 1 tick, 11.65° with 2 and
   11.6° with 3 to 6; with no hold at all the roll correction swings
-  −7.3..−2.4° every step instead of holding −3.3°. Host test: on a trot
+  −7.3..−2.4° every step instead of holding −3.3°. Re-measured 2026-10-13
+  on the host test's 10° → 14° trot (largest lean): 13.1° with no
+  hold-over, 12.8 with 1, 12.9 with 2, 12.8 with 3, 14.4 with 4, 20.8 with
+  6; with the support waiting for the servo-lagged foot (within 3 mm) 14.5,
+  15.8, 15.9, 16.1, 17.9, 19.2, and within 2 mm the trot falls whatever the
+  hold. Kept at 2: the lagged plant prefers none by 1.4°, the gait's own
+  support prefers 1-3 by 0.3°, and the lagged plant also tips the WALK as
+  tuned to 23° on a level floor, so it is not the one to tune by. Host test: on a trot
   the corrections never change on a held tick and do on the others; a
   10° slope tilting to 14° under a trot is taken up on four feet and the
   body is level within 2.65° at every lift-off; STANCE is never held.
 
 The stance-aware plant (`test_gait.cpp`): the support is the gait's
-`down`; on four feet the body lies on their plane, on three on the plane
+`down` (optionally, the lagged support: a down foot counts only once its
+commanded lift, through the 150 ms servo lag, is within `ground` mm; the
+early-touchdown shove runs both; at 2 mm the WALK as tuned leans 23° on a
+level floor, twice its plan, and the TROT on a 10° slope falls: a finding
+not yet acted on); on four feet the body lies on their plane, on three on the plane
 through them, reached through the 150 ms servo lag; on a diagonal pair, or
 on three feet leaning toward the missing corner past a margin, it is an
 inverted pendulum about the diagonal (roll, τ = 90 ms, exact per tick),
@@ -1396,7 +1431,9 @@ Kilo's paint read 238 B free while walking (293 B used): the static bound is
 1519 B globals (+2 B: the I2C budget), stack 302 B, margin 227 B. **With
 the sway's lead and forward placement** (2026-10-13, from 27894 B / 1525 B
 / 214 B): 28224 B flash, 1531 B globals (+6 B: `Gait::lead`, `place[4]`),
-stack 309 B, margin 208 B. RAM is the tight resource. If needed, shrink in this order:
+stack 309 B, margin 208 B. **With the early touchdown's second tick, held
+x and profile descent** (2026-10-13): 28756 B flash, 1536 B globals (+5 B:
+`Gait::caught[4]`, `tip_last`), stack 315 B, margin 197 B. RAM is the tight resource. If needed, shrink in this order:
 1. keyframe store 32 → 24 frames (−112 B; the first-version library's
    largest trick has 6 frames, HELLO reports the capacity to the mind).
    **Done** with the fall reflex and head layer (above);

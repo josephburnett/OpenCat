@@ -69,17 +69,26 @@
 // cat (the legs move only fore-aft), and on a diagonal the body tips with a
 // 90 ms time constant, faster than the balance loop can act. So while the
 // gait runs (GS_RUN only: the stop puts every foot down anyway), a leg in
-// its swing lands at once when the body tips toward it faster than
-// KILO_GAIT_TOUCHDOWN_RATE_DPS: its armed bit is cleared, so for the rest
-// of this swing z = H_i (no further lift) and its down bit is set; the
-// next stance arms it again. Its x keeps the swing's path (on the ground:
-// holding x would need a stored x per leg and a jump at the next stance).
-// Sign (§3f: RIGHT side up = +roll, nose DOWN = +pitch): roll increasing
+// its swing comes down when the body tips toward it faster than
+// KILO_GAIT_TOUCHDOWN_RATE_DPS on two ticks in a row (tip_last: one raw
+// gyro sample may be a footfall or a servo jerk). Its armed bit is cleared
+// and caught[i] keeps pi s at the catch (whole degrees, rounded down, >= 1)
+// until its next lift-off. For the rest of the swing its x is held where it
+// was (x0 + S e_c + P (e_c + 1/2), e_c the stride fraction at the catch: it
+// carries the body now, so it must not travel with the swing) and z comes
+// down through the rest of the lift profile from the catch's height (a
+// catch before mid-swing mirrored to the same height on the way down) at
+// CATCH_DESCENT (2) x the swing's pace, zero speed at the ground; its down
+// bit is set once the lift is 0. The stance after it starts where the foot
+// is: as the touchdown x0 + S/2 + P' with P' = P + (S + P)(e_c - 1/2) in
+// the placement term below, which the stance takes back as P' (e + 1/2).
+// The next stance arms it again. Sign (§3f: RIGHT side up = +roll, nose DOWN = +pitch): roll increasing
 // means the right side rises and the left side drops, so the body falls
 // toward the LEFT legs: a left leg lands on rate_roll > +thr, a right leg
 // on rate_roll < -thr. Pitch increasing is the nose dropping: a front leg
 // lands on rate_pitch > +thr, a back leg on rate_pitch < -thr. One compare
-// per axis per tick; the test is the plant in test_gait.cpp ("catch").
+// per axis per tick, one cosine per caught leg; the test is the plant in
+// test_gait.cpp ("catch").
 //
 // Forward placement (SET_GAIT flag PLACE; docs/walking-and-balance.md §4,
 // the capture point): the legs move fore-aft, so a fall forward or back is
@@ -92,7 +101,10 @@
 // lift-off, all of it at touchdown) and place_i * (1 - s) in the following
 // stance (the shift decays along the stance path, so the next lift-off is
 // where it would be anyway). Both are place_i * (e + 1/2), e the stride
-// fraction below: one multiply per leg. K (KILO_GAIT_CAPTURE_MM_PER_RAD_S,
+// fraction below: one multiply per leg, scaled by the ramp (amp) like the
+// stride, so a stop that ends before a leg lifts again leaves nothing at
+// amp 0 (the hand-over to STANCE does not move the foot); place and caught
+// are cleared at the hand-over and at the start. K (KILO_GAIT_CAPTURE_MM_PER_RAD_S,
 // 7): a body falling as an inverted pendulum of height h ~ 80 mm with time
 // constant tau = sqrt(h/g) ~ 90 ms is caught where its capture point is,
 // tau * v ahead of the centre of mass, v = h * pitch_rate: tau * h = 7 mm
@@ -149,6 +161,8 @@ struct Gait {
   uint16_t phi, dphi, amp;  // phase; per tick; start/stop ramp (65535 = full stride)
   uint16_t lead;            // the sway's lead, phase units (dphi * GAIT_SWAY_LEAD_Q6 >> 6, per goal)
   int8_t place[4];          // PLACE: each leg's touchdown shift, q2, set at its lift-off
+  uint8_t caught[4];        // CATCH: pi s at the leg's catch, deg (1..179; 0 = none), until its next lift-off
+  uint8_t tip_last;         // CATCH: last tick's over-threshold bits (as armed)
   uint8_t duty;             // slewed, /256
   int16_t stride, turn, step, h;  // slewed, q2 (h is also STANCE's height)
   int16_t leg[8];  // this tick's OpenCat angles, a16: shoulders LF RF RB LB, knees LF RF RB LB
