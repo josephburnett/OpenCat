@@ -24,6 +24,7 @@ static const PatRow PAT[KILO_GAIT_PATTERN_COUNT] PROGMEM = KILO_GAIT_PATTERN_TAB
 #define SLEW_Q2 2      // 0.5 mm per tick: stride, turn, step and body height
 #define SLEW_POSE 8    // 0.5 deg per tick
 #define POSE_MAX 480   // +-30 deg
+#define CATCH_DESCENT 2  // a caught leg's descent: x the swing's own pace (gait.h)
 
 static inline uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
@@ -86,7 +87,9 @@ void gait_start(Gait& g) {
   g.pat = g.pattern;
   g.phi = g.amp = 0;
   g.armed = 0;
+  g.tip_last = 0;
   memset(g.place, 0, sizeof g.place);
+  memset(g.caught, 0, sizeof g.caught);
   // The stride starts from the goal: the ramp (amp) brings it in. The body
   // height slews from STANCE's to the goal's.
   g.duty = duty_goal(g);
@@ -104,6 +107,11 @@ bool gait_step(Gait& g) {
   if (g.state == GS_LAND) {
     if (!g.armed) {  // every foot is down: hand back to IDLE STANCE
       g.state = GS_OFF;
+      // (A stop shorter than a period leaves the shifts of legs that did not
+      // lift during it; they no longer move the feet at amp 0, and none may
+      // outlive this gait.)
+      memset(g.place, 0, sizeof g.place);
+      memset(g.caught, 0, sizeof g.caught);
       return true;
     }
   } else if (g.run && g.pattern == g.pat) {  // run (or resume a stop)
@@ -136,6 +144,8 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
   bool run = g.state != GS_OFF;
   // Early touchdown (gait.h): the legs on the side (end) the body tips
   // toward, bits as armed (LF RF RB LB; left = LF LB 0x9, front = LF RF 0x3).
+  // Over the threshold on this tick and the last for the same leg (one raw
+  // sample may be an impact or a servo jerk).
   uint8_t tip = 0;
   if (att && g.state == GS_RUN && (g.flags & KILO_GAIT_FLAGS_CATCH)) {
     if (att->rate_roll > GAIT_TOUCHDOWN_A16S) tip = 0x9;
@@ -143,6 +153,9 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
     if (att->rate_pitch > GAIT_TOUCHDOWN_A16S) tip |= 0x3;
     if (att->rate_pitch < -GAIT_TOUCHDOWN_A16S) tip |= 0xC;
   }
+  uint8_t tip2 = (uint8_t)(tip & g.tip_last);
+  g.tip_last = tip;
+  tip = tip2;
   // Forward placement (gait.h): the shift a leg lifting this tick takes.
   int16_t cap = 0;
   if (att && g.state == GS_RUN && (g.flags & KILO_GAIT_FLAGS_PLACE)) {
@@ -175,8 +188,10 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
       int16_t d = (int16_t)(leg_phase(g, leg) - mid);
       uint16_t ad = d < 0 ? (uint16_t)(0u - (uint16_t)d) : (uint16_t)d;
       if (ad > hw) continue;
-      // ad * k <= hw * k ~ 1.5 * 2^16 * 1920: < 2^28.
-      int16_t w = (int16_t)((Q14_ONE + fx_cos((int16_t)(((uint32_t)ad * k) >> 16))) >> 7);
+      // ad * k <= hw * k ~ 1.5 * 2^16 * 1920: < 2^28. The sum in int32_t: on
+      // the AVR int is 16 bits and 16384 + fx_cos(0) = 32768 would wrap to
+      // -32768 (w = -256 for one tick at the window's centre).
+      int16_t w = (int16_t)(((int32_t)Q14_ONE + fx_cos((int16_t)(((uint32_t)ad * k) >> 16))) >> 7);
       sr = (int16_t)(sr + (leg_left(leg) ? -w : w));
       sp = (int16_t)(sp + (leg_front(leg) ? -w : w));
     }
@@ -194,6 +209,8 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
   int16_t dz_p = (int16_t)(((int32_t)PARAM(LEG_LB_MM) * 2 * fx_sin(pitch) + 8192) >> 14);
   int16_t dz_r = (int16_t)(((int32_t)PARAM(LEG_W_MM) * 2 * fx_sin(roll) + 8192) >> 14);
   int16_t base = (int16_t)(g.h + g.dh * 4);
+  // The ramp as a factor /256 (256 at full stride) for the placement shift.
+  int16_t amp8 = (int16_t)(((uint32_t)g.amp + 1) >> 8);
   uint8_t down = 0xF;
   for (uint8_t leg = 0; leg < 4; leg++) {
     bool left = leg_left(leg);
@@ -205,6 +222,7 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
       s_i = (s_i * g.amp + 32768) >> 16;  // the start/stop ramp (rounded: left = -right)
       uint8_t bit = (uint8_t)(1u << leg);
       int32_t e;  // Q14: the foot's place in its stride, -1/2 (back) .. +1/2 (front)
+      int16_t lift = 0;  // q2, up from H_i
       if (p < b16) {
         e = 8192 - (int32_t)(((uint32_t)p * inv_st) >> 16);  // 1/2 - s
         // A foot in stance may lift at its next swing; while landing, none
@@ -215,29 +233,66 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
           g.armed |= bit;
       } else {
         int16_t a = (int16_t)((((uint32_t)(p - b16) * inv_sw) >> 16) * A16_180 >> 14);  // pi s
-        e = (Q14_ONE - fx_cos(a)) / 2 - 8192;  // (1 - cos pi s)/2 - 1/2
-        // Lift h (1 - cos 2 pi s)/2: zero vertical speed at lift-off and
-        // touchdown, the full height at mid-swing (§3d writes h sin pi s,
-        // whose vertical speed is largest at lift-off; see gait.h). Tipping
-        // toward this leg: down now, for the rest of the swing.
-        if (tip & bit) g.armed &= (uint8_t)~bit;
-        // Lift-off (armed, on the ground last tick): this swing's placement.
-        // A swing that does not lift (never armed, or caught on this tick)
-        // gets none, set on its first tick; a leg caught later in its swing
-        // keeps its shift (dropping it would jump the foot).
-        if ((g.down & bit) && ((g.armed & bit) || (uint16_t)(p - b16) < g.dphi))
-          g.place[leg] = (int8_t)((g.armed & bit) ? cap : 0);
-        if (g.armed & bit) {
-          z = (int16_t)(z - (((int32_t)g.step * (Q14_ONE - fx_cos((int16_t)(2 * a)))) >> 15));
-          down &= (uint8_t)~bit;  // armed in swing: in the air
+        // (1 - cos pi s)/2 - 1/2. In int32_t: on the AVR 16384 - fx_cos(a)
+        // with cos = -1 (a = 180 deg, the last swing tick) is 32768, which
+        // would wrap to -32768 in a 16-bit int (the foot two strides back).
+        e = ((int32_t)Q14_ONE - fx_cos(a)) / 2 - 8192;
+        // Lift-off (armed, on the ground last tick): this swing's placement,
+        // and the last catch is forgotten. A swing that does not lift (never
+        // armed, or caught on this tick) gets no shift, set on its first
+        // tick; a leg caught later in its swing keeps its shift (dropping it
+        // would jump the foot).
+        if ((g.down & bit) && ((g.armed & bit) || (uint16_t)(p - b16) < g.dphi)) {
+          g.place[leg] = (int8_t)((g.armed & bit) && !(tip & bit) ? cap : 0);
+          g.caught[leg] = 0;
         }
+        // Tipping toward this leg in its swing: it comes down now (gait.h),
+        // from where it is: pi s at the catch kept in degrees (>= 1: 0 = not
+        // caught), rounded down so the foot never passes this tick's place.
+        if ((tip & bit) && (g.armed & bit)) {
+          g.armed &= (uint8_t)~bit;
+          g.caught[leg] = (uint8_t)(a >= 16 ? a >> 4 : 1);
+        }
+        int16_t a2 = a;  // the angle of the lift profile
+        if (g.caught[leg]) {
+          // The rest of the lift profile's descent from the catch's height:
+          // a_c below 90 deg is mirrored to 180 - a_c (the same height on
+          // the way down), then the profile runs on at CATCH_DESCENT x the
+          // swing's own pace, to zero speed at the ground.
+          int16_t ac = (int16_t)(g.caught[leg] << 4);
+          a2 = (int16_t)((ac < A16_90 ? A16_180 - ac : ac) + CATCH_DESCENT * (a - ac));
+        }
+        if ((g.armed & bit) || (g.caught[leg] && a2 < A16_180)) {
+          // Lift h (1 - cos 2 pi s)/2: zero vertical speed at lift-off and
+          // touchdown, the full height at mid-swing (§3d writes h sin pi s,
+          // whose vertical speed is largest at lift-off; see gait.h).
+          // (1 - cos 2a) in int32_t: at mid-swing cos = -1 and 16384 + 16384
+          // would wrap to -32768 in the AVR's 16-bit int (the foot pushed
+          // down by a full step instead of lifted).
+          lift = (int16_t)(((int32_t)g.step * ((int32_t)Q14_ONE - fx_cos((int16_t)(2 * a2)))) >> 15);
+          // In the air: armed in swing, or caught and not down yet.
+          if ((g.armed & bit) || lift > 0) down &= (uint8_t)~bit;
+        }
+        if (g.caught[leg]) e = 8192;  // caught: x held, as at the next touchdown (below)
       }
+      z = (int16_t)(z - lift);
       x = (int16_t)(x + ((s_i * e) >> 14));
       // Placement: place (e + 1/2), i.e. (1 - cos pi s)/2 in the swing and
-      // 1 - s in the stance after it.
+      // 1 - s in the stance after it, scaled by the ramp (so a stop, which
+      // may end before a leg lifts again, leaves nothing at amp 0). A leg
+      // caught at e_c holds x = x0 + S e_c + P (e_c + 1/2) for the rest of
+      // its swing, and the stance after it starts there: both are the
+      // touchdown's x0 + S/2 + P' with P' = P + (S + P)(e_c - 1/2), taken
+      // back as P' (e + 1/2) along that stance. Q8 q2; the products in
+      // Q12 so they stay below 2^31.
+      int32_t p8 = (int32_t)g.place[leg] * amp8;
+      if (g.caught[leg]) {
+        int32_t ec = ((int32_t)Q14_ONE - fx_cos((int16_t)(g.caught[leg] << 4))) / 2 - 8192;  // (int32_t: as e)
+        p8 += ((s_i * 256 + p8) * ((ec - 8192) >> 2)) >> 12;
+      }
       // (Rounded: a floor would put a negative shift's first and last
       // quarter-millimetre in at once.)
-      if (g.place[leg]) x = (int16_t)(x + ((g.place[leg] * (e + 8192) + 8192) >> 14));
+      if (p8) x = (int16_t)(x + ((p8 * ((e + 8192) >> 2) + 524288) >> 20));
     }
     ik_leg(leg, x, z, &g.leg[leg], &g.leg[4 + leg]);
   }
