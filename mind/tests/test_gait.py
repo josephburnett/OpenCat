@@ -76,19 +76,19 @@ def test_gait_flags_for_older_body():
 def test_gait_fields_defaults_per_pattern():
     c = _client()
     assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 600, "duty": 192, "stride_mm": 25,
-                               "turn_mm": 0, "step_h_mm": 8, "body_h_mm": 80, "flags": 55}
+                               "turn_mm": 0, "step_h_mm": 8, "body_h_mm": 80, "flags": 23}
     w = c.gait_fields(pattern="walk")
     assert (w["pattern"], w["period_ms"], w["duty"], w["stride_mm"], w["step_h_mm"]) == (0, 2000, 192, 30, 15)
-    assert w["flags"] == 63  # bob, wag, balance, sway (on by default for walk and crawl), catch, place
-    assert c.gait_fields(pattern="walk", sway=False)["flags"] == 55
-    assert c.gait_fields(pattern="trot", sway=True)["flags"] == 63
-    assert c.gait_fields(pattern="trot", catch=False)["flags"] == 39  # catch: on for every pattern by default
-    assert c.gait_fields(pattern="trot", place=False)["flags"] == 23  # place: likewise
-    assert c.gait_fields(pattern="trot", catch=False, place=False)["flags"] == 7
+    assert w["flags"] == 31  # bob, wag, balance, sway (on by default for walk and crawl), catch
+    assert c.gait_fields(pattern="walk", sway=False)["flags"] == 23
+    assert c.gait_fields(pattern="trot", sway=True)["flags"] == 31
+    assert c.gait_fields(pattern="trot", catch=False)["flags"] == 7  # catch: on for every pattern by default
+    assert c.gait_fields(pattern="trot", place=True)["flags"] == 55  # place: off by default (no floor evidence yet)
+    assert c.gait_fields(pattern="trot", catch=False, place=True)["flags"] == 39
     cr = c.gait_fields(pattern="crawl", bob=False, wag=False)
-    assert (cr["pattern"], cr["period_ms"], cr["duty"], cr["body_h_mm"], cr["flags"]) == (2, 2000, 218, 70, 60)
+    assert (cr["pattern"], cr["period_ms"], cr["duty"], cr["body_h_mm"], cr["flags"]) == (2, 2000, 218, 70, 28)
     assert _client((60, 70)).gait_fields(pattern="crawl")["body_h_mm"] == 91  # 0.7 x 130
-    assert c.gait_fields(stride_mm=-20, turn_mm=10, period_ms=600, run=False, balance=False)["flags"] == 51
+    assert c.gait_fields(stride_mm=-20, turn_mm=10, period_ms=600, run=False, balance=False)["flags"] == 19
     for bad in ({"stride_mm": 61}, {"turn_mm": -41}, {"period_ms": 299}, {"duty": 231}, {"step_h_mm": 41},
                 {"body_h_mm": 256}, {"body_h_mm": 0}, {"pattern": "gallop"}, {"pattern": 3}):
         with pytest.raises(ValueError):
@@ -579,9 +579,9 @@ def test_walk_fields_speed_and_overrides():
     # the early-touchdown reflex: on unless --no-catch
     assert walk_fields(parse_args(["walk"]))[1]["catch"] is True
     assert walk_fields(parse_args(["walk", "--no-catch"]))[1]["catch"] is False
-    # forward placement: on unless --no-place
-    assert walk_fields(parse_args(["walk"]))[1]["place"] is True
-    assert walk_fields(parse_args(["walk", "--no-place"]))[1]["place"] is False
+    # forward placement: off unless --place
+    assert walk_fields(parse_args(["walk"]))[1]["place"] is False
+    assert walk_fields(parse_args(["walk", "--place"]))[1]["place"] is True
 
 
 def _kilo(path, *args, timeout=20):

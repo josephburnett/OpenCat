@@ -169,7 +169,7 @@ every walk.
 ```sh
 kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--speed MM_S] [--stride MM]
           [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
-          [--no-sway] [--no-catch] [--no-place]
+          [--no-sway] [--no-catch] [--place]
           [--for S] [--wait S]
 kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]
 kilo posture stance          # the IK standing posture the gait starts from and hands over to
@@ -210,7 +210,7 @@ three feet that stay down) for walk and crawl (the trot has none), and
 catch for every pattern (early touchdown: a swinging leg lands at once when
 the body tips toward it faster than 90°/s; `--no-catch`) and place
 for every pattern (forward placement: a lifting leg lands up to 3 mm ahead
-or behind, 7 mm per rad/s of pitch rate; `--no-place`). Out-of-range values are refused before anything is sent (the
+or behind, 7 mm per rad/s of pitch rate; off by default, `--place` turns it on). Out-of-range values are refused before anything is sent (the
 ranges are the spec's). The body moves to STANCE first from any other
 posture; a walk replaces the posture goal (like a trick). The command exits
 with status 1 if the body refuses SET_GAIT (printed with a hint: UNKNOWN_TYPE

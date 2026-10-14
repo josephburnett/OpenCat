@@ -456,7 +456,7 @@ class RemoteBody:
              period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
              body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
              balance: bool = True, sway: bool | None = None, catch: bool = True,
-             place: bool = True) -> dict[str, int]:
+             place: bool = False) -> dict[str, int]:
         return self.conn.call("walk", stride_mm=stride_mm, turn_mm=turn_mm, pattern=pattern, period_ms=period_ms,
                               duty=duty, step_h_mm=step_h_mm, body_h_mm=body_h_mm, bob=bob, wag=wag,
                               balance=balance, sway=sway, catch=catch, place=place, override=self.override)

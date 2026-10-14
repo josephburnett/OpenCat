@@ -191,7 +191,7 @@ ground" if it also watches pitch.
    15.5°).
 6. **Forward placement and terrain** later, on the same state.
    *Forward placement done 2026-10-13* (§3d "Forward placement", SET_GAIT
-   flag `PLACE`, on by default, `kilo walk --no-place`): at a lift-off the
+   flag `PLACE`, off by default until a floor run compares `kilo walk --place` with the default): at a lift-off the
    leg's touchdown moves 7 mm per rad/s of pitch rate (τ·h), forward on a
    nose-down rate, clamped to 3 mm (the trot's 150 ms swing has no more
    slew to give). In a capture plant with a rigid stance it neither helps

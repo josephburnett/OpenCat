@@ -69,7 +69,7 @@ GAIT_PATTERN_CHOICES = tuple(consts.GAIT_PATTERNS)  # walk, trot, crawl (spec en
 # reporting an older minor in HELLO refuses unknown bits (BAD_ARG), so walk()
 # drops them for it: the mind can be updated before the body is flashed and
 # still walk, without the newer features (gait_flags_for()).
-GAIT_FLAG_SINCE_MINOR: dict[str, int] = {"SWAY": 5, "CATCH": 5}
+GAIT_FLAG_SINCE_MINOR: dict[str, int] = {"SWAY": 5, "CATCH": 5, "PLACE": 5}
 
 
 def gait_flags_for(flags: int, proto_minor: int | None) -> int:
@@ -451,14 +451,16 @@ class BodyClient:
                     period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
                     body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
                     balance: bool = True, run: bool = True, sway: bool | None = None,
-                    catch: bool = True, place: bool = True) -> dict[str, int]:
+                    catch: bool = True, place: bool = False) -> dict[str, int]:
         """SET_GAIT's wire fields (no epoch) with the §3d defaults of ``pattern``
         for every field left None. ``sway`` None: on for walk and crawl (one
         leg at a time: the body leans toward the three feet that stay down),
         off for the trot (its diagonal pairs cancel: no sway either way).
         ``catch``: the early-touchdown reflex (a swinging leg lands at once
         when the body tips toward it), on for every pattern. ``place``:
-        forward placement (a lifting leg lands ahead or behind by the pitch
+        forward placement, off by default until a floor run shows it helps
+        (the host plant could not: three or four feet stop a shove before any
+        leg lifts; docs/walking-and-balance.md): a lifting leg lands ahead or behind by the pitch
         rate, the capture point), on for every pattern.
         ValueError outside the spec ranges."""
         name = self.pattern_name(pattern)
@@ -486,7 +488,7 @@ class BodyClient:
              period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
              body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
              balance: bool = True, sway: bool | None = None, catch: bool = True,
-             place: bool = True) -> dict[str, int]:
+             place: bool = False) -> dict[str, int]:
         """Latch SET_GAIT run=1: walk with ``pattern`` (walk, trot, crawl),
         ``stride_mm`` (signed, + = forward) and ``turn_mm`` (+ = left; with
         stride 0 Kilo turns in place). Fields left None take the §3d defaults
