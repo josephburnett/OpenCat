@@ -48,7 +48,7 @@ cd ~/OpenCat
 git pull                                   # the branch with P2
 export PATH="$HOME/OpenCat/.venv/bin:$PATH" KILO_PORT=/dev/ttyACM0
 ~/OpenCat/.venv/bin/pip install -e mind
-systemctl --user stop kilo 2>/dev/null     # these steps open the port directly
+sudo -n systemctl stop kilo.service        # these steps open the port directly (system service since 2026-10-12)
 body/tools/host_tests.sh                   # ends "host tests: ALL PASSED"
 kilo -v flash
 kilo status                                # uptime keeps counting, config OK

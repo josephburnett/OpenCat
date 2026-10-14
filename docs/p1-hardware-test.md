@@ -39,7 +39,7 @@ cd ~/OpenCat
 git pull                                   # the branch with the balance layer
 export PATH="$HOME/OpenCat/.venv/bin:$PATH" KILO_PORT=/dev/ttyACM0
 ~/OpenCat/.venv/bin/pip install -e mind    # picks up the new `kilo balance`
-systemctl --user stop kilo 2>/dev/null     # if the daemon is installed: these steps run direct
+sudo -n systemctl stop kilo.service        # if the daemon is installed: these steps run direct
 ```
 
 With the daemon stopped every `kilo` command opens the port itself, as these
@@ -553,7 +553,7 @@ keys to actions (`mind/README.md` has the map). Point the remote at the
 NyBoard's receiver from about 1 m. Take your time at each step; answer when
 you are done.
 
-1. **Rendering, daemon stopped.** `systemctl --user stop kilo`, then
+1. **Rendering, daemon stopped.** `sudo -n systemctl stop kilo.service`, then
    `kilo monitor --passive`. Press each of the 21 keys once. Expected, one
    line per press, for example:
 
@@ -572,7 +572,7 @@ you are done.
    follows your hand while you press keys now and then.
 4. **Through the daemon.** `kilo run --remote` in terminal A (or add
    `--remote` to `KILO_RUN_ARGS` in `~/.config/kilo/env` and
-   `systemctl --user restart kilo`; its log is `~/kilo-logs/daemon.log`).
+   `sudo -n systemctl restart kilo.service`; its log is `~/kilo-logs/daemon.log`).
    Press, waiting for each move to finish: `>>|` (stand), `2` (sit),
    `CH-` (rest), `-` (limp), `>>|` (stand), `CH+` (balance on: tilt the
    board, the legs correct; `CH+` again: off), `3` stretch, `4` hi, `5`

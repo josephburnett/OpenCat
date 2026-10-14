@@ -34,27 +34,30 @@ mind/README.md "Daemon and systemd". On the Pi (joe, mind venv in
 `~/OpenCat/.venv`, see mind/README.md "Install on the Pi"):
 
 ```sh
-sudo usermod -aG dialout joe               # once; log out and in
 cd ~/OpenCat && git pull
-mind/systemd/install.sh                    # user unit, ~/.config/kilo/env, lingering, enable (not started)
-nano ~/.config/kilo/env                    # KILO_PORT=/dev/ttyACM0 for now
-systemctl --user start kilo                # or: mind/systemd/install.sh --start
-kilo daemon                                # pid, port, clients
-kilo status                                # goes through the daemon
-journalctl --user -u kilo -f               # its log; frame logs in ~/kilo-logs
-systemctl --user stop kilo                 # before the hardware-test docs (they run direct)
+sudo mind/systemd/install.sh --system --start   # once: /etc/systemd/system/kilo.service, /etc/sudoers.d/kilo, ~/.config/kilo/env
+nano ~/.config/kilo/env                         # KILO_PORT=/dev/ttyACM0 for now
+kilo daemon                                     # pid, port, clients
+kilo status                                     # goes through the daemon
+journalctl -u kilo -f                           # its log; daemon.log and frame logs in ~/kilo-logs
+mind/systemd/update.sh [--flash]                # day to day: git pull, pip, restart (and flash)
+sudo -n systemctl stop kilo.service             # before the hardware-test docs that open the port directly
 ```
 
-- It is a **user service** (`~/.config/systemd/user/kilo.service`) with
-  lingering (`loginctl enable-linger joe`, done by install.sh) so it starts at
-  boot without a login: no sudo to manage it, joe's groups and venv, and the
-  socket lands in `/run/user/1000/kilo/kilo.sock`, which joe's shells find
-  without configuration.
+- It is a **system service** since 2026-10-12 (`/etc/systemd/system/kilo.service`,
+  `User=joe`, `Group=dialout`, `RequiresMountsFor=/home/joe`), started at
+  boot before the network (the daemon is up about 22 s after power, docs/setup.md
+  "The daemon as a system service, and boot time"). The socket is
+  `/run/kilo/kilo.sock`. `/etc/sudoers.d/kilo` lets joe run
+  `systemctl restart|start|stop kilo.service` without a password, which is
+  what `update.sh` uses; the `.service` suffix is part of the rule. (Until
+  2026-10-12 it was a user unit with lingering; `install.sh` without
+  `--system` still installs that form.)
 - **Port.** `/dev/ttyACM0` (the CH343 adapter in one of the Pi's USB ports)
   for now; `/dev/ttyAMA0` (the PL011 on the header) once the Pi sits on the
   NyBoard. Set it in `~/.config/kilo/env`; never both at once (they share the
   328P's RX line).
-- `systemctl --user stop kilo` (SIGTERM) drops the goals and goes silent: the
+- `sudo -n systemctl stop kilo.service` (SIGTERM) drops the goals and goes silent: the
   body's watchdog takes over (stop, REST, LIMP) before the port closes.
 - `kilo flash` works with the service running: it asks the daemon to release
   the port for avrdude and to reacquire it afterwards.
