@@ -30,7 +30,7 @@ extern "C" {
 
 /* ---- Versions and link constants ---- */
 #define KILO_PROTO_MAJOR 1u
-#define KILO_PROTO_MINOR 4u
+#define KILO_PROTO_MINOR 5u
 #define KILO_BAUD 250000UL
 #define KILO_MAX_PAYLOAD 60u
 #define KILO_HEADER_BYTES 2u

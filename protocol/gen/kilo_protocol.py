@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, ClassVar
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 4
+PROTO_MINOR = 5
 BAUD = 250000
 MAX_PAYLOAD = 60
 HEADER_BYTES = 2

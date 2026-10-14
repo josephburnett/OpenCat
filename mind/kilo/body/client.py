@@ -65,6 +65,22 @@ GAIT_DEFAULTS: dict[str, dict[str, float]] = {
     for d in P.GAIT_PATTERN_DEFAULTS.values()
 }
 GAIT_PATTERN_CHOICES = tuple(consts.GAIT_PATTERNS)  # walk, trot, crawl (spec enum gait_pattern)
+# SET_GAIT flag bits by the protocol minor that introduced them. A body
+# reporting an older minor in HELLO refuses unknown bits (BAD_ARG), so walk()
+# drops them for it: the mind can be updated before the body is flashed and
+# still walk, without the newer features (gait_flags_for()).
+GAIT_FLAG_SINCE_MINOR: dict[str, int] = {"SWAY": 5, "CATCH": 5}
+
+
+def gait_flags_for(flags: int, proto_minor: int | None) -> int:
+    """``flags`` with the bits the body's protocol minor does not know cleared
+    (None: unknown body, all bits kept)."""
+    if proto_minor is None:
+        return flags
+    for name, since in GAIT_FLAG_SINCE_MINOR.items():
+        if proto_minor < since:
+            flags &= ~int(getattr(P.GaitFlags, name))
+    return flags
 DEFAULT_PATTERN = "trot"
 DEFAULT_TURN_MM = 20     # `kilo walk left|right` and the remote's turn keys (turn in place)
 GAIT_STOP_MARGIN_S = 1.5  # wait_gait_stopped(): one period of ramp-down, the hand-over, and this
@@ -489,6 +505,9 @@ class BodyClient:
         fields = self.gait_fields(stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm, body_h_mm, bob, wag,
                                   balance, sway=sway, catch=catch)
         self._check_drivable()
+        hello = self.state.hello
+        if hello is not None and hello.proto_major == P.PROTO_MAJOR:
+            fields["flags"] = gait_flags_for(fields["flags"], hello.proto_minor)
         self.link.clear_goal("SET_POSTURE")
         self.link.set_goal("SET_GAIT", **fields)
         self._gait_fields = dict(fields)

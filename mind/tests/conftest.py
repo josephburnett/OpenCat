@@ -11,6 +11,7 @@ from typing import Any, Callable
 import pytest
 
 from kilo.link.codec import DecodeError, Frame, KiloCodec
+from kilo.protocol import kilo_protocol as P
 from kilo.link.messages import KiloMessages
 from kilo.link.serial_link import LinkConfig, SerialLink
 from kilo.link.transport import loopback_pair
@@ -94,8 +95,11 @@ class Peer:
         f.update(kw)
         self.send("TELEMETRY", **f)
 
-    def hello(self, epoch: int = 0, reset_cause: int = 0, proto_major: int = 1) -> None:
-        self.send("HELLO", proto_major=proto_major, proto_minor=0, fw_build=0xABCD, reset_cause=reset_cause,
+    def hello(self, epoch: int = 0, reset_cause: int = 0, proto_major: int = 1,
+              proto_minor: int | None = None) -> None:
+        if proto_minor is None:
+            proto_minor = P.PROTO_MINOR  # the body of today; older minors lose the newer SET_GAIT flag bits
+        self.send("HELLO", proto_major=proto_major, proto_minor=proto_minor, fw_build=0xABCD, reset_cause=reset_cause,
                   last_alive_tick=0, caps=0, max_payload=60, trick_capacity=32, joint_count=11,
                   config_state=0, epoch=epoch)
 

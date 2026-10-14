@@ -36,7 +36,7 @@
 
 [meta]
 proto_major = 1
-proto_minor = 4
+proto_minor = 5                # 1.5 (2026-10-13): SET_GAIT flags SWAY, CATCH; TELEMETRY flag BALANCE_HELD; [gait] sway/touchdown constants
 
 # ---------------------------------------------------------------------------
 [link]

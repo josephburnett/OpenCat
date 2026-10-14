@@ -62,6 +62,17 @@ def _client(leg=(50, 50)):
     return c
 
 
+def test_gait_flags_for_older_body():
+    """A body on protocol 1.4 does not know SWAY (8) or CATCH (16) and would refuse
+    them (BAD_ARG): walk() drops them for it, keeps them for 1.5, keeps all for
+    an unknown body."""
+    from kilo.body.client import gait_flags_for
+    assert gait_flags_for(31, 4) == 7
+    assert gait_flags_for(31, 5) == 31
+    assert gait_flags_for(31, None) == 31
+    assert gait_flags_for(7, 0) == 7
+
+
 def test_gait_fields_defaults_per_pattern():
     c = _client()
     assert c.gait_fields() == {"run": 1, "pattern": 1, "period_ms": 600, "duty": 192, "stride_mm": 25,
