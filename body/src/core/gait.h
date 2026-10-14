@@ -55,6 +55,14 @@
 // the trot the two legs of a diagonal pair have the same w and opposite
 // sides and ends: the sum is exactly 0 (a line has no triangle to lean
 // into). plan_* enter H_i with the pose and the balance correction.
+// Lead: the body follows the leg lengths through the servo lag (~150 ms),
+// and the windows of two legs on opposite sides that swing one after the
+// other cross zero exactly at the hand-over (WALK: LF lands as RB lifts), so
+// a plan centred on mid-swing leaves the body still leaning toward the
+// lifting leg there. Each window is centred KILO_GAIT_SWAY_LEAD_MS before
+// mid-swing instead: lead = dphi * lead ticks, computed with dphi when the
+// goal arrives (no division per tick). The trot's pairs shift together and
+// still cancel.
 //
 // Early touchdown (SET_GAIT flag CATCH; docs/walking-and-balance.md §4):
 // a foot on the ground is the only thing that stops a sideways fall on this
@@ -72,6 +80,29 @@
 // on rate_roll < -thr. Pitch increasing is the nose dropping: a front leg
 // lands on rate_pitch > +thr, a back leg on rate_pitch < -thr. One compare
 // per axis per tick; the test is the plant in test_gait.cpp ("catch").
+//
+// Forward placement (SET_GAIT flag PLACE; docs/walking-and-balance.md §4,
+// the capture point): the legs move fore-aft, so a fall forward or back is
+// caught by landing the swing foot further ahead or behind. At a leg's
+// lift-off (GS_RUN only; the stop, a swing that never lifts and one caught
+// at its lift-off get 0, a leg caught later keeps its shift) the pitch rate
+// sets that leg's touchdown shift
+//   place_i = K * rate_pitch, clamped to +-KILO_GAIT_CAPTURE_MAX_MM,
+// held for the swing: x += place_i * (1 - cos pi s)/2 in the swing (0 at
+// lift-off, all of it at touchdown) and place_i * (1 - s) in the following
+// stance (the shift decays along the stance path, so the next lift-off is
+// where it would be anyway). Both are place_i * (e + 1/2), e the stride
+// fraction below: one multiply per leg. K (KILO_GAIT_CAPTURE_MM_PER_RAD_S,
+// 7): a body falling as an inverted pendulum of height h ~ 80 mm with time
+// constant tau = sqrt(h/g) ~ 90 ms is caught where its capture point is,
+// tau * v ahead of the centre of mass, v = h * pitch_rate: tau * h = 7 mm
+// per rad/s (0.125 mm per deg/s; a 60 deg/s nose-dive asks for 7.5 mm).
+// Sign: nose DOWN is +pitch (§3f), so +rate_pitch is the nose dropping: the
+// body rotates forward about its feet and the centre of mass, h above them,
+// moves FORWARD at h * rate. Its capture point is ahead of it, so the
+// landing foot must go ahead: +x, for a front and a back leg alike (x is
+// forward in every leg's frame; a diagonal or a triangle edge that a back
+// leg is part of moves forward with it). place_i = +K * rate_pitch.
 //
 // The Gait struct also holds STANCE's height (h) and the body pose
 // (SET_BODY_POSE), which apply to IDLE STANCE as well as to the gait, and
@@ -91,6 +122,14 @@ enum GaitState : uint8_t { GS_OFF = 0, GS_RUN = 1, GS_STOP = 2, GS_LAND = 3 };
 #define GAIT_SWAY_ROLL_A16 (KILO_GAIT_SWAY_ROLL_DEG * 16)
 #define GAIT_SWAY_PITCH_A16 (KILO_GAIT_SWAY_PITCH_DEG * 16)
 #define GAIT_TOUCHDOWN_A16S (KILO_GAIT_TOUCHDOWN_RATE_DPS * 16)  // a16/s, as Attitude's rates
+// The sway's lead in ticks, Q6 (150 ms = 7.5 ticks = 480): lead = dphi *
+// this >> 6, phase units, once per goal.
+#define GAIT_SWAY_LEAD_Q6 ((KILO_GAIT_SWAY_LEAD_MS * 64 + 10) / 20)
+// Placement: q2 (1/4 mm) of touchdown shift per a16/s of pitch rate, Q16:
+// K mm per rad/s = K * 4 q2 / (16 * 180 / pi a16/s) = K * 0.0043633, x 65536
+// = K * 285.95.
+#define GAIT_CAPTURE_Q16 ((KILO_GAIT_CAPTURE_MM_PER_RAD_S * 28595L + 50) / 100)
+#define GAIT_CAPTURE_MAX_Q2 (KILO_GAIT_CAPTURE_MAX_MM * 4)
 
 struct Gait {
   // SET_GAIT goal as received (0 = the pattern's default for period,
@@ -108,6 +147,8 @@ struct Gait {
   uint8_t down;   // bit i: foot i is on the ground this tick (bits as armed)
   int16_t plan_pitch, plan_roll;  // this tick's planned sway, a16 (0 without SWAY or gait)
   uint16_t phi, dphi, amp;  // phase; per tick; start/stop ramp (65535 = full stride)
+  uint16_t lead;            // the sway's lead, phase units (dphi * GAIT_SWAY_LEAD_Q6 >> 6, per goal)
+  int8_t place[4];          // PLACE: each leg's touchdown shift, q2, set at its lift-off
   uint8_t duty;             // slewed, /256
   int16_t stride, turn, step, h;  // slewed, q2 (h is also STANCE's height)
   int16_t leg[8];  // this tick's OpenCat angles, a16: shoulders LF RF RB LB, knees LF RF RB LB

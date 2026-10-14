@@ -435,13 +435,15 @@ class BodyClient:
                     period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
                     body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
                     balance: bool = True, run: bool = True, sway: bool | None = None,
-                    catch: bool = True) -> dict[str, int]:
+                    catch: bool = True, place: bool = True) -> dict[str, int]:
         """SET_GAIT's wire fields (no epoch) with the §3d defaults of ``pattern``
         for every field left None. ``sway`` None: on for walk and crawl (one
         leg at a time: the body leans toward the three feet that stay down),
         off for the trot (its diagonal pairs cancel: no sway either way).
         ``catch``: the early-touchdown reflex (a swinging leg lands at once
-        when the body tips toward it), on for every pattern.
+        when the body tips toward it), on for every pattern. ``place``:
+        forward placement (a lifting leg lands ahead or behind by the pitch
+        rate, the capture point), on for every pattern.
         ValueError outside the spec ranges."""
         name = self.pattern_name(pattern)
         d = GAIT_DEFAULTS[name]
@@ -458,7 +460,7 @@ class BodyClient:
                   "step_h_mm": int(round(d["step_h_mm"] if step_h_mm is None else step_h_mm)),
                   "body_h_mm": int(round(body_h_mm)),
                   "flags": int((F.BOB if bob else 0) | (F.WAG if wag else 0) | (F.BALANCE if balance else 0)
-                               | (F.SWAY if sway else 0) | (F.CATCH if catch else 0))}
+                               | (F.SWAY if sway else 0) | (F.CATCH if catch else 0) | (F.PLACE if place else 0))}
         self._check_ranges("SET_GAIT", fields)
         if fields["body_h_mm"] < 1:
             raise ValueError("SET_GAIT body_h_mm must be at least 1 mm")
@@ -467,13 +469,15 @@ class BodyClient:
     def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = DEFAULT_PATTERN,
              period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
              body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
-             balance: bool = True, sway: bool | None = None, catch: bool = True) -> dict[str, int]:
+             balance: bool = True, sway: bool | None = None, catch: bool = True,
+             place: bool = True) -> dict[str, int]:
         """Latch SET_GAIT run=1: walk with ``pattern`` (walk, trot, crawl),
         ``stride_mm`` (signed, + = forward) and ``turn_mm`` (+ = left; with
         stride 0 Kilo turns in place). Fields left None take the §3d defaults
         of the pattern; the body height defaults to a fraction of L1 + L2
         (``load_geometry()``). Flags: head bob, tail wag, balance, sway (None: on
-        for walk and crawl), catch (the early-touchdown reflex).
+        for walk and crawl), catch (the early-touchdown reflex), place
+        (forward placement).
 
         A motion goal like a posture: stamped with the current epoch,
         refreshed at 5 Hz, cleared on any epoch change (watchdog, fall, low
@@ -487,7 +491,7 @@ class BodyClient:
         BAD_ARG).
         """
         fields = self.gait_fields(stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm, body_h_mm, bob, wag,
-                                  balance, sway=sway, catch=catch)
+                                  balance, sway=sway, catch=catch, place=place)
         self._check_drivable()
         self.link.clear_goal("SET_POSTURE")
         self.link.set_goal("SET_GAIT", **fields)

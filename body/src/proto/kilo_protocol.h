@@ -278,6 +278,7 @@ enum kilo_easing {
 #define KILO_GAIT_FLAGS_BALANCE (1u << 2)
 #define KILO_GAIT_FLAGS_SWAY (1u << 3)
 #define KILO_GAIT_FLAGS_CATCH (1u << 4)
+#define KILO_GAIT_FLAGS_PLACE (1u << 5)
 
 #define KILO_TRICK_FLAGS_BALANCE (1u << 0)
 #define KILO_TRICK_FLAGS_FALL_OK (1u << 1)
@@ -1078,7 +1079,10 @@ enum kilo_param_id {
 #define KILO_GAIT_WAG_DEG 15 /* tail wag amplitude, deg */
 #define KILO_GAIT_SWAY_ROLL_DEG 8 /* SWAY: roll amplitude, deg */
 #define KILO_GAIT_SWAY_PITCH_DEG 4 /* SWAY: pitch amplitude, deg */
+#define KILO_GAIT_SWAY_LEAD_MS 225 /* SWAY: lead of the sway over the legs, ms */
 #define KILO_GAIT_TOUCHDOWN_RATE_DPS 90 /* CATCH: tipping rate that ends a swing, deg/s */
+#define KILO_GAIT_CAPTURE_MM_PER_RAD_S 7 /* PLACE: touchdown shift per rad/s of pitch rate, mm */
+#define KILO_GAIT_CAPTURE_MAX_MM 3 /* PLACE: clamp on the shift, mm */
 #define KILO_GAIT_STANCE_H_256 205 /* STANCE's body height, /256 of L1 + L2 */
 #define KILO_GAIT_PATTERN_COUNT 3
 #define KILO_GAIT_WALK_PERIOD_MS 2000

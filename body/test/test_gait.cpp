@@ -10,7 +10,9 @@
 // down), the planned sway (its sign read off the stance feet), the
 // stance-aware balance (the plan as its reference, the hold on two feet)
 // and the early-touchdown reflex against a plant that falls on a diagonal,
-// and the per-tick cost.
+// the sway's lead (the lean at every lift-off), forward placement (its
+// model, sign and clamp; its shifts in normal walking; fore-aft shoves in a
+// capture plant), and the per-tick cost.
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -491,7 +493,7 @@ static void test_refusals() {
   CHECK(gait(gp(1, 0, 0, 0, 0, 0, 41)) == GOAL_BAD_ARG);
   CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 255)) == GOAL_OK);  // body height: never refused (the IK clamps it)
   CHECK(gait(gp(0, 0)) == GOAL_OK);
-  CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 0, 32)) == GOAL_BAD_ARG);  // bit 5: unknown (bit 4 is CATCH)
+  CHECK(gait(gp(1, 0, 0, 0, 0, 0, -1, 0, 64)) == GOAL_BAD_ARG);  // bit 6: unknown (bit 5 is PLACE)
   CHECK(!b.gait.run);
   // STALE; a stop is never stale.
   std::vector<uint8_t> p = gp(1, 1);
@@ -977,12 +979,13 @@ static void test_support() {
 
 // ---- Sway ----------------------------------------------------------------------------
 // The planned sway in double from the leg phases (gait.h): w_i a raised
-// cosine centred on mid-swing, half-width min(1.5 swings, half a cycle);
-// plan_roll = A_roll sum side_i w_i, plan_pitch = A_pitch sum end_i w_i,
-// times the ramp. a16.
+// cosine centred on mid-swing less the lead, half-width min(1.5 swings,
+// half a cycle); plan_roll = A_roll sum side_i w_i, plan_pitch = A_pitch sum
+// end_i w_i, times the ramp. a16.
+static uint16_t sway_centre() { return (uint16_t)(32768u + (b.gait.duty << 7) - b.gait.lead); }
 static void sway_ref(double* roll, double* pitch, double* w_out = nullptr) {
   double sw = (256 - b.gait.duty) / 256.0, hw = std::fmin(1.5 * sw, 0.5);
-  uint16_t mid = (uint16_t)(32768u + (b.gait.duty << 7));
+  uint16_t mid = sway_centre();
   double r = 0, p = 0;
   for (int l = 0; l < 4; l++) {
     double d = std::fabs((int16_t)(leg_p(l) - mid) / 65536.0);
@@ -1019,7 +1022,7 @@ static void test_sway() {
     CHECK(b.gait.plan_roll == 0 && b.gait.plan_pitch == 0);  // the first gait tick: amp 0
     int T = period_ticks();
     double err = 0, peak_r = 0, peak_p = 0, peak_model = 0;
-    int best = 70000;
+    int best = 70000, best_mid = 70000;
     double lean_p = 0, lean_r = 0, plan_p = 0, plan_r = 0;
     uint8_t down_mid = 0;
     for (int t = 0; t < 4 * T; t++) {
@@ -1031,19 +1034,25 @@ static void test_sway() {
       peak_model = std::fmax(peak_model, std::fabs(r));
       peak_r = std::fmax(peak_r, std::fabs(b.gait.plan_roll));
       peak_p = std::fmax(peak_p, std::fabs(b.gait.plan_pitch));
-      // LF's mid-swing: the body on RF, RB, LB.
-      int16_t d = (int16_t)(leg_p(LEG_LF) - (uint16_t)(32768u + (b.gait.duty << 7)));
+      // The centre of LF's window (the lead before its mid-swing): the
+      // plane of RF, RB, LB.
+      int16_t d = (int16_t)(leg_p(LEG_LF) - sway_centre());
       if (std::abs(d) < best) {
         best = std::abs(d);
         stance_attitude_lf_up(&lean_p, &lean_r);
         plan_p = b.gait.plan_pitch / 16.0;
         plan_r = b.gait.plan_roll / 16.0;
+      }
+      // LF's mid-swing: the body on RF, RB, LB.
+      d = (int16_t)(leg_p(LEG_LF) - (uint16_t)(32768u + (b.gait.duty << 7)));
+      if (std::abs(d) < best_mid) {
+        best_mid = std::abs(d);
         down_mid = b.gait.down;
       }
     }
-    std::printf("gait: sway pattern %d duty %d: plan vs model %.2f a16; peak roll %.2f pitch %.2f deg; at LF mid-swing "
-                "the stance feet lean the body pitch %+.2f roll %+.2f deg (plan %+.2f %+.2f)\n",
-                c.pat, b.gait.duty, err, peak_r / 16, peak_p / 16, lean_p, lean_r, plan_p, plan_r);
+    std::printf("gait: sway pattern %d duty %d: plan vs model %.2f a16; peak roll %.2f pitch %.2f deg; at the centre of "
+                "LF's window (%d ms before its mid-swing) the stance feet lean the body pitch %+.2f roll %+.2f deg (plan %+.2f %+.2f)\n",
+                c.pat, b.gait.duty, err, peak_r / 16, peak_p / 16, KILO_GAIT_SWAY_LEAD_MS, lean_p, lean_r, plan_p, plan_r);
     // (The model has w_i = 0 at leg i's mid-stance and 1 at its mid-swing,
     // so following it every tick, ramp included, is the window's shape and
     // the fade-in.)
@@ -1051,11 +1060,17 @@ static void test_sway() {
     CHECK(down_mid == 0xE);  // LF up, the other three down
     // LF lifting: lean RIGHT (right side down: negative roll) and not
     // forward (back down or level: pitch <= 0), read off the three stance
-    // feet; the roll is the full amplitude at mid-swing (the two
+    // feet; the roll is the full amplitude at the window's centre (the two
     // neighbours' windows are equal and their sides cancel).
-    CHECKF(std::fabs(lean_r + KILO_GAIT_SWAY_ROLL_DEG) < 0.5 && lean_p < 0.3, "LF up: pitch %.2f roll %.2f", lean_p,
-           lean_r);
-    CHECK(std::fabs(lean_r - plan_r) < 0.3 && std::fabs(lean_p - plan_p) < 0.3);
+    // (At duty 140 another leg is in the air there too: no plane of three.
+    // WALK: the centre is LF's lift-off, the tick LB lands.)
+    if (c.duty == 0) {
+      CHECKF(std::fabs(lean_r + KILO_GAIT_SWAY_ROLL_DEG) < 0.5 && lean_p < 0.3, "LF up: pitch %.2f roll %.2f", lean_p,
+             lean_r);
+      CHECK(std::fabs(lean_r - plan_r) < 0.3 && std::fabs(lean_p - plan_p) < 0.3);
+    } else {
+      CHECK(c.duty == 140);  // (the default patterns have their three feet down there)
+    }
     // At the defaults the back end goes down too (WALK: the neighbours'
     // windows give back half of it, -A_pitch / 2; CRAWL: -A_pitch).
     if (c.duty == 0) CHECK(lean_p < -0.4 * KILO_GAIT_SWAY_PITCH_DEG);
@@ -1257,6 +1272,49 @@ static void test_plan_reference() {
   }
 }
 
+// ---- The sway's lead -------------------------------------------------------------------
+// WALK and CRAWL with sway, the balance at Kp ~1, level floor, the
+// stance-aware plant. At every lift-off (the first tick a leg is commanded
+// up) the body's roll, signed so that + is away from the lifting leg
+// (side_i * roll: a left leg wants the right side down, roll < 0), with the
+// lead set to `lead_ms` (0 = the window on mid-swing). Smallest over 4
+// cycles; also the largest lean when the plant tips at `margin` deg toward
+// a missing corner.
+static double liftoff_lean(uint8_t pat, int lead_ms, double margin, double* max_lean) {
+  SPlant s;
+  walk_on(s, pat, 7 | KILO_GAIT_FLAGS_SWAY, 0, 0, BAL_KP1, margin);
+  b.gait.lead = (uint16_t)(b.gait.dphi * lead_ms / 20);
+  int T = period_ticks();
+  for (int t = 0; t < 3 * T; t++) splant_step(s);
+  double worst = 90;
+  s.max_lean = 0;
+  for (int t = 0; t < 4 * T; t++) {
+    uint8_t d0 = b.gait.down;
+    splant_step(s);
+    for (int l = 0; l < 4; l++)
+      if ((d0 & (1 << l)) && !(b.gait.down & (1 << l))) worst = std::fmin(worst, (leg_left((uint8_t)l) ? -1 : 1) * s.r);
+  }
+  if (max_lean) *max_lean = std::isfinite(s.r) ? s.max_lean : NAN;  // nan: it fell over (asin out of range)
+  return worst;
+}
+static void test_sway_lead() {
+  for (uint8_t pat : {KILO_GAIT_PATTERN_WALK, KILO_GAIT_PATTERN_CRAWL}) {
+    double fell0, fell, before = liftoff_lean(pat, 0, 90, nullptr), lag = liftoff_lean(pat, 150, 90, nullptr),
+                         after = liftoff_lean(pat, KILO_GAIT_SWAY_LEAD_MS, 90, nullptr);
+    liftoff_lean(pat, 0, 2, &fell0);
+    liftoff_lean(pat, KILO_GAIT_SWAY_LEAD_MS, 2, &fell);
+    std::printf("gait: sway lead, pattern %d: at every lift-off the body leans away from the lifting leg by at least "
+                "%+.2f deg with no lead, %+.2f with 150 ms (the servo lag), %+.2f with %d ms; a plant tipping at 2 deg "
+                "leans at most %.1f deg with no lead (nan: fell), %.1f with %d ms\n",
+                pat, before, lag, after, KILO_GAIT_SWAY_LEAD_MS, fell0, fell, KILO_GAIT_SWAY_LEAD_MS);
+    CHECKF(after >= 3, "pattern %d: %.2f deg at a lift-off", pat, after);
+    CHECK(after > before + 3);
+    if (pat == KILO_GAIT_PATTERN_WALK) CHECK(!(fell0 < 20));  // the finding: with no lead the WALK falls there
+    CHECKF(fell < 0.5 + (pat == KILO_GAIT_PATTERN_WALK ? 1.5 : 1.0) * KILO_GAIT_SWAY_ROLL_DEG, "pattern %d: lean %.1f",
+           pat, fell);  // the plan's own peak (WALK 1.5 A, CRAWL A): no fall
+  }
+}
+
 // ---- The two-foot hold -------------------------------------------------------------------
 // TROT on a board tilted 10 deg nose up and 10 deg right side up, Kp ~1. On
 // fewer than three feet (the support the balance reads: the last tick's)
@@ -1392,10 +1450,16 @@ static void test_catch() {
   for (int t = 0; t < T; t++) {
     tick();
     if (!in_swing(LEG_LF)) continue;
-    if (b.gait.armed & 1)
+    if (b.gait.armed & 1) {
       lifted_again = lifted_again || !(b.gait.down & 1);
-    else
-      down = down && (b.gait.down & 1) && !lifted(LEG_LF, 0.3);
+    } else {
+      // On the ground: at its stance height H_i (the sway's roll and pitch
+      // included).
+      double x, z, roll = b.gait.plan_roll / 16.0 * D2R, pitch = b.gait.plan_pitch / 16.0 * D2R;
+      foot(LEG_LF, &x, &z);
+      double h = ground() - PARAM(LEG_LB_MM) / 2 * std::sin(pitch) - PARAM(LEG_W_MM) / 2 * std::sin(roll);
+      down = down && (b.gait.down & 1) && std::fabs(z - h) < 0.3;
+    }
   }
   CHECK((got.down & 1) && down && lifted_again);
   // The flag off, or a faulty IMU: nothing.
@@ -1473,13 +1537,326 @@ static void test_catch_plant() {
   }
 }
 
+// ---- Forward placement (flag PLACE) -----------------------------------------------------
+// A WALK (the legs alone, no balance) to the tick before `leg` lifts, then
+// that tick with the pitch rate `rp` (a16/s; optionally an IMU fault):
+// every leg's foot x (mm) from that tick on for one period, the places
+// after the lift-off tick and the support.
+struct PlaceRun {
+  std::vector<double> x[4];
+  std::vector<uint8_t> dn;  // the support each tick
+  int8_t place[4];
+  uint8_t down;
+};
+static PlaceRun place_run(uint8_t flags, int leg, int16_t rp, bool fault = false) {
+  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, flags));
+  int T = period_ticks();
+  tick(2 * T);
+  uint16_t lift = (uint16_t)(b.gait.duty << 8);
+  int t = 0;
+  while (!(leg_p(leg) < lift && leg_p(leg) + b.gait.dphi >= lift) && t++ < 400) tick();
+  in.att.rate_pitch = rp;
+  b.imu_fault = fault;
+  tick();
+  in.att.rate_pitch = 0;
+  b.imu_fault = 0;
+  PlaceRun r;
+  memcpy(r.place, b.gait.place, sizeof r.place);
+  r.down = b.gait.down;
+  for (int k = 0; k < T; k++) {
+    for (int l = 0; l < 4; l++) {
+      double x, z;
+      foot(l, &x, &z);
+      r.x[l].push_back(x);
+    }
+    r.dn.push_back(b.gait.down);
+    tick();
+  }
+  return r;
+}
+
+static void test_place() {
+  const uint8_t F = KILO_GAIT_FLAGS_SWAY | KILO_GAIT_FLAGS_PLACE;
+  // The model: K mm per rad/s of pitch rate, nose down (+) = forward (+x)
+  // for a front leg and a back leg alike (gait.h: the centre of mass, h
+  // above the feet, moves forward at h * rate; its capture point is tau *
+  // that further ahead, and the landing foot must reach it).
+  for (int leg : {LEG_LF, LEG_RB})
+    for (int16_t rp : {(int16_t)160, (int16_t)-160, (int16_t)300}) {  // 10, -10, 18.75 deg/s
+      PlaceRun ref = place_run(F, leg, 0), got = place_run(F, leg, rp);
+      double want = KILO_GAIT_CAPTURE_MM_PER_RAD_S * rp / 16.0 * D2R;
+      want = std::fmax(-KILO_GAIT_CAPTURE_MAX_MM, std::fmin(KILO_GAIT_CAPTURE_MAX_MM, want));
+      double pl = got.place[leg] / 4.0;
+      CHECKF(std::fabs(pl - want) <= 0.25 && (pl > 0) == (rp > 0), "%s rate %d: place %.2f mm, model %.2f", LEG_NAME[leg],
+             rp, pl, want);
+      CHECK(!(got.down & (1 << leg)));  // it lifted
+      // The foot: no change at lift-off, the whole shift at touchdown, back
+      // to the path by the next lift-off, never a jump; the other feet as
+      // without the rate.
+      int n = (int)ref.x[leg].size(), td = 1;
+      while (td < n && !(got.dn[td] & (1 << leg))) td++;  // the touchdown tick
+      double d0 = got.x[leg][0] - ref.x[leg][0], peak = 0, jump = 0, end = got.x[leg][n - 1] - ref.x[leg][n - 1];
+      double at_td = got.x[leg][td] - ref.x[leg][td];
+      for (int k = 0; k < n; k++) {
+        double d = got.x[leg][k] - ref.x[leg][k];
+        peak = std::fmax(peak, std::fabs(d));
+        if (k) jump = std::fmax(jump, std::fabs(d - (got.x[leg][k - 1] - ref.x[leg][k - 1])));
+      }
+      bool others = true;
+      for (int l = 0; l < 4; l++)
+        for (int k = 0; l != leg && k < n; k++) others = others && got.x[l][k] == ref.x[l][k];
+      std::printf("gait: place, %s lifting at %+.2f deg/s: shift %+.2f mm (model %+.2f); foot vs no shift: %+.2f at "
+                  "lift-off, %+.2f at touchdown, %+.2f a period on, largest step %.2f mm/tick\n",
+                  LEG_NAME[leg], rp / 16.0, pl, want, d0, at_td, end, jump);
+      CHECK(std::fabs(d0) < 0.1 && std::fabs(at_td - pl) < 0.2 && std::fabs(end) < 0.1);
+      CHECK(peak <= std::fabs(pl) + 0.2 && jump < std::fabs(pl) / 2 + 0.1);  // (+ the IK's round trip)
+      CHECK(others);
+    }
+  // The clamp, both ways.
+  CHECK(place_run(F, LEG_LF, 4000).place[LEG_LF] == GAIT_CAPTURE_MAX_Q2);
+  CHECK(place_run(F, LEG_LF, -4000).place[LEG_LF] == -GAIT_CAPTURE_MAX_Q2);
+  // Nothing with the flag off or with a faulty IMU.
+  for (bool fault : {false, true}) {
+    PlaceRun ref = place_run(fault ? F : KILO_GAIT_FLAGS_SWAY, LEG_LF, 0);
+    PlaceRun got = place_run(fault ? F : KILO_GAIT_FLAGS_SWAY, LEG_LF, 300, fault);
+    CHECKF(got.place[LEG_LF] == 0 && got.x[LEG_LF] == ref.x[LEG_LF], "fault %d: place %d", fault, got.place[LEG_LF]);
+  }
+  // A leg caught at its lift-off (CATCH: tipping toward a front leg) lands
+  // where it is: no shift.
+  PlaceRun c = place_run(F | KILO_GAIT_FLAGS_CATCH, LEG_LF, (int16_t)(GAIT_TOUCHDOWN_A16S + 16));
+  CHECK(c.place[LEG_LF] == 0 && (c.down & 1));
+  // Caught later in its swing, a placed leg keeps its shift (the foot goes
+  // down where its path is, no jump) until its next lift-off.
+  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, F | KILO_GAIT_FLAGS_CATCH));
+  tick(2 * period_ticks());
+  uint16_t lift = (uint16_t)(b.gait.duty << 8);
+  int guard = 0;
+  while (!(leg_p(LEG_LF) < lift && leg_p(LEG_LF) + b.gait.dphi >= lift) && guard++ < 400) tick();
+  in.att.rate_pitch = 300;
+  tick();
+  in.att.rate_pitch = 0;
+  int8_t pl0 = b.gait.place[LEG_LF];
+  bool kept = true;
+  double xa, za, xb, jmp = 0;
+  tick(3);
+  in.att.rate_pitch = (int16_t)(GAIT_TOUCHDOWN_A16S + 16);
+  foot(LEG_LF, &xa, &za);
+  tick();
+  in.att.rate_pitch = 0;
+  CHECK((b.gait.down & 1) && !(b.gait.armed & 1));  // caught
+  while (in_swing(LEG_LF) && guard++ < 400) {
+    foot(LEG_LF, &xb, &za);
+    jmp = std::fmax(jmp, std::fabs(xb - xa));
+    xa = xb;
+    kept = kept && b.gait.place[LEG_LF] == pl0;
+    tick();
+  }
+  CHECKF(kept && pl0 != 0 && jmp < 2.5, "caught mid-swing: place %d -> %d, step %.2f mm", pl0, b.gait.place[LEG_LF], jmp);
+  // The stop (GS_STOP, GS_LAND): never, whatever the rate.
+  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, F));
+  tick(2 * period_ticks());
+  CHECK(gait(gp(0, 0)) == GOAL_OK);
+  bool zero = true;
+  int t = 0, stop_ticks = 0;
+  in.att.rate_pitch = 1000;
+  while (body_gait_running(b) && t++ < 400) {
+    tick();
+    stop_ticks += b.gait.state == GS_STOP;
+    for (int l = 0; l < 4; l++) zero = zero && b.gait.place[l] == 0;
+  }
+  in.att.rate_pitch = 0;
+  CHECK(zero && stop_ticks > 0);
+}
+
+// No false action: every pattern with sway, catch and placement, the
+// balance at Kp ~1, on a level floor and on 5 deg slopes, the stance-aware
+// plant's rates fed in: the shifts normal walking makes stay small.
+static void test_place_quiet() {
+  static const double SL[4][2] = {{0, 0}, {-5, 0}, {0, 5}, {-5, 5}};
+  for (uint8_t pat = 0; pat < 3; pat++) {
+    int worst = 0;
+    for (const auto& sl : SL) {
+      SPlant s;
+      walk_on(s, pat, 7 | KILO_GAIT_FLAGS_SWAY | KILO_GAIT_FLAGS_CATCH | KILO_GAIT_FLAGS_PLACE, sl[0], sl[1]);
+      for (int t = 0; t < 6 * period_ticks(); t++) {
+        splant_step(s);
+        for (int l = 0; l < 4; l++) worst = std::max(worst, std::abs(b.gait.place[l]));
+      }
+      CHECK(s.catches == 0);
+    }
+    std::printf("gait: place, pattern %d walking on a level floor and 5 deg slopes: largest shift %.2f mm\n", pat,
+                worst / 4.0);
+    CHECKF(worst < 8, "pattern %d: %.2f mm", pat, worst / 4.0);  // 2 mm
+  }
+}
+
+// The capture plant: the stance-aware plant's diagonal fall in two axes,
+// with the feet where they are, for a fore-aft shove. The centre of mass
+// (CoM) is h = 80 mm up; c = its ground projection relative to the
+// shoulders' centre (mm, x forward, y left), c = h (sin pitch, sin roll)
+// (nose down = +pitch moves it forward, right side up = +roll moves it
+// left, §3f). The down feet (the gait's `down`) stand at (+-Lb/2 + x_i,
+// +-W/2), x_i the commanded foot x. A linear inverted pendulum: c'' = (c -
+// p) / tau^2, tau = 90 ms, with the centre of pressure p anywhere in the
+// convex hull of the down feet (a line on a diagonal pair) and nowhere else.
+// The legs aim p to bring c to the feet's attitude (as the stance-aware
+// plant: their planes through the 150 ms servo lag) in SP_LAND (2) ticks,
+// critically damped: a rigid stance stops a shove at once, as long as p
+// stays in the hull; where it cannot (two feet; three with the CoM across
+// the triangle's edge) the CoM falls about the nearest edge until a landing
+// foot makes a hull under it. The trot rocks within 1.3 deg of roll here
+// (the floor: 3.5) and the walk follows its sway.
+struct CPlant {
+  double c[2], v[2], cmd[2];  // cmd: the feet's attitude as a CoM offset, through the servo lag
+  double max_p, max_r;        // largest |pitch|, |roll| (deg)
+};
+static const double CP_H = 80.0;
+// The point of the hull of the down feet nearest q (feet in the cyclic order
+// LF RF RB LB: a convex polygon).
+static void hull_nearest(uint8_t down, const double q[2], double out[2]) {
+  double px[4], py[4];
+  int n = 0;
+  for (int l = 0; l < 4; l++) {
+    if (!(down & (1 << l))) continue;
+    double x, z;
+    out_foot(l, &x, &z);
+    px[n] = (leg_front((uint8_t)l) ? 0.5 : -0.5) * PARAM(LEG_LB_MM) + x;
+    py[n++] = (leg_left((uint8_t)l) ? 0.5 : -0.5) * PARAM(LEG_W_MM);
+  }
+  out[0] = q[0], out[1] = q[1];
+  if (n == 0) return;
+  if (n >= 3) {  // inside: on the same side of every edge
+    int pos = 0, neg = 0;
+    for (int i = 0; i < n; i++) {
+      int j = (i + 1) % n;
+      double cr = (px[j] - px[i]) * (q[1] - py[i]) - (py[j] - py[i]) * (q[0] - px[i]);
+      pos += cr >= 0;
+      neg += cr <= 0;
+    }
+    if (pos == n || neg == n) return;
+  }
+  double best = 1e18;
+  for (int i = 0; i < n; i++) {
+    int j = (i + 1) % n;
+    double ex = px[j] - px[i], ey = py[j] - py[i], l2 = ex * ex + ey * ey;
+    double t = l2 > 0 ? std::fmax(0.0, std::fmin(1.0, ((q[0] - px[i]) * ex + (q[1] - py[i]) * ey) / l2)) : 0;
+    double nx = px[i] + t * ex, ny = py[i] + t * ey, d = (q[0] - nx) * (q[0] - nx) + (q[1] - ny) * (q[1] - ny);
+    if (d < best) best = d, out[0] = nx, out[1] = ny;
+  }
+}
+// One tick: the plant answers the last tick's commands, then body_tick.
+// shove: deg/s of nose-down pitch rate added (h * rate to the CoM).
+static void cplant_step(CPlant& s, double shove = 0) {
+  SPlant sp = SPlant();
+  sp.margin = 90;
+  double tp, tr, as = 1 - std::exp(-1 / SP_SERVO);
+  splant_support(sp, &tp, &tr);  // the feet's attitude (on a diagonal: the pair's pitch, roll 0)
+  s.cmd[0] += (CP_H * std::sin(tp * D2R) - s.cmd[0]) * as;
+  s.cmd[1] += (CP_H * std::sin(tr * D2R) - s.cmd[1]) * as;
+  const double w = 50.0 / SP_LAND, kv = 2 * SP_TAU * SP_TAU * w, kc = SP_TAU * SP_TAU * w * w;
+  double p0 = std::asin(s.c[0] / CP_H) / D2R, r0 = std::asin(s.c[1] / CP_H) / D2R;
+  s.v[0] += CP_H * shove * D2R;
+  const int N = 20;
+  const double dt = 0.02 / N;
+  for (int k = 0; k < N; k++) {
+    double q[2], p[2];
+    for (int a = 0; a < 2; a++) q[a] = s.c[a] + kv * s.v[a] + kc * (s.c[a] - s.cmd[a]);
+    hull_nearest(b.gait.down, q, p);
+    for (int a = 0; a < 2; a++) {
+      s.v[a] += (s.c[a] - p[a]) / (SP_TAU * SP_TAU) * dt;
+      s.c[a] += s.v[a] * dt;
+    }
+  }
+  double pp = std::asin(std::fmax(-1.0, std::fmin(1.0, s.c[0] / CP_H))) / D2R;
+  double rr = std::asin(std::fmax(-1.0, std::fmin(1.0, s.c[1] / CP_H))) / D2R;
+  s.max_p = std::fmax(s.max_p, std::fabs(pp));
+  s.max_r = std::fmax(s.max_r, std::fabs(rr));
+  in.att.pitch = (int16_t)std::lround(pp * 16);
+  in.att.roll = (int16_t)std::lround(rr * 16);
+  in.att.rate_pitch = (int16_t)std::lround((pp - p0) * 50 * 16);
+  in.att.rate_roll = (int16_t)std::lround((rr - r0) * 50 * 16);
+  tick();
+}
+static void walk_on_c(CPlant& s, uint8_t pat, uint8_t flags) {
+  static const int8_t STRIDE[3] = {30, 25, 25};
+  reset();
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_STAND, 1, 0) == GOAL_OK);
+  tick(5);
+  CHECK(body_goal_posture(b, b.epoch, POSTURE_STANCE, 0, 0) == GOAL_OK);
+  tick(30);
+  CHECK(body_goal_balance(b, BAL_KP1) == GOAL_OK);
+  s = CPlant();
+  for (int t = 0; t < 100; t++) cplant_step(s);
+  CHECK(gait(gp(1, pat, 0, 0, STRIDE[pat], 0, -1, 0, flags)) == GOAL_OK);
+  int t = 0;
+  while (!body_gait_running(b) && t++ < 100) cplant_step(s);
+  CHECK(body_gait_running(b));
+}
+
+// Fore-aft shoves (+: nose down) on the WALK and the TROT as the mind sends
+// them, at 8 phases of the cycle; for each the same run three times from the
+// shove on: no placement, placement, placement with its sign flipped (the
+// shift negated at each lift-off). The peak pitch and roll over two
+// periods, averaged over the phases. Finding: a rigid stance on three or
+// four feet stops a shove within its 2-tick settle, before any foot lifts,
+// so a lift-off never sees the shove's rate and where the foot lands does
+// not change the peak: pitch within 0.1 deg with placement, without and
+// flipped alike, roll up to 0.25 deg more on the trot with either sign (its
+// own rocking moves the feet by up to a millimetre). The capture point
+// needs a stance that lets the body keep its momentum, which Kilo's
+// position-controlled legs do not; so this only guards that placement does
+// no harm to the pitch.
+static void test_place_plant() {
+  for (uint8_t pat : {KILO_GAIT_PATTERN_WALK, KILO_GAIT_PATTERN_TROT}) {
+    uint8_t f = (uint8_t)(7 | KILO_GAIT_FLAGS_CATCH | (pat == KILO_GAIT_PATTERN_WALK ? KILO_GAIT_FLAGS_SWAY : 0));
+    for (int k = 0; k < 2; k++) {
+      CPlant s;
+      walk_on_c(s, pat, (uint8_t)(f | (k ? KILO_GAIT_FLAGS_PLACE : 0)));
+      s.max_p = s.max_r = 0;
+      for (int t = 0; t < 6 * period_ticks(); t++) cplant_step(s);
+      std::printf("gait: capture plant, pattern %d %s placement: rocks within pitch %.2f roll %.2f deg\n", pat,
+                  k ? "with" : "without", s.max_p, s.max_r);
+      CHECK(s.max_r < 15 && s.max_p < 5);  // walks (the WALK's sway leans 12 deg)
+    }
+    for (double shove : {60.0, -60.0, 120.0, -120.0}) {
+      double pk[3] = {0, 0, 0}, rk[3] = {0, 0, 0};
+      const int PH = 8;
+      for (int ph = 0; ph < PH; ph++)
+        for (int k = 0; k < 3; k++) {
+          CPlant s;
+          walk_on_c(s, pat, f);
+          int T = period_ticks();
+          for (int t = 0; t < 4 * T + ph * T / PH; t++) cplant_step(s);
+          if (k) b.gait.flags |= KILO_GAIT_FLAGS_PLACE;  // the same run up to the shove
+          s.max_p = s.max_r = 0;
+          cplant_step(s, shove);
+          for (int t = 0; t < 2 * T; t++) {
+            uint8_t d0 = b.gait.down;
+            cplant_step(s);
+            if (k == 2)
+              for (int l = 0; l < 4; l++)
+                if ((d0 & (1 << l)) && !(b.gait.down & (1 << l))) b.gait.place[l] = (int8_t)-b.gait.place[l];
+          }
+          pk[k] += s.max_p / PH;
+          rk[k] += s.max_r / PH;
+        }
+      std::printf("gait: capture plant, pattern %d, a %+.0f deg/s pitch shove: peak pitch %.2f / %.2f / %.2f deg, roll "
+                  "%.2f / %.2f / %.2f deg (no placement / placement / flipped)\n",
+                  pat, shove, pk[0], pk[1], pk[2], rk[0], rk[1], rk[2]);
+      CHECK(pk[0] < 10 && rk[0] < 15);  // it stays up
+      CHECKF(std::fabs(pk[1] - pk[0]) < 0.25, "pattern %d shove %.0f: %.2f vs %.2f", pat, shove, pk[1], pk[0]);
+    }
+  }
+}
+
 // ---- Output steps at the defaults and the per-tick cost --------------------------
 static void test_defaults_and_cost() {
   static const int8_t STRIDE[3] = {30, 25, 25};  // spec [gait_patterns.*] stride_mm (the mind sends them)
-  // With and without SWAY (its lean adds leg-length motion) and CATCH (the
-  // mind's defaults; it never fires on a level IMU).
+  // With and without SWAY (its lean adds leg-length motion), CATCH and PLACE
+  // (the mind's defaults; neither acts on a level, still IMU).
   for (int k = 0; k < 6; k++) {
-    uint8_t pat = (uint8_t)(k % 3), flags = (uint8_t)(k < 3 ? 7 : 7 | KILO_GAIT_FLAGS_SWAY | KILO_GAIT_FLAGS_CATCH);
+    uint8_t pat = (uint8_t)(k % 3),
+            flags = (uint8_t)(k < 3 ? 7 : 7 | KILO_GAIT_FLAGS_SWAY | KILO_GAIT_FLAGS_CATCH | KILO_GAIT_FLAGS_PLACE);
     start(gp(1, pat, 0, 0, STRIDE[pat], 0, -1, 0, flags));
     int T = period_ticks();
     tick(2 * T);
@@ -1499,6 +1876,32 @@ static void test_defaults_and_cost() {
     CHECKF(worst < PARAM(SLEW_MAX_A16) / 16.0, "pattern %d flags %d: %.2f deg/tick hits the safety slew", pat, flags,
            worst);
   }
+  // Placement at its clamp on every step (a pitch rate past it, held; no
+  // CATCH, which such a rate would fire, and no BALANCE, whose rate term it
+  // would drive): the swing's x travel grows by the clamp. The TROT, already
+  // at 9.62 deg/tick, sets the clamp: +3 mm makes 9.88, +4 mm and more hit
+  // the 10 deg/tick safety slew (the WALK and CRAWL would take 15 mm).
+  for (int k = 0; k < 6; k++) {
+    uint8_t pat = (uint8_t)(k % 3);
+    start(gp(1, pat, 0, 0, STRIDE[pat], 0, -1, 0, 3 | KILO_GAIT_FLAGS_SWAY | KILO_GAIT_FLAGS_PLACE));
+    int T = period_ticks();
+    in.att.rate_pitch = (int16_t)(k < 3 ? 4000 : -4000);
+    tick(2 * T);
+    int16_t prev[DRIVEN_COUNT];
+    double worst = 0;
+    int pl = 0;
+    for (int t = 0; t < 2 * T; t++) {
+      memcpy(prev, b.arb.out, sizeof prev);
+      tick();
+      worst = std::fmax(worst, max_step(prev));
+      for (int l = 0; l < 4; l++) pl = std::max(pl, std::abs(b.gait.place[l]));
+    }
+    in.att.rate_pitch = 0;
+    std::printf("gait: pattern %d defaults, placement %+.1f mm on every step: max leg step %.2f deg/tick\n", pat,
+                (k < 3 ? 1 : -1) * pl / 4.0, worst);
+    CHECK(pl == GAIT_CAPTURE_MAX_Q2);
+    CHECKF(worst < PARAM(SLEW_MAX_A16) / 16.0, "pattern %d placement: %.2f deg/tick hits the safety slew", pat, worst);
+  }
   // Cost: fx calls in one walking tick (4 legs of IK + the trajectory) vs a
   // STAND tick.
   start(gp(1, KILO_GAIT_PATTERN_TROT));
@@ -1512,13 +1915,15 @@ static void test_defaults_and_cost() {
   CHECK(at == 12 && sq == 4 && sn <= 16);
   // With SWAY: at most one cosine more per leg (the window; legs outside it
   // cost nothing).
-  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, 7 | KILO_GAIT_FLAGS_SWAY));
+  start(gp(1, KILO_GAIT_PATTERN_WALK, 0, 0, 30, 0, -1, 0, 7 | KILO_GAIT_FLAGS_SWAY | KILO_GAIT_FLAGS_PLACE));
   tick(30);
+  in.att.rate_pitch = 300;  // placement: no fx call (a multiply per leg)
   a = g_fx_ops;
   tick();
   c = g_fx_ops;
+  in.att.rate_pitch = 0;
   uint32_t sn2 = c.sin - a.sin;
-  std::printf("gait: one walking tick with sway: %u sin/cos, %u atan2\n", sn2, c.atan2 - a.atan2);
+  std::printf("gait: one walking tick with sway and placement: %u sin/cos, %u atan2\n", sn2, c.atan2 - a.atan2);
   CHECK(c.atan2 - a.atan2 == 12 && c.isqrt - a.isqrt == 4 && sn2 <= 16 + 4);
 }
 
@@ -1539,9 +1944,13 @@ int main() {
   test_support();
   test_sway();
   test_plan_reference();
+  test_sway_lead();
   test_two_foot_hold();
   test_catch();
   test_catch_plant();
+  test_place();
+  test_place_quiet();
+  test_place_plant();
   test_defaults_and_cost();
   return report("gait");
 }

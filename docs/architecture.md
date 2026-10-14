@@ -551,7 +551,7 @@ to be tuned.
 | `turn_mm` | mm, signed, + = left | −40..40 | 0 |
 | `step_h_mm` | mm | 0..40 | 15 / 8 / 18 (trot 12 until 2026-10-13: 12 hits the 10°/tick slew in a 150 ms swing) |
 | `body_h_mm` | mm | IK workspace | 0.80 / 0.80 / 0.70 × (L1+L2) |
-| `flags` | bits | head bob, tail wag, balance, sway, catch (early touchdown) | all on (the mind leaves sway off for the trot, where it is 0 anyway) |
+| `flags` | bits | head bob, tail wag, balance, sway, catch (early touchdown), place (forward placement) | all on (the mind leaves sway off for the trot, where it is 0 anyway) |
 
 `SET_BODY_POSE` (pitch, roll, height delta, x-shift) applies on top. It also
 drives IDLE STANCE.
@@ -709,16 +709,31 @@ the text above:
   (side −1) needs, hence `+A·side`; a lifting front leg needs the back down
   (nose up, negative pitch), hence `+A·end`. Defaults `A_roll` 8°,
   `A_pitch` 4° (spec `[gait]` `sway_roll_deg`, `sway_pitch_deg`). At LF's
-  mid-swing WALK leans 8° right and 2° back (the neighbours' windows give
-  back half the pitch), CRAWL 8° and 4°; WALK peaks at 12° roll between its
-  two same-side swings, where the windows overlap. TROT: the two legs of a
-  diagonal pair have the same `w` and opposite side and end, so the plan is
-  exactly 0. The leg steps at the defaults grow from 4.0 to 4.8°/tick
-  (WALK) and 6.6 to 6.8 (CRAWL). Cost: at most 4 cosines per tick (legs
-  outside their window none), no division. Host test: the plan follows a
-  double model every tick (ramp included) within 3 a16, and at LF's
-  mid-swing the plane of the three stance feet reads the body −8° roll.
-  The vbody simulator accepts the flag but does not simulate it.
+  window's centre WALK leans 8° right and 2° back (the neighbours' windows
+  give back half the pitch), CRAWL 8° and 4°; WALK peaks at 12° roll between
+  its two same-side swings, where the windows overlap. TROT: the two legs of
+  a diagonal pair have the same `w` and opposite side and end, so the plan
+  is exactly 0 (with the lead too: both shift alike). **Lead** (added
+  2026-10-13, after the finding in 3f): the body follows the leg lengths
+  through the servo lag, and WALK's windows for two legs on opposite sides
+  that swing one after the other cross zero exactly at the hand-over (LF
+  lands as RB lifts), so a window centred on mid-swing left the body still
+  leaning 3.8° toward the leg that lifts. Every window is centred
+  `sway_lead_ms` (spec `[gait]`, 225 ms) before mid-swing: `lead = dphi ·
+  lead_ticks`, computed with `dphi` when the goal arrives (no division per
+  tick; 2 B). In the stance-aware plant (Kp ≈ 1, level) the smallest lean
+  away from the lifting leg at any lift-off is −3.76° with no lead (toward
+  it; a plant that tips at 2° falls), +1.41° with 150 ms (the lag alone: a
+  first-order lag is not a pure delay, and the support changes at the
+  lift-off), +3.98° with 225 ms (WALK) and −0.27 / +6.40 / +7.46° (CRAWL);
+  250 ms gives +4.8° but steps the CRAWL 9.6°/tick, 225 ms 9.1. The leg
+  steps at the defaults are 4.0 → 6.6°/tick (WALK) and 6.6 → 9.1 (CRAWL)
+  with sway. Cost: at most 4 cosines per tick (legs outside their window
+  none), no division. Host test: the plan follows a double model every tick
+  (ramp and lead included) within 3 a16; at the centre of LF's window the
+  plane of the three stance feet reads the body −8° roll; the lean at every
+  lift-off as above. The vbody simulator accepts the flag but does not
+  simulate it.
 - **Early touchdown** (flag `CATCH`, bit 4; added 2026-10-13,
   docs/walking-and-balance.md §4). A foot on the ground is the only thing
   that stops a sideways fall on this cat, and on a diagonal the body tips
@@ -754,6 +769,52 @@ the text above:
   diagonal grows to 11.7° at 121°/s: the reflex fires there, which is
   right (that is a fall). The vbody simulator accepts the flag but does not
   simulate it.
+- **Forward placement** (flag `PLACE`, bit 5; added 2026-10-13,
+  docs/walking-and-balance.md §4, the capture point). The legs move
+  fore-aft, so a fall forward or back can be caught by landing the swing
+  foot further ahead or behind. At a leg's lift-off (`GS_RUN` only; the stop,
+  a leg that never lifted and one the early touchdown catches at its
+  lift-off get 0; one caught later in its swing keeps its shift) the
+  pitch rate sets that leg's shift `place_i = K · rate_pitch`, clamped to
+  ±`capture_max_mm`, held for the swing: `x += place_i·(1 − cos πs)/2` in
+  the swing (nothing at lift-off, all of it at touchdown) and
+  `place_i·(1 − s)` in the stance after (it decays along the stance path, so
+  the next lift-off is where it would have been), both `place_i·(e + ½)`
+  with `e` the stride fraction: one multiply per leg, 4 B (`Gait::place`,
+  q2). K = `capture_mm_per_rad_s` (spec `[gait]`, 7): a body falling as an
+  inverted pendulum of height h ≈ 80 mm, τ = √(h/g) ≈ 90 ms, is caught at
+  its capture point, τ·v ahead of the centre of mass with v = h·rate, so
+  τ·h ≈ 7 mm per rad/s (0.125 mm per °/s; a 60°/s nose-dive asks for
+  7.5 mm). Sign (3f: nose down = +pitch): a rising pitch is the nose
+  dropping, the body rotating forward over its feet, so the centre of mass
+  (h above them) moves forward and its capture point is further ahead: the
+  landing foot goes forward, +x, for a front and a back leg alike (x is
+  forward in every leg's frame). Clamp: **3 mm**, not the 15 mm first
+  planned: the TROT's 150 ms swing at stride 25 already steps 9.62°/tick,
+  +3 mm of swing travel makes 9.88 and +4 mm hits the 10°/tick safety slew
+  (WALK and CRAWL would take 15 mm). Host tests: the shift follows the model
+  within a quarter millimetre, forward for LF and RB on a nose-down rate,
+  back on a nose-up one; the foot is unchanged at lift-off, shifted by
+  exactly `place_i` at touchdown and back on its path by the next lift-off,
+  the other feet untouched; the clamp both ways; nothing with the flag off,
+  with `IMU_FAULT`, during the stop, or for a leg caught at its lift-off; a
+  leg caught mid-swing keeps its shift (no jump).
+  No false action: normal walking with sway, catch and placement on a level
+  floor and 5° slopes (the stance-aware plant's rates) shifts at most
+  1.25 mm (WALK), 0.25 (TROT), 0.75 (CRAWL). **Finding**: in a capture plant
+  (`test_gait.cpp`: a linear inverted pendulum whose centre of pressure can
+  be anywhere in the hull of the down feet, a line on a diagonal, with a
+  rigid 2-tick stance) a fore-aft shove of ±60 or ±120°/s on the WALK or
+  the TROT, at 8 phases, peaks at the same pitch with placement, without
+  and with the sign flipped (within 0.1°; e.g. TROT +60°/s: 1.09 / 1.18 /
+  1.18°, −120°/s: 3.41 / 3.41 / 3.41°), the TROT's roll up to 0.25° higher
+  with either sign. Three or four feet stop a shove within the stance's
+  settle, before any foot lifts, so a lift-off never sees the shove's rate,
+  and a landing foot anywhere in a four-foot hull holds the body. The
+  capture point needs a stance that keeps the body's momentum, which
+  Kilo's position-controlled legs do not; whether the floor agrees is for
+  `kilo walk` with and without `--no-place`. The vbody simulator accepts
+  the flag but does not simulate it.
 - **TELEMETRY.** Mode GAIT, flag GAIT and leg-owner nibble GAIT from the
   moment the run goal is accepted (including the move to STANCE); head
   nibble GAIT while bob or wag is on; `gait_phase = φ >> 8` while the gait
@@ -991,13 +1052,13 @@ through them, reached through the 150 ms servo lag; on a diagonal pair, or
 on three feet leaning toward the missing corner past a margin, it is an
 inverted pendulum about the diagonal (roll, τ = 90 ms, exact per tick),
 and back on a support it settles onto the feet in 2 ticks; the IMU reads
-the world attitude and its rates. A finding from it for the sway (not
-changed here): WALK's lean crosses zero exactly at the lift-offs where it
-changes sides (LF down and RB up, RF down and LB up), so with the servo
-lag the body still leans 2 to 3° toward the leg that lifts: a plant that
-tips at 2° of lean toward the missing corner falls there (at 3° it
-holds). A sway phase-advanced by the servo lag, or one that does not cross
-zero at a lift-off, would fix it.
+the world attitude and its rates. A finding from it for the sway
+(**fixed** 2026-10-13 by the sway's lead, 3d "Sway"): WALK's lean crossed
+zero exactly at the lift-offs where it changes sides (LF down and RB up, RF
+down and LB up), so with the servo lag the body still leaned 2 to 4° toward
+the leg that lifts: a plant that tips at 2° of lean toward the missing
+corner fell there. With the windows 225 ms early it leans at least 4.0°
+away at every lift-off, and the 2° plant walks.
 
 **Joint-space mapping** (`balance_map`). The per-joint gains are the legacy
 `adaptiveParameterArray` {roll, pitch} factors in PROGMEM, which are also
@@ -1332,8 +1393,10 @@ leave ≥ 128 B. **Measured with the P2 gait** (2026-10-11): 274 B (`main` 133
 Kilo's paint read 238 B free while walking (293 B used): the static bound is
 7 B above what the robot has touched, so it is tight, not loose.
 **With the bounded spins** (TX wait, I2C budget; same day): 27116 B flash,
-1519 B globals (+2 B: the I2C budget), stack 302 B, margin 227 B. RAM is
-the tight resource. If needed, shrink in this order:
+1519 B globals (+2 B: the I2C budget), stack 302 B, margin 227 B. **With
+the sway's lead and forward placement** (2026-10-13, from 27894 B / 1525 B
+/ 214 B): 28224 B flash, 1531 B globals (+6 B: `Gait::lead`, `place[4]`),
+stack 309 B, margin 208 B. RAM is the tight resource. If needed, shrink in this order:
 1. keyframe store 32 → 24 frames (−112 B; the first-version library's
    largest trick has 6 frames, HELLO reports the capacity to the mind).
    **Done** with the fall reflex and head layer (above);
@@ -2276,7 +2339,7 @@ this table. Offsets are within the payload. `E` = epoch u8.
 | 0x03 PING | `token u16` | 2 |
 | 0x04 SET_STREAM | `telem_div u8` (0 off, default 2 → 25 Hz), `joints_div u8`, `imu_raw_div u8` | 3 |
 | 0x10 SET_POSTURE | `E`, `posture u8` (0 LIMP, 1 REST, 2 SIT, 3 STAND, 4 STANCE, 5 CALIB, 6 ZERO), `transition_ticks u8` (0 = param `POSTURE_TICKS`, 25), `flags u8` (bit 0 balance; BALANCE = STAND + this bit) | 4 |
-| 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance, 3 sway, 4 catch) | 11 |
+| 0x11 SET_GAIT | `E`, `run u8`, `pattern u8`, `period_ms u16`, `duty u8`, `stride_mm i8`, `turn_mm i8`, `step_h_mm u8`, `body_h_mm u8`, `flags u8` (bit 0 bob, 1 wag, 2 balance, 3 sway, 4 catch, 5 place) | 11 |
 | 0x12 SET_HEAD | `E`, `mode u8` (0 release, 1 hold), `pan i16`, `tilt i16`, `tail i16` (a16; −32768 = not held), `max_speed_dps u16` (0 = safety slew only) | 10 |
 | 0x13 SET_BODY_POSE | `E`, `pitch i16`, `roll i16` (a16), `dheight_mm i8`, `xshift_mm i8` | 7 |
 | 0x14 SET_BALANCE | `enable u8`, `kp_q8 u8`, `kd_ms u8`, `deadband_deg u8`, `max_corr_deg u8` | 5 |
@@ -2515,7 +2578,7 @@ reference; this table is the overview.
 | `kilo status [--json]`, `kilo monitor [--passive] [--percepts]` | HELLO, state, link and body stats; live telemetry table (`--passive`: sends nothing, prints what the body does on its own) |
 | `kilo posture limp\|rest\|stand\|sit\|balance\|stance\|calib\|zero [--for S] [--pca] [--then-watch T]` | Hold a posture (`balance` = STAND + flag; `stance` = the IK standing posture) |
 | `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
-| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--speed MM_S] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--for S] [--wait S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. `--speed` sets stride, period and duty with the pattern's fixed swing time (docs/walking-and-balance.md §3; `--stride`/`--period`/`--duty` override). `--no-sway` / `--no-catch` turn off the sway and the early-touchdown reflex (§3d). On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
+| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--speed MM_S] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--no-place] [--for S] [--wait S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. `--speed` sets stride, period and duty with the pattern's fixed swing time (docs/walking-and-balance.md §3; `--stride`/`--period`/`--duty` override). `--no-sway` / `--no-catch` / `--no-place` turn off the sway, the early-touchdown reflex and forward placement (§3d). On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
 | `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]` | Body pose over STANCE and the gait (P2, `SET_BODY_POSE`) |
 | `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit). *`kilo eyes`, `kilo beep`*: not yet (the messages exist; no CLI, no WS2812 driver) |
 | `kilo trick list\|show NAME\|upload NAME [--force]\|play NAME [--mirror] [--speed X] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); *`import-legacy FILE` and `edit NAME`* later (the library itself is regenerated from the legacy skills by `python -m kilo.tricks.import_legacy`) |

@@ -195,7 +195,8 @@ def validate_shared(spec: dict) -> None:
     [balance], [head]) against each other and the wire ranges."""
     link = spec["link"]
     g = spec["gait"]
-    if set(g) != {"bob_deg", "wag_deg", "sway_roll_deg", "sway_pitch_deg", "touchdown_rate_dps", "stance_h_256"}:
+    if set(g) != {"bob_deg", "wag_deg", "sway_roll_deg", "sway_pitch_deg", "sway_lead_ms", "touchdown_rate_dps",
+                  "capture_mm_per_rad_s", "capture_max_mm", "stance_h_256"}:
         raise SpecError("gait: unexpected or missing keys")
     for k in ("bob_deg", "wag_deg"):
         if not 0 <= g[k] <= 90:
@@ -203,6 +204,12 @@ def validate_shared(spec: dict) -> None:
     for k in ("sway_roll_deg", "sway_pitch_deg"):
         if not 0 <= g[k] <= 30:
             raise SpecError(f"gait.{k}: 0..30")
+    if not 0 <= g["sway_lead_ms"] <= 300:  # dphi (<= 4369, period 300 ms) x 15 ticks fits a u16
+        raise SpecError("gait.sway_lead_ms: 0..300")
+    if not 0 <= g["capture_mm_per_rad_s"] <= 20:
+        raise SpecError("gait.capture_mm_per_rad_s: 0..20")
+    if not 0 <= g["capture_max_mm"] <= 30:  # an i8 in q2 (1/4 mm)
+        raise SpecError("gait.capture_max_mm: 0..30")
     if not 10 <= g["touchdown_rate_dps"] <= 1000:
         raise SpecError("gait.touchdown_rate_dps: 10..1000")
     if not 1 <= g["stance_h_256"] <= 255:
@@ -577,7 +584,10 @@ def gen_c_shared(spec: dict, w) -> None:
     w(f"#define KILO_GAIT_WAG_DEG {g['wag_deg']} /* tail wag amplitude, deg */")
     w(f"#define KILO_GAIT_SWAY_ROLL_DEG {g['sway_roll_deg']} /* SWAY: roll amplitude, deg */")
     w(f"#define KILO_GAIT_SWAY_PITCH_DEG {g['sway_pitch_deg']} /* SWAY: pitch amplitude, deg */")
+    w(f"#define KILO_GAIT_SWAY_LEAD_MS {g['sway_lead_ms']} /* SWAY: lead of the sway over the legs, ms */")
     w(f"#define KILO_GAIT_TOUCHDOWN_RATE_DPS {g['touchdown_rate_dps']} /* CATCH: tipping rate that ends a swing, deg/s */")
+    w(f"#define KILO_GAIT_CAPTURE_MM_PER_RAD_S {g['capture_mm_per_rad_s']} /* PLACE: touchdown shift per rad/s of pitch rate, mm */")
+    w(f"#define KILO_GAIT_CAPTURE_MAX_MM {g['capture_max_mm']} /* PLACE: clamp on the shift, mm */")
     w(f"#define KILO_GAIT_STANCE_H_256 {g['stance_h_256']} /* STANCE's body height, /256 of L1 + L2 */")
     pats = spec["gait_patterns"]
     w(f"#define KILO_GAIT_PATTERN_COUNT {len(pats)}")
@@ -933,7 +943,10 @@ def gen_py_shared(spec: dict, w) -> None:
     w(f"GAIT_WAG_DEG = {g['wag_deg']}")
     w(f"GAIT_SWAY_ROLL_DEG = {g['sway_roll_deg']}")
     w(f"GAIT_SWAY_PITCH_DEG = {g['sway_pitch_deg']}")
+    w(f"GAIT_SWAY_LEAD_MS = {g['sway_lead_ms']}")
     w(f"GAIT_TOUCHDOWN_RATE_DPS = {g['touchdown_rate_dps']}")
+    w(f"GAIT_CAPTURE_MM_PER_RAD_S = {g['capture_mm_per_rad_s']}")
+    w(f"GAIT_CAPTURE_MAX_MM = {g['capture_max_mm']}")
     w(f"GAIT_STANCE_H_256 = {g['stance_h_256']}")
     w("")
     w("")

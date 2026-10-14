@@ -272,6 +272,7 @@ class GaitFlags(enum.IntFlag):
     BALANCE = 1 << 2
     SWAY = 1 << 3
     CATCH = 1 << 4
+    PLACE = 1 << 5
 
 
 class TrickFlags(enum.IntFlag):
@@ -2441,7 +2442,10 @@ GAIT_BOB_DEG = 4
 GAIT_WAG_DEG = 15
 GAIT_SWAY_ROLL_DEG = 8
 GAIT_SWAY_PITCH_DEG = 4
+GAIT_SWAY_LEAD_MS = 225
 GAIT_TOUCHDOWN_RATE_DPS = 90
+GAIT_CAPTURE_MM_PER_RAD_S = 7
+GAIT_CAPTURE_MAX_MM = 3
 GAIT_STANCE_H_256 = 205
 
 
