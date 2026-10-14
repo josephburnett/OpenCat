@@ -169,7 +169,7 @@ every walk.
 ```sh
 kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--speed MM_S] [--stride MM]
           [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
-          [--no-sway] [--no-catch]
+          [--no-sway] [--no-catch] [--no-place]
           [--for S] [--wait S]
 kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]
 kilo posture stance          # the IK standing posture the gait starts from and hands over to
@@ -208,7 +208,9 @@ discs, 6 mm less than above the floor). Head bob, tail wag and balance are on un
 `--no-...`; so is sway (the body leans away from the lifting leg, toward the
 three feet that stay down) for walk and crawl (the trot has none), and
 catch for every pattern (early touchdown: a swinging leg lands at once when
-the body tips toward it faster than 90°/s; `--no-catch`). Out-of-range values are refused before anything is sent (the
+the body tips toward it faster than 90°/s; `--no-catch`) and place
+for every pattern (forward placement: a lifting leg lands up to 3 mm ahead
+or behind, 7 mm per rad/s of pitch rate; `--no-place`). Out-of-range values are refused before anything is sent (the
 ranges are the spec's). The body moves to STANCE first from any other
 posture; a walk replaces the posture goal (like a trick). The command exits
 with status 1 if the body refuses SET_GAIT (printed with a hint: UNKNOWN_TYPE
@@ -228,7 +230,7 @@ GAIT_STOPPED and SET_GAIT refusals.
 
 In Python: `BodyClient.walk(stride_mm=None, turn_mm=0, pattern="trot",
 period_ms=None, duty=None, step_h_mm=None, body_h_mm=None, bob=True,
-wag=True, balance=True, sway=None, catch=True)` (sway None: on for walk and crawl; returns the wire
+wag=True, balance=True, sway=None, catch=True, place=True)` (sway None: on for walk and crawl; returns the wire
 fields; `gait_timing(pattern, speed_mm_s)` gives period, duty and stride for a speed,
 `walk_args(direction, pattern, speed_mm_s=...)` the walk() arguments), `stop_walk(wait_s=None)`
 (returns the GAIT_STOPPED count for `wait_gait_stopped(n, timeout)` or, with

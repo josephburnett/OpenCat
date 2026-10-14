@@ -46,7 +46,7 @@ uint8_t gait_check(const uint8_t* p) {
   uint16_t per = rd16(p + 3);
   int8_t stride = (int8_t)p[6], turn = (int8_t)p[7];
   bool bad = p[1] > 1 || p[2] > 2 || (per && (per < 300 || per > 2000)) || (p[5] && (p[5] < 128 || p[5] > 230)) ||
-             stride < -60 || stride > 60 || turn < -40 || turn > 40 || p[8] > 40 || (p[10] & ~31u);
+             stride < -60 || stride > 60 || turn < -40 || turn > 40 || p[8] > 40 || (p[10] & ~63u);
   return bad ? 2 : 0;  // GOAL_BAD_ARG : GOAL_OK (core/body.h)
 }
 
@@ -58,6 +58,8 @@ void gait_goal(Gait& g, const uint8_t* p) {
   if (!per) per = PGM_U16(&PAT[pat].period_ms);
   // 65536 * 20 ms / period: one division per goal, none per tick.
   g.dphi = (uint16_t)(1310720UL / per);
+  // The sway's lead: dphi * lead ticks (spec range: <= 4369 * 15 < 2^16).
+  g.lead = (uint16_t)(((uint32_t)g.dphi * GAIT_SWAY_LEAD_Q6) >> 6);
   g.duty_g = p[5];
   g.stride_g = (int8_t)p[6];
   g.turn_g = (int8_t)p[7];
@@ -84,6 +86,7 @@ void gait_start(Gait& g) {
   g.pat = g.pattern;
   g.phi = g.amp = 0;
   g.armed = 0;
+  memset(g.place, 0, sizeof g.place);
   // The stride starts from the goal: the ramp (amp) brings it in. The body
   // height slews from STANCE's to the goal's.
   g.duty = duty_goal(g);
@@ -140,6 +143,12 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
     if (att->rate_pitch > GAIT_TOUCHDOWN_A16S) tip |= 0x3;
     if (att->rate_pitch < -GAIT_TOUCHDOWN_A16S) tip |= 0xC;
   }
+  // Forward placement (gait.h): the shift a leg lifting this tick takes.
+  int16_t cap = 0;
+  if (att && g.state == GS_RUN && (g.flags & KILO_GAIT_FLAGS_PLACE)) {
+    int32_t v = ((int32_t)att->rate_pitch * GAIT_CAPTURE_Q16 + 32768) >> 16;  // rounded
+    cap = (int16_t)(v > GAIT_CAPTURE_MAX_Q2 ? GAIT_CAPTURE_MAX_Q2 : v < -GAIT_CAPTURE_MAX_Q2 ? -GAIT_CAPTURE_MAX_Q2 : v);
+  }
   uint16_t b16 = (uint16_t)(g.duty << 8);
   // 1/beta and 1/(1 - beta) as 2^30 / x, so each leg's s is a multiply
   // (two divisions per tick, not eight). duty is 128..230, so b16 >= 32768
@@ -161,7 +170,7 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
     uint16_t sw = (uint16_t)(0u - b16), hw = (uint16_t)(sw + (sw >> 1));
     uint16_t k = (uint16_t)((inv_sw * 30) >> 8);
     if (hw > 32768) hw = 32768, k = A16_180 * 2;
-    uint16_t mid = (uint16_t)(32768u + (b16 >> 1));
+    uint16_t mid = (uint16_t)(32768u + (b16 >> 1) - g.lead);  // mid-swing, less the lead
     for (uint8_t leg = 0; leg < 4; leg++) {
       int16_t d = (int16_t)(leg_phase(g, leg) - mid);
       uint16_t ad = d < 0 ? (uint16_t)(0u - (uint16_t)d) : (uint16_t)d;
@@ -212,12 +221,23 @@ void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* a
         // whose vertical speed is largest at lift-off; see gait.h). Tipping
         // toward this leg: down now, for the rest of the swing.
         if (tip & bit) g.armed &= (uint8_t)~bit;
+        // Lift-off (armed, on the ground last tick): this swing's placement.
+        // A swing that does not lift (never armed, or caught on this tick)
+        // gets none, set on its first tick; a leg caught later in its swing
+        // keeps its shift (dropping it would jump the foot).
+        if ((g.down & bit) && ((g.armed & bit) || (uint16_t)(p - b16) < g.dphi))
+          g.place[leg] = (int8_t)((g.armed & bit) ? cap : 0);
         if (g.armed & bit) {
           z = (int16_t)(z - (((int32_t)g.step * (Q14_ONE - fx_cos((int16_t)(2 * a)))) >> 15));
           down &= (uint8_t)~bit;  // armed in swing: in the air
         }
       }
       x = (int16_t)(x + ((s_i * e) >> 14));
+      // Placement: place (e + 1/2), i.e. (1 - cos pi s)/2 in the swing and
+      // 1 - s in the stance after it.
+      // (Rounded: a floor would put a negative shift's first and last
+      // quarter-millimetre in at once.)
+      if (g.place[leg]) x = (int16_t)(x + ((g.place[leg] * (e + 8192) + 8192) >> 14));
     }
     ik_leg(leg, x, z, &g.leg[leg], &g.leg[4 + leg]);
   }

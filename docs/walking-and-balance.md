@@ -190,6 +190,19 @@ ground" if it also watches pitch.
    the trot lands the leg on the falling side and halves the lean (7.3° vs
    15.5°).
 6. **Forward placement and terrain** later, on the same state.
+   *Forward placement done 2026-10-13* (§3d "Forward placement", SET_GAIT
+   flag `PLACE`, on by default, `kilo walk --no-place`): at a lift-off the
+   leg's touchdown moves 7 mm per rad/s of pitch rate (τ·h), forward on a
+   nose-down rate, clamped to 3 mm (the trot's 150 ms swing has no more
+   slew to give). In a capture plant with a rigid stance it neither helps
+   nor hurts the pitch after a fore-aft shove (three or four feet stop the
+   shove before any foot lifts); normal walking shifts the feet by at most
+   1.25 mm. Terrain: not started.
+   Also from the plant (**fixed** 2026-10-13, the "sway finding" of §3f):
+   the walk's sway crossed zero at the lift-offs where it changes sides, so
+   with the servo lag the body leaned up to 3.8° toward the lifting leg; the
+   sway now runs 225 ms ahead (`[gait] sway_lead_ms`) and the body leans at
+   least 4.0° (walk) and 7.5° (crawl) away from every leg as it lifts.
 
 Each step is testable on the stand first (legs in the air: cadence, servo
 slew, sway pattern) and then on the floor with the roll trace as the

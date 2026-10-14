@@ -227,6 +227,7 @@ WAG = 1
 BALANCE = 2
 SWAY = 3                       # planned roll/pitch away from the lifting leg ([gait] sway_*_deg; doc §3d)
 CATCH = 4                      # early touchdown: a swing ends when the body tips toward its leg ([gait] touchdown_rate_dps; doc §3d)
+PLACE = 5                      # forward placement: a lifting leg lands ahead/behind by the pitch rate ([gait] capture_*; doc §3d)
 
 [flags.trick_flags]
 BALANCE = 0
@@ -983,7 +984,10 @@ bob_deg = 4                    # head bob amplitude: tilt += bob sin(2 * 2 pi ph
 wag_deg = 15                   # tail wag amplitude: tail += wag sin(2 pi phi), scaled by the stride ramp
 sway_roll_deg = 8              # SWAY flag: roll away from a lifting leg's side at its mid-swing, scaled by the stride ramp
 sway_pitch_deg = 4             # SWAY flag: pitch away from a lifting leg's end (front/back), likewise
+sway_lead_ms = 225             # SWAY flag: the sway runs this far ahead of the legs: the servo lag (150 ms) and 75 ms more, so the lean has crossed sides by a lift-off (doc §3d), 0..300
 touchdown_rate_dps = 90        # CATCH flag: a swinging leg lands at once when the body's roll (pitch) rate toward its side (end) exceeds this
+capture_mm_per_rad_s = 7       # PLACE flag: a lifting leg lands this much further forward per rad/s of nose-down pitch rate (tau h = 0.09 s x 80 mm)
+capture_max_mm = 3             # PLACE flag: the clamp on that shift, mm: the trot's 150 ms swing at stride 25 already steps 9.62 deg/tick, +3 mm makes it 9.88 and +4 hits the 10 deg/tick safety slew; walk and crawl would take 15
 stance_h_256 = 205             # STANCE's body height when IDLE enters it from another posture: /256 of (L1 + L2), 0.80
 
 # Per pattern, keyed by the [enums.gait_pattern] names (every pattern, in enum

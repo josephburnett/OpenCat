@@ -3,7 +3,7 @@ SET_BODY_POSE; docs/architecture.md §3d, P2).
 
     kilo walk [forward|back|left|right|march|stop] [--speed MM_S] [--stride MM] [--turn MM]
               [--pattern trot|walk|crawl] [--period MS] [--duty N] [--step-h MM]
-              [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--for S]
+              [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--no-place] [--for S]
     kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM]
               [--posture stance|...] [--for S]
 
@@ -94,6 +94,8 @@ def add_parser(sub: Any, commands: dict) -> None:
                    help="no body sway away from the lifting leg (default: on for walk and crawl)")
     s.add_argument("--no-catch", action="store_true",
                    help="no early touchdown (a swinging leg lands at once when the body tips toward it; default on)")
+    s.add_argument("--no-place", action="store_true",
+                   help="no forward placement (a lifting leg lands ahead/behind by the pitch rate; default on)")
     s.add_argument("--for", dest="hold", type=float, default=None, metavar="S",
                    help="walk S seconds, then stop (default: until Ctrl-C)")
     s.add_argument("--wait", type=float, default=None, metavar="S",
@@ -172,7 +174,8 @@ def walk_fields(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any
     gait = dict(period_ms=period if args.period is None else args.period,
                 duty=duty if args.duty is None else args.duty, step_h_mm=args.step_h, body_h_mm=args.body_h,
                 bob=not args.no_bob, wag=not args.no_wag, balance=not args.no_balance,
-                sway=False if getattr(args, "no_sway", False) else None, catch=not getattr(args, "no_catch", False))
+                sway=False if getattr(args, "no_sway", False) else None, catch=not getattr(args, "no_catch", False),
+                place=not getattr(args, "no_place", False))
     return kw, gait
 
 
