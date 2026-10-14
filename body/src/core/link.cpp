@@ -440,6 +440,7 @@ static void telemetry(const Body& b) {
   for (uint8_t k = 0; k < DRIVEN_COUNT; k++)
     if (b.arb.out[k] != JOINT_OFF) fl = KILO_TELEMETRY_FLAGS_SERVOS_POWERED;
   if (body_balance_active(b)) fl |= KILO_TELEMETRY_FLAGS_BALANCE_ACTIVE;
+  if (body_balance_held(b)) fl |= KILO_TELEMETRY_FLAGS_BALANCE_HELD;
   if (b.imu_fault) fl |= KILO_TELEMETRY_FLAGS_IMU_FAULT;
   if (b.batt.level >= BATT_WARN) fl |= KILO_TELEMETRY_FLAGS_BATT_WARN;
   if (b.wd.armed && !b.wd.stage) fl |= KILO_TELEMETRY_FLAGS_LINK_OK;

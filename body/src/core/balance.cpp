@@ -78,7 +78,7 @@ KILO_NOINLINE static int32_t shr_round(int32_t v, uint8_t n) {
 
 void balance_reset(Balance& b) {
   for (uint8_t a = 0; a < 2; a++) b.ax[a].lp = b.ax[a].corr = 0;
-  b.active = 0;
+  b.active = b.hold = 0;
 }
 
 void balance_init(Balance& b) {

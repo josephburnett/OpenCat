@@ -387,6 +387,18 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   // any leg response between 0 and 2x the model's. Leaving it for a
   // joint-space owner zeroes the corrections (they mean something else
   // there).
+  //
+  // Stance-aware under the gait (docs/walking-and-balance.md §4, §5 items
+  // 4-5). The reference is the plan: the gait's planned sway is subtracted
+  // too (slope = measured - corr - pose - plan), so the body ends at pose +
+  // plan + slope (1 - Kp) and the sway is the target, not a disturbance.
+  // (g.plan_* and g.down are the last gait_legs()'s: the tick whose
+  // commands the measured attitude answers.) On fewer than three feet the
+  // body pivots on a diagonal and what it reads is the fall (90 ms time
+  // constant), not the slope; the loop acts 250 ms later and would push the
+  // wrong way. So the corrections are held there, neither updated nor
+  // decayed, and for BAL_HOLD_TICKS after the third foot lands (the body
+  // still settles from the rock). bal.hold counts that down.
   bool geo = !b.kf.run && !b.arb.reflex_active && (gait_on || (p == POSTURE_STANCE && !arbiter_idle_moving(b.arb)));
   if (g.geo && !geo) balance_reset(b.bal);
   g.geo = geo;
@@ -394,10 +406,18 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
     balance_step(b.bal, kf_balance(b.kf) && !b.imu_fault, b.att, kf_ref_roll(b.kf), kf_ref_pitch(b.kf));
   } else if (geo) {
     bool want = (gait_on ? (g.flags & KILO_GAIT_FLAGS_BALANCE) : (b.balance_req || b.bal.enable)) && !b.imu_fault;
-    Attitude slope = b.att;
-    slope.pitch = (int16_t)(slope.pitch - b.bal.ax[BAL_PITCH].corr - g.pose[0]);
-    slope.roll = (int16_t)(slope.roll - b.bal.ax[BAL_ROLL].corr - g.pose[1]);
-    balance_step(b.bal, want, slope, 0, 0);
+    if (gait_feet_down(g) < 3)
+      b.bal.hold = BAL_HOLD_TICKS + 1;
+    else if (b.bal.hold)
+      b.bal.hold--;
+    if (want && b.bal.hold) {
+      b.bal.active = 1;
+    } else {
+      Attitude slope = b.att;
+      slope.pitch = (int16_t)(slope.pitch - b.bal.ax[BAL_PITCH].corr - g.pose[0] - g.plan_pitch);
+      slope.roll = (int16_t)(slope.roll - b.bal.ax[BAL_ROLL].corr - g.pose[1] - g.plan_roll);
+      balance_step(b.bal, want, slope, 0, 0);
+    }
   } else if (b.arb.reflex_active || arbiter_idle_moving(b.arb) || !(p == POSTURE_SIT || p == POSTURE_STAND)) {
     balance_reset(b.bal);
   } else {
@@ -405,7 +425,10 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
     balance_step(b.bal, want, b.att, posture_roll(p), posture_pitch(p));
   }
   // The legs' IK angles for this tick (the gait's feet, or STANCE's).
-  if (gait_on || p == POSTURE_STANCE) gait_legs(g, b.bal.ax[BAL_ROLL].corr, b.bal.ax[BAL_PITCH].corr);
+  // The early-touchdown reflex (flag CATCH) reads the body rates; not with
+  // a faulty IMU.
+  if (gait_on || p == POSTURE_STANCE)
+    gait_legs(g, b.bal.ax[BAL_ROLL].corr, b.bal.ax[BAL_PITCH].corr, b.imu_fault ? nullptr : &b.att);
   // Paused under a trick: the phase runs on, but the stride starts again
   // from 0 and no foot lifts until it has been in stance, so when the trick
   // hands the legs back (crossfading) every foot is down under its shoulder,

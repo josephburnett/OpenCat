@@ -169,7 +169,7 @@ every walk.
 ```sh
 kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--speed MM_S] [--stride MM]
           [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
-          [--no-sway]
+          [--no-sway] [--no-catch]
           [--for S] [--wait S]
 kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]
 kilo posture stance          # the IK standing posture the gait starts from and hands over to
@@ -206,7 +206,9 @@ from the body's params (Kilo's measured legs are the defaults: 45 + 50 mm,
 so 76 mm; heights are shoulder axle to the centres of the 6 mm-radius foot
 discs, 6 mm less than above the floor). Head bob, tail wag and balance are on unless
 `--no-...`; so is sway (the body leans away from the lifting leg, toward the
-three feet that stay down) for walk and crawl (the trot has none). Out-of-range values are refused before anything is sent (the
+three feet that stay down) for walk and crawl (the trot has none), and
+catch for every pattern (early touchdown: a swinging leg lands at once when
+the body tips toward it faster than 90°/s; `--no-catch`). Out-of-range values are refused before anything is sent (the
 ranges are the spec's). The body moves to STANCE first from any other
 posture; a walk replaces the posture goal (like a trick). The command exits
 with status 1 if the body refuses SET_GAIT (printed with a hint: UNKNOWN_TYPE
@@ -226,7 +228,7 @@ GAIT_STOPPED and SET_GAIT refusals.
 
 In Python: `BodyClient.walk(stride_mm=None, turn_mm=0, pattern="trot",
 period_ms=None, duty=None, step_h_mm=None, body_h_mm=None, bob=True,
-wag=True, balance=True, sway=None)` (sway None: on for walk and crawl; returns the wire
+wag=True, balance=True, sway=None, catch=True)` (sway None: on for walk and crawl; returns the wire
 fields; `gait_timing(pattern, speed_mm_s)` gives period, duty and stride for a speed,
 `walk_args(direction, pattern, speed_mm_s=...)` the walk() arguments), `stop_walk(wait_s=None)`
 (returns the GAIT_STOPPED count for `wait_gait_stopped(n, timeout)` or, with
@@ -524,8 +526,8 @@ can watch the watchdog timeline. Two modes send nothing at all:
   is when the watchdog was last fed.
 
 Timeline lines carry seconds since t=0 at 0.1 s resolution: every EVENT, each
-change of TELEMETRY mode, epoch, owners and flags (DIST_FRESH and OVERRUN
-flicker and are left out), and a telemetry summary every second. The watchdog
+change of TELEMETRY mode, epoch, owners and flags (DIST_FRESH, OVERRUN and
+BALANCE_HELD flicker and are left out), and a telemetry summary every second. The watchdog
 from a held STAND reads (on the virtual body with `WD_LIMP_S` 1):
 
 ```

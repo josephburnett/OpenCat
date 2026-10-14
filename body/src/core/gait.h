@@ -56,6 +56,23 @@
 // sides and ends: the sum is exactly 0 (a line has no triangle to lean
 // into). plan_* enter H_i with the pose and the balance correction.
 //
+// Early touchdown (SET_GAIT flag CATCH; docs/walking-and-balance.md §4):
+// a foot on the ground is the only thing that stops a sideways fall on this
+// cat (the legs move only fore-aft), and on a diagonal the body tips with a
+// 90 ms time constant, faster than the balance loop can act. So while the
+// gait runs (GS_RUN only: the stop puts every foot down anyway), a leg in
+// its swing lands at once when the body tips toward it faster than
+// KILO_GAIT_TOUCHDOWN_RATE_DPS: its armed bit is cleared, so for the rest
+// of this swing z = H_i (no further lift) and its down bit is set; the
+// next stance arms it again. Its x keeps the swing's path (on the ground:
+// holding x would need a stored x per leg and a jump at the next stance).
+// Sign (§3f: RIGHT side up = +roll, nose DOWN = +pitch): roll increasing
+// means the right side rises and the left side drops, so the body falls
+// toward the LEFT legs: a left leg lands on rate_roll > +thr, a right leg
+// on rate_roll < -thr. Pitch increasing is the nose dropping: a front leg
+// lands on rate_pitch > +thr, a back leg on rate_pitch < -thr. One compare
+// per axis per tick; the test is the plant in test_gait.cpp ("catch").
+//
 // The Gait struct also holds STANCE's height (h) and the body pose
 // (SET_BODY_POSE), which apply to IDLE STANCE as well as to the gait, and
 // the 8 leg angles of this tick (gait or STANCE; the arbiter reads them).
@@ -63,6 +80,7 @@
 #define KILO_CORE_GAIT_H
 #include <stdint.h>
 #include "../proto/kilo_protocol.h"
+#include "attitude.h"
 
 enum GaitState : uint8_t { GS_OFF = 0, GS_RUN = 1, GS_STOP = 2, GS_LAND = 3 };
 
@@ -72,6 +90,7 @@ enum GaitState : uint8_t { GS_OFF = 0, GS_RUN = 1, GS_STOP = 2, GS_LAND = 3 };
 #define GAIT_WAG_A16 (KILO_GAIT_WAG_DEG * 16)
 #define GAIT_SWAY_ROLL_A16 (KILO_GAIT_SWAY_ROLL_DEG * 16)
 #define GAIT_SWAY_PITCH_A16 (KILO_GAIT_SWAY_PITCH_DEG * 16)
+#define GAIT_TOUCHDOWN_A16S (KILO_GAIT_TOUCHDOWN_RATE_DPS * 16)  // a16/s, as Attitude's rates
 
 struct Gait {
   // SET_GAIT goal as received (0 = the pattern's default for period,
@@ -123,8 +142,9 @@ void gait_start(Gait& g);
 // sequence ends: all feet are down and the legs go back to IDLE STANCE.
 bool gait_step(Gait& g);
 // Fill leg[] for this tick: the gait's feet while it runs, else STANCE.
-// corr: the balance corrections (roll, pitch, a16), used when g.geo.
-void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch);
+// corr: the balance corrections (roll, pitch, a16), used when g.geo. att:
+// the body rates for the early touchdown (flag CATCH), null for none.
+void gait_legs(Gait& g, int16_t corr_roll, int16_t corr_pitch, const Attitude* att);
 // Head bob (k = 1, tilt) and tail wag (k = 2), a16, scaled by the ramp.
 int16_t gait_head(const Gait& g, uint8_t k);
 

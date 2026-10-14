@@ -6,7 +6,8 @@ seconds relative to ``t0`` (0.1 s resolution):
 
 - every EVENT the body emits, as it arrives;
 - each change of TELEMETRY mode, epoch, owners and flags (the flags that
-  flicker by design, DIST_FRESH and OVERRUN, are left out of the diff);
+  flicker by design, DIST_FRESH, OVERRUN and BALANCE_HELD (twice per trot
+  cycle), are left out of the diff);
 - a HELLO (boot), telemetry lost / back;
 - once a second, a telemetry summary line (from ``poll()``), with the gait
   phase (0..1) while the body walks (mode GAIT or the GAIT flag); EVENT
@@ -26,7 +27,7 @@ from kilo import ir
 from kilo.link import consts
 from kilo.link.serial_link import SerialLink
 
-VOLATILE_FLAGS = frozenset({"dist_fresh", "overrun"})
+VOLATILE_FLAGS = frozenset({"dist_fresh", "overrun", "balance_held"})
 
 
 def _owners(v: int) -> str:
