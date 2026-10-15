@@ -50,6 +50,12 @@ uint8_t feet_check(const uint8_t* p) {
     uint8_t z = p[7 + i];
     if (x < -60 || x > 60 || z < 30 || z > 95) return 2;  // GOAL_BAD_ARG (core/body.h)
   }
+  // pitch, roll within +-30 deg: the reference adds SET_BODY_POSE's +-30 deg
+  // and the balance subtracts it from the attitude, all in int16.
+  for (uint8_t i = 0; i < 2; i++) {
+    int16_t a = (int16_t)rd16(p + 11 + 2 * i);
+    if (a < -POSE_MAX || a > POSE_MAX) return 2;
+  }
   return (p[15] & 0xF0u) ? 2 : 0;
 }
 

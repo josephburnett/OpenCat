@@ -94,7 +94,8 @@ void feet_stance_default(Feet& f);
 // dheight, xshift i8 mm); pitch and roll are clamped to +-30 deg.
 void feet_pose_goal(Feet& f, const uint8_t* p);
 
-// FEET payload range check (x -60..60, z 30..95 mm, support bits 0-3 only).
+// FEET payload range check (x -60..60, z 30..95 mm, pitch and roll -30..30
+// deg, support bits 0-3 only).
 // p = the whole payload. Returns a GoalResult (OK or BAD_ARG).
 uint8_t feet_check(const uint8_t* p);
 // Queue a checked FEET (p = the whole payload) after tick `now` was played.

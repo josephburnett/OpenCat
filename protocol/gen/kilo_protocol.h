@@ -360,15 +360,15 @@ KILO_STATIC_ASSERT(offsetof(kilo_set_posture_t, posture) == 1, kilo_sa_set_postu
 KILO_STATIC_ASSERT(offsetof(kilo_set_posture_t, transition_ticks) == 2, kilo_sa_set_posture_transition_ticks);
 KILO_STATIC_ASSERT(offsetof(kilo_set_posture_t, flags) == 3, kilo_sa_set_posture_flags);
 
-/* 0x11 FEET: stream, epoch. One tick of the mind's plan (doc §3d): where each foot is at `tick` and the attitude the plan predicts there. Sent every tick, about link.feet_lookahead_ticks ahead; not acked, not refreshed, not retried. The body queues up to link.feet_depth ticks and plays each at its tick, slew-limited from where the feet are (a late or missing tick never snaps). The first FEET accepted enters GAIT (gated: STALE, FALLEN, LOW_BATT, UNCALIBRATED -> EVENT GOAL_REFUSED, rate-limited) and the stream owns the legs until a SET_POSTURE or an epoch bump (GAIT_STOPPED arg 0). A tick already past is dropped (STATS feet_late). When the queue runs dry the body holds the last pose for link.feet_hold_ticks (EVENT FEET_UNDERRUN), then settles: swing feet down to the ground at their x, IDLE in STANCE (GAIT_STOPPED arg 1). In GAIT the balance loop's reference is this pitch/roll, it corrects through the support feet only, and it holds its corrections while any support bit is clear (TELEMETRY flag BALANCE_HELD; doc §3f). */
+/* 0x11 FEET: stream, epoch. One tick of the mind's plan (doc §3d): where each foot is at `tick` and the attitude the plan predicts there. Sent every tick, about link.feet_lookahead_ticks ahead; not acked, not refreshed, not retried. The body queues up to link.feet_depth ticks and plays each at its tick, slew-limited from where the feet are (a late or missing tick never snaps). A field outside its range (x_mm, z_mm, pitch, roll) or a support bit above bit 3 is refused BAD_ARG. The first FEET accepted enters GAIT (gated: BAD_ARG, STALE, FALLEN, LOW_BATT, UNCALIBRATED -> EVENT GOAL_REFUSED, rate-limited) and the stream owns the legs until a SET_POSTURE or an epoch bump (GAIT_STOPPED arg 0). A tick already past is dropped (STATS feet_late). When the queue runs dry the body holds the last pose for link.feet_hold_ticks (EVENT FEET_UNDERRUN), then settles: swing feet down at their x to the ground (the plane through the support feet when three are down, else their mean depth), IDLE in STANCE (GAIT_STOPPED arg 1). In GAIT the balance loop's reference is this pitch/roll, it corrects through the support feet only, and it holds its corrections while any support bit is clear (TELEMETRY flag BALANCE_HELD; doc §3f). */
 #define KILO_FEET_LEN 16u
 typedef struct KILO_PACKED kilo_feet_s {
     uint8_t epoch;
     uint16_t tick; /* tick; the body tick this pose is for (TELEMETRY.tick's clock) */
     int8_t x_mm[4]; /* mm; range -60..60; foot fore-aft from under the hip, + forward; legs LF RF RB LB */
     uint8_t z_mm[4]; /* mm; range 30..95; foot depth below the hip, i.e. the body height at that leg; legs LF RF RB LB */
-    int16_t pitch; /* deg x 0.0625; the attitude the plan predicts at tick: the balance reference (TELEMETRY conventions) */
-    int16_t roll; /* deg x 0.0625 */
+    int16_t pitch; /* deg x 0.0625; range -480..480; the attitude the plan predicts at tick: the balance reference (TELEMETRY conventions), +-30 deg */
+    int16_t roll; /* deg x 0.0625; range -480..480; +-30 deg */
     uint8_t support; /* flags support_flags; the feet on the ground at tick; the balance corrects through these only */
 } kilo_feet_t;
 KILO_STATIC_ASSERT(sizeof(kilo_feet_t) == 16, kilo_sa_feet_size);

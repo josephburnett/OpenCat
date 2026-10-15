@@ -574,7 +574,7 @@ and keeps its own safety limits (3c, 3g).
 | `tick` | the body tick this pose is for (TELEMETRY `tick`'s clock) |
 | `x_mm[4]` | each foot fore-aft from under its hip, + forward, −60..60 mm (legs LF RF RB LB) |
 | `z_mm[4]` | each foot's depth below its hip, 30..95 mm: the body height at that leg |
-| `pitch`, `roll` | the attitude the plan predicts at `tick` (TELEMETRY conventions, 1/16°): the balance's reference |
+| `pitch`, `roll` | the attitude the plan predicts at `tick` (TELEMETRY conventions, 1/16°), ±30°: the balance's reference |
 | `support` | bits LF RF RB LB: the feet the plan has on the ground at `tick` |
 
 The mind sends the pose for tick N + 1 + 5 before the body plays tick N + 1
@@ -590,7 +590,9 @@ tick is already played) or T > N + 8 (further ahead than the queue) is
 dropped and counted (STATS `feet_late`). A second FEET for a queued tick
 replaces it. Entries are only taken on their own tick, so none goes stale.
 A FEET is refused like a goal, with `EVENT GOAL_REFUSED` at most once per
-second: BAD_ARG for a field outside its range or a support bit above bit 3,
+second: BAD_ARG for a field outside its range (pitch and roll included: the
+reference adds `SET_BODY_POSE`'s ±30° and the balance's residual subtracts
+it from the attitude, all in int16) or a support bit above bit 3,
 then STALE, FALLEN, LOW_BATT and UNCALIBRATED (as `SET_POSTURE STAND`). It
 also releases the warm-boot hold, as a goal does.
 

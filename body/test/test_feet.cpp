@@ -388,6 +388,20 @@ static void test_refusals() {
   m[4] = 0, m[15] = 0x10;
   CHECK(body_feet(b, m.data()) == GOAL_BAD_ARG && b.feet.have == 0 && !b.feet.state);
   m[15] = 0xF;
+  // pitch and roll beyond +-30 deg (480 a16): BAD_ARG (in int16 the
+  // reference and the balance's residual could otherwise wrap).
+  for (int f = 11; f <= 13; f += 2) {
+    for (int16_t a : {(int16_t)481, (int16_t)-481, (int16_t)32767, (int16_t)-32768}) {
+      m[f] = (uint8_t)a, m[f + 1] = (uint8_t)(a >> 8);
+      CHECK(body_feet(b, m.data()) == GOAL_BAD_ARG && b.feet.have == 0 && !b.feet.state);
+    }
+    for (int16_t a : {(int16_t)480, (int16_t)-480}) {
+      m[f] = (uint8_t)a, m[f + 1] = (uint8_t)(a >> 8);
+      CHECK(body_feet(b, m.data()) == GOAL_OK);
+      feet_stop(b.feet);
+    }
+    m[f] = m[f + 1] = 0;
+  }
   // LOW_BATT, FALLEN, UNCALIBRATED, as SET_POSTURE STAND.
   b.batt.level = BATT_LOW;
   CHECK(body_feet(b, m.data()) == GOAL_LOW_BATT);
