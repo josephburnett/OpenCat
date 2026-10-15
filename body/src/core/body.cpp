@@ -511,13 +511,14 @@ GoalResult body_feet(Body& b, const uint8_t* p) {
   if (b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
   if (b.cfg->state == CFG_DEFAULTED) return GOAL_UNCALIBRATED;
   if (b.holder == RH_WARM_HOLD) release_reflex(b, RH_WARM_HOLD);  // the Pi takes over
-  if (!b.feet.state && arbiter_idle_posture(b.arb) != POSTURE_STANCE) {
+  bool first = !b.feet.state;
+  // (Late or too far ahead: dropped and counted, not refused.)
+  if (feet_push(b.feet, p, b.tick) && first && arbiter_idle_posture(b.arb) != POSTURE_STANCE) {
     // The stream's IDLE posture: STAND's head and tail now, STANCE's legs
     // when the stream ends.
     arbiter_set_idle(b.arb, POSTURE_STANCE, 0);
     feet_stance_default(b.feet);
   }
-  feet_push(b.feet, p, b.tick);  // (late or too far ahead: dropped and counted)
   return GOAL_OK;
 }
 

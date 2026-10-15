@@ -309,6 +309,14 @@ static void test_queue() {
   feet((uint16_t)(n + KILO_FEET_DEPTH + 1), p);
   link_poll();
   CHECK(b.feet.late == 3 && !body_gait_active(b) && b.feet.have == 0);
+  // (From SIT a dropped first FEET leaves IDLE's posture alone.)
+  posture(POSTURE_SIT);
+  feet(n, p);
+  link_poll();
+  CHECK(arbiter_idle_posture(b.arb) == POSTURE_SIT && b.feet.late == 4);
+  posture(POSTURE_STANCE);
+  tick(30);
+  n = b.tick;
   // The window: n+1 .. n+8 all queued (8 slots, 8 ticks).
   for (int a = 1; a <= (int)KILO_FEET_DEPTH; a++) {
     Pose q = p;
@@ -316,7 +324,7 @@ static void test_queue() {
     feet((uint16_t)(n + a), q);
   }
   link_poll();
-  CHECK(feet_queued(b.feet) == KILO_FEET_DEPTH && b.feet.late == 3);
+  CHECK(feet_queued(b.feet) == KILO_FEET_DEPTH && b.feet.late == 4);
   CHECK(body_gait_active(b) && body_mode(b) == KILO_MODE_GAIT && b.feet.state == FT_WAIT);
   // A repeat replaces its tick.
   Pose q = p;
@@ -334,7 +342,7 @@ static void test_queue() {
   feet(b.tick, p);
   feet((uint16_t)(b.tick + KILO_FEET_DEPTH + 1), p);
   tick();
-  CHECK(b.feet.late == 5 && b.feet.cur.x[0] == 3);
+  CHECK(b.feet.late == 6 && b.feet.cur.x[0] == 3);
   // STATS through the link.
   other.clear();
   send(KILO_MSG_STATS_REQ, {});
@@ -344,7 +352,7 @@ static void test_queue() {
     if (f.type == KILO_MSG_STATS) {
       kilo_stats_t st;
       memcpy(&st, f.payload.data(), sizeof st);
-      stats = st.feet_late == 5 && st.feet_underruns == 0;
+      stats = st.feet_late == 6 && st.feet_underruns == 0;
     }
   CHECK(stats);
   // A stream is never acked (nor refused while it is right).

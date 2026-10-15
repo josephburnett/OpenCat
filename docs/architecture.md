@@ -1331,7 +1331,7 @@ stack 309 B, margin 208 B. **With the early touchdown's second tick, held
 x and profile descent** (2026-10-13): 28756 B flash, 1536 B globals (+5 B:
 `Gait::caught[4]`, `tip_last`), stack 315 B, margin 197 B. **With the
 FEET player** (protocol 2.0, 2026-10-14; the gait generator removed):
-**26680 B flash** (−2076 B), **1537 B globals** (+1 B: the 71 B `Gait` out,
+**26674 B flash** (−2082 B), **1537 B globals** (+1 B: the 71 B `Gait` out,
 the 134 B `Feet` in (3d), 4 B of balance reference for TELEMETRY; to stay
 under the 1540 B ceiling the link's 66 B frame-encoding buffer and the
 tick's 16 B of leg angles moved from globals to the stack, where they are
