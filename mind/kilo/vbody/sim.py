@@ -29,12 +29,15 @@ both the same frames and compares the replies:
   through the support feet) on the walking physics (kilo.vbody.physics: a
   point mass on four feet that tips over an edge of its support as an
   inverted pendulum, with the servo lag ``lag_ms``). FEET is never acked. A
-  FEET is refused (EVENT GOAL_REFUSED, rate-limited like a goal) STALE,
-  FALLEN, LOW_BATT or UNCALIBRATED (config DEFAULTED, as STAND); the first
-  accepted one enters GAIT (a playing trick is pre-empted) from STANCE's feet:
-  mode GAIT, flag GAIT, leg owner GAIT, TELEMETRY's measured attitude from
-  the physics (plus ``imu_offset``), ref_*/corr_*/feet_queued/support from
-  the player. GAIT ends with EVENT GAIT_STOPPED: arg 0 on a SET_POSTURE (the
+  FEET is refused (EVENT GOAL_REFUSED, rate-limited like a goal) BAD_ARG
+  (x, z out of range, support bits above 3), STALE, FALLEN, LOW_BATT or
+  UNCALIBRATED (config DEFAULTED, as STAND); the first accepted one enters
+  GAIT from STANCE's feet (the posture becomes STANCE; a playing trick keeps
+  the legs it moves): mode GAIT, flag GAIT, leg owner GAIT, TELEMETRY's
+  measured attitude from the physics (plus ``imu_offset``), ref_* (0 while
+  the balance is off), corr_*, feet_queued and support from the player,
+  flag BALANCE_HELD while a foot is up. Outside GAIT, support is all four in
+  SIT, STAND and STANCE, else 0. GAIT ends with EVENT GAIT_STOPPED: arg 0 on a SET_POSTURE (the
   posture takes the legs) or an epoch bump (watchdog, fall, low battery: the
   legs stay in STANCE unless the reflex moves them), arg 1 when the settle
   after an underrun is done (posture STANCE, mode IDLE). Past 35 degrees of
@@ -574,11 +577,16 @@ class VirtualBody:
             ph = g.physics
             pitch, roll = ph.pitch + self.imu_offset[0], ph.roll + self.imu_offset[1]
             rate_p, rate_r = ph.rates
-            ref, corr = g.ref, (g.corr[0], g.corr[1])
+            ref = g.ref if self.balance_active else (0.0, 0.0)  # 0 while the balance is off
+            corr = (g.corr[0], g.corr[1])
             queued, support = g.queued(self.tick), g.support
+            if g.support != 0xF and self.balance_active:
+                flags |= F.BALANCE_HELD  # held while a foot is up
         elif self.posture == "STANCE":
             pitch += self.pose[0] / 16.0  # the body pose tilts the body (IK, §3d pose terms)
             roll += self.pose[1] / 16.0
+        if g is None and self.posture in ("SIT", "STAND", "STANCE") and not self.reflex and not self.trick.running:
+            support = 0xF  # IDLE standing or sitting: all four
         if self.fall_until is not None:
             roll = 85.0 * self.fall_side
         if self.posture != "LIMP" or g is not None:
@@ -786,6 +794,9 @@ class VirtualBody:
         reason = None
         if not self.p2:
             reason = R.UNKNOWN_TYPE
+        elif (any(not -60 <= v <= 60 for v in msg.x_mm) or any(not 30 <= v <= 95 for v in msg.z_mm)
+              or msg.support > 0xF):
+            reason = R.BAD_ARG
         elif msg.epoch != self.epoch:
             reason = R.STALE
         elif self.fallen:
@@ -803,9 +814,10 @@ class VirtualBody:
         if not g.offer(msg, self.tick):
             self.feet_late += 1
             return None
-        if self.feet is None:
-            self._trick_end(TDR.PREEMPTED)
+        if self.feet is None:  # GAIT (a playing trick keeps the legs it moves)
             self.feet = g
+            if self.posture not in ("LIMP", "REST"):
+                self.posture = "STANCE"
             self._say(f"gait: FEET from tick {msg.tick}")
         return None
 

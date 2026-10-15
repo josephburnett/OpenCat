@@ -177,6 +177,11 @@ class BodyClient:
                 raise ValueError(f"unknown posture {name!r}") from None
         if not 0 <= transition_ticks <= 255:
             raise ValueError("transition_ticks must be 0..255")
+        w = self._walker
+        if w is not None and w.active and threading.current_thread() is not w._thread:
+            # a posture takes the legs from the stream: end the stream first, so
+            # no FEET re-enters GAIT under the posture (refreshed at 5 Hz)
+            w.abort()
         self.link.set_goal("SET_POSTURE", posture=code, transition_ticks=transition_ticks,
                            flags=consts.POSTURE_BALANCE_FLAG if balance else 0)
 

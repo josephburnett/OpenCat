@@ -1739,12 +1739,10 @@ are in Appendix F.
 
 - `beep(notes)`, once the body implements BEEP-from-the-mind; `BodyAdapter`
   calls it when present and counts it in `unsupported` otherwise. Done:
-  `look(pan, tilt)` (P1) and, in P2, `walk(stride_mm, turn_mm, pattern, ...)`
-  / `stop_walk()` / `wait_gait_stopped()` / `walk_until_stopped()` and
-  `pose(...)` / `release_pose()` (SET_GAIT and SET_BODY_POSE as epoch motion
-  goals; the §3d per-pattern defaults; a stop, run=0, is never held back
-  before contact and is cleared by EVENT GAIT_STOPPED; `walk()` drops the
-  posture goal like `play()`). `BodyAdapter.walk/stop_walk` map to them, but
+  `look(pan, tilt)` (P1), `walk(direction, pattern, speed_mm_s, balance)` /
+  `stop_walk(wait_s)` / `walk_status()` (the planner's FEET stream,
+  `mind/kilo/planner/`; mind/README.md "Walking") and `pose(...)` /
+  `release_pose()` (SET_BODY_POSE, an epoch motion goal). `BodyAdapter.walk/stop_walk` map to them, but
   no behaviour walks yet: the owner decides when autonomous walking is
   allowed (explore stays the stand-and-look-around stub).
 - An event callback for epoch change, FELL, WATCHDOG and LOW_BATTERY (and
@@ -2539,8 +2537,8 @@ reference; this table is the overview.
 | `kilo status [--json]`, `kilo monitor [--passive] [--percepts]` | HELLO, state, link and body stats; live telemetry table (`--passive`: sends nothing, prints what the body does on its own) |
 | `kilo posture limp\|rest\|stand\|sit\|balance\|stance\|calib\|zero [--for S] [--pca] [--then-watch T]` | Hold a posture (`balance` = STAND + flag; `stance` = the IK standing posture) |
 | `kilo balance on\|off [--kp X] [--kd S] [--deadband D] [--clamp C] [--posture stand\|sit] [--for S]` | `SET_BALANCE` + hold the posture, a pitch/roll line per second |
-| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--speed MM_S] [--stride MM] [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--place] [--for S] [--wait S]` | Gait (P2, `mind/kilo/cli_walk.py`): `SET_GAIT` held until Ctrl-C/SIGTERM/`--for`, then the stop and a wait for GAIT_STOPPED; `walk stop` stops any walk. `--speed` sets stride, period and duty with the pattern's fixed swing time (docs/walking-and-balance.md §3; `--stride`/`--period`/`--duty` override). `--no-sway` / `--no-catch` turn off the sway and the early-touchdown reflex; `--place` turns forward placement on (off by default: no floor evidence yet, §3d). On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
-| `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]` | Body pose over STANCE and the gait (P2, `SET_BODY_POSE`) |
+| `kilo walk [forward\|back\|left\|right\|march\|stop] [--pattern walk\|trot\|crawl] [--speed MM_S] [--no-balance] [--for S] [--wait S]` | Walking (`mind/kilo/cli_walk.py`, `mind/kilo/planner/`): the mind plans the steps and streams `FEET` (§3d) until Ctrl-C/SIGTERM/`--for`, then the planned stop (each leg home, STANCE); `walk stop` stops any walk. `--speed` sets stride and shift with the pattern's fixed swing (docs/walking-and-balance.md §3, §10); `--no-balance` turns the balance off for the walk. Prints the error the body reports and the model's error estimates. On the floor only, never on a desk (printed before every walk). Keyboard driving: the IR remote (`kilo run --remote`) |
+| `kilo pose [set\|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]` | Body pose over STANCE (and the walk's reference, §3f; `SET_BODY_POSE`) |
 | `kilo look PAN TILT [--tail T] [--speed DPS] [--for S] [--posture P]` | Head (P1, `mind/kilo/cli_head.py`: `SET_HEAD` hold, released on exit). *`kilo eyes`, `kilo beep`*: not yet (the messages exist; no CLI, no WS2812 driver) |
 | `kilo trick list\|show NAME\|upload NAME [--force]\|play NAME [--mirror] [--speed X] [--repeats N] [--for S] [--posture P] [--then-watch T]\|stop` | Tricks (P1, `mind/kilo/cli_trick.py`); *`import-legacy FILE` and `edit NAME`* later (the library itself is regenerated from the legacy skills by `python -m kilo.tricks.import_legacy`) |
 | `kilo cal show\|set JOINT DEG\|save\|revert` | Joint calibration. *`kilo cal imu`* (IMU offset iteration on the Pi from IMU_RAW) not yet |

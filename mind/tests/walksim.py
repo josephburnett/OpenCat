@@ -106,9 +106,16 @@ class WalkSim:
         return [t for t in self.telemetry if t.mode == P.Mode.GAIT]
 
     def max_error(self, skip: int = 0) -> float:
-        """The largest |measured - predicted| (degrees) the body reported in GAIT."""
-        return max((max(abs(t.pitch - t.ref_pitch), abs(t.roll - t.ref_roll)) / 16.0
-                    for t in self.gait()[skip:]), default=0.0)
+        """The largest |measured - predicted| (degrees) in GAIT (the stream's
+        prediction for the tick: the body reports a reference only with its
+        balance on)."""
+        pred = self.pred()
+        return max((max(abs(t.pitch / 16.0 - pred[t.tick][0]), abs(t.roll / 16.0 - pred[t.tick][1]))
+                    for t in self.gait()[skip:] if t.tick in pred), default=0.0)
+
+    def pred(self) -> dict:
+        """u16 tick -> the (pitch, roll) the stream sent for it."""
+        return {f.tick: (f.pitch / 16.0, f.roll / 16.0) for f in self.link.sent}
 
     def fell(self) -> bool:
         return any(n == "FELL" for n, _ in self.events)

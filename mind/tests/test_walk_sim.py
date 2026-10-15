@@ -6,10 +6,12 @@ Kp 0.99, and the stream's timing. Deterministic: no threads, no wall time.
 What the virtual body can and cannot show: it is a rigid body on point
 feet. When the mass leaves the support it tips toward the lifted leg until
 that foot reaches the ground (about 11 degrees with the walk's 15 mm step;
-the floor run with the balance off rocked 15 degrees and stayed up), and
-the balance loop roughly doubles that (18 degrees; on the floor it went on
-to fall). The rigid catch stops it short of a fall here, so the test for
-"today's steps" is that they tip over the edge every swing."""
+the floor run with the balance off rocked 15 degrees and stayed up). The
+body's balance holds while a foot is up (as the firmware does since its
+tipping plant showed corrections on three feet enlarge the lean), so here
+it neither adds nor takes away on three feet. The rigid catch stops the
+tip short of a fall, so the test for "today's steps" is that they tip over
+the edge every swing."""
 
 import pytest
 
@@ -24,7 +26,9 @@ TICKS = 500  # 10 s
 
 def tipped_ticks(sim):
     """Ticks with a leg in the air where the body was tipping (its mass past an edge)."""
-    return sum(1 for t in sim.gait() if bin(t.support).count("1") == 3 and abs(t.roll - t.ref_roll) > 3 * 16)
+    pred = sim.pred()
+    return sum(1 for t in sim.gait() if bin(t.support).count("1") == 3 and t.tick in pred
+               and abs(t.roll / 16 - pred[t.tick][1]) > 3)
 
 
 @pytest.mark.parametrize("pattern", ("walk", "crawl"))
@@ -51,14 +55,18 @@ def test_the_same_steps_without_the_lean_tip_over(balance):
     assert planned.max_error() * 4 < sim.max_error()
 
 
-def test_the_balance_loop_makes_the_tipping_worse():
-    """The floor's finding: on three feet the balance loop turns a wobble into
-    a bigger one (and on Kilo into a fall)."""
+def test_the_balance_loop_holds_on_three_feet():
+    """The floor's finding (and the firmware's tipping plant): corrections on
+    three feet act through the feet the body pivots on and enlarge the lean.
+    The body holds them while a foot is up, so its loop neither helps nor
+    hurts there: holding the mass on three feet is the plan's job."""
     on = WalkSim("walk", config=PlannerConfig(lean=False, **NO_FEEDBACK), balance=True)
     off = WalkSim("walk", config=PlannerConfig(lean=False, **NO_FEEDBACK), balance=False)
     on.run(TICKS)
     off.run(TICKS)
-    assert on.max_error() > off.max_error() + 3
+    assert abs(on.max_error() - off.max_error()) < 1.5
+    held = [t for t in on.gait() if t.support != 0xF]
+    assert held and all(t.flags & P.TelemetryFlags.BALANCE_HELD for t in held)
 
 
 def test_the_trot_stays_up():
@@ -107,7 +115,7 @@ def test_a_long_stall_underruns_then_settles_and_the_stream_ends():
     assert n == 60
     assert sim.vb.feet is None and sim.vb.posture == "STANCE" and not sim.fell()
     names = [e for e in sim.events if e[0] in ("FEET_UNDERRUN", "GAIT_STOPPED")]
-    assert names[0] == ("FEET_UNDERRUN", 1) and names[-1] == ("GAIT_STOPPED", 1)
+    assert names[0] == ("FEET_UNDERRUN", 6) and names[-1] == ("GAIT_STOPPED", 1)  # 6 ticks since the last FEET
     assert sim.step() is False and "underrun" in sim.stream.ended and not sim.stream.ok
     # the settle put the lifted feet down at their x: all four feet at one height
     assert max(sim.vb.joint_angles()[3:]) is not None
@@ -127,7 +135,7 @@ def test_predicted_attitude_matches_the_telemetry_conventions():
     """The planner predicts what TELEMETRY measures: pitch nose down +, roll
     right side up +. Before LB lifts, the body leans right (the mass over
     RF RB LF): negative roll, measured as negative by the body."""
-    sim = WalkSim("walk", balance=False)
+    sim = WalkSim("walk")
     sim.run(60)
     lifts = [t for t in sim.gait() if t.support == 0b0111]  # LB in the air
     assert lifts

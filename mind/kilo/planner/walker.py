@@ -152,6 +152,7 @@ class Stream:
         self.ended: str | None = None
         self.ok = False
         self.last_tel: Any = None
+        self.pred: dict[int, tuple[float, float]] = {}  # u16 tick -> the attitude sent for it (the last 64)
 
     # ---- what the body reports ----------------------------------------------------------
     def _new_items(self) -> tuple[list, list]:
@@ -204,7 +205,7 @@ class Stream:
             self.last_tel = m
             if m.mode == gait:
                 self.gait_seen = True
-                ep, er = self.tracker.add(tick, m)
+                ep, er = self.tracker.add(tick, m, self.pred.get(m.tick))
                 self.planner.observe(ep, er)
             elif self.gait_seen and self.handover_at is None and self.ended is None:
                 self._end(f"the body left GAIT (mode {consts.MODES.get(m.mode, m.mode)})")
@@ -254,6 +255,8 @@ class Stream:
             if self.link.send_stream("FEET", pack_feet(self.epoch, tp)):
                 self.sent += 1
                 self.last_sent = tp.tick
+                self.pred[tp.tick & 0xFFFF] = (tp.pitch, tp.roll)
+                self.pred.pop((tp.tick - 64) & 0xFFFF, None)
             if self.link.logger is not None:
                 self._log("plan", tick=tp.tick, x=tp.x, z=tp.z, pitch=round(tp.pitch, 2), roll=round(tp.roll, 2),
                           support=tp.support, margin=round(tp.margin, 1))

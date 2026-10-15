@@ -276,6 +276,7 @@ def test_feet_stream(rig):
     refused; when the stream stops the core underruns, holds, settles and
     ends GAIT with GAIT_STOPPED arg 1 (kilo.vbody.feet is the Python stand-in)."""
     core, link, client = rig()
+    client.set_balance(True)  # the reference reads 0 while the balance is off
     client.posture("stance")
     assert core.run_until(lambda: (d := core.dump())["posture"] == STANCE and not d["idle_moving"], 2) is not None
     link.clear_goal("SET_POSTURE")  # a posture refresh would end GAIT

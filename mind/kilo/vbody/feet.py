@@ -1,29 +1,31 @@
 """The virtual body's FEET player: GAIT as the firmware plays the mind's
 stream (protocol/spec.toml FEET, doc §3d, §3f), on kilo.vbody.physics.
 
-- **Queue.** A FEET for a tick 1..``FEET_DEPTH`` ahead of the body's
-  current tick is queued (a second one for the same tick replaces it); one
-  for a tick already played, or further ahead, is dropped and counted
-  (STATS feet_late).
+- **Queue.** A FEET for a tick 1..``FEET_DEPTH`` after the last tick
+  played is queued (a second one for the same tick replaces it); one for a
+  tick already played, or further ahead, is dropped and counted (STATS
+  feet_late). Until the first queued tick comes the legs stay as they were.
 - **Play.** Each tick takes the FEET for that tick. The target is its feet
   plus the balance correction on the feet it marks as down; every joint
   moves at most ``slew_deg_per_tick`` toward it (the body's safety slew),
   so a late or missing tick never snaps.
 - **Underrun.** No FEET for this tick: the last pose is held (EVENT
-  FEET_UNDERRUN, arg = ticks since the last FEET played; STATS
+  FEET_UNDERRUN, arg = ticks since the last FEET arrived; STATS
   feet_underruns) for ``FEET_HOLD_TICKS``; then the feet that were in the
-  air come down to the support feet's height at their x, and when they are
-  there the gait ends (``settled``). A FEET for the current tick during the
-  hold or the settle resumes the play.
+  air come down ``SETTLE_MM`` per tick at their x to the support feet's
+  depth, and when all four are down the gait ends (``settled``). A FEET for
+  the current tick during the hold or the settle resumes the play.
 - **Balance** (doc §3f, as body/src/core/balance.h and the geometric loop
   of body.cpp): with SET_BALANCE enabled, per axis the ground slope
   s = measured - correction - reference, e = deadband(s), u = Kp e + Kd rate,
   the correction low-passes toward -u by 1/4 per tick, moves at most 1 deg
   per tick and is clamped; the reference is the FEET's pitch/roll. It is
-  held while fewer than three feet are down and for 2 ticks after, and it
-  acts through the support feet only: z_i += end_i (Lb/2) sin(pitch corr) +
-  side_i (W/2) sin(roll corr) (end -1 front, +1 back; side -1 left, +1
-  right).
+  held (frozen) while any foot is up and for 2 ticks after all four are
+  down (body.cpp: on three feet the corrections act through the feet a
+  tipping body pivots on), and it acts through the support feet only, each
+  leg's share ramping a quarter per tick as its support bit changes:
+  z_i += share_i (end_i (Lb/2) sin(pitch corr) + side_i (W/2) sin(roll
+  corr)) (end -1 front, +1 back; side -1 left, +1 right).
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ FEET_DEPTH = P.FEET_DEPTH
 FEET_HOLD_TICKS = P.FEET_HOLD_TICKS
 BAL_HOLD_TICKS = 2
 SETTLED_MM = 0.5
+SETTLE_MM = 2.0  # a lifted foot's descent per tick when settling
 
 
 class FeetPlayer:
@@ -59,6 +62,9 @@ class FeetPlayer:
         self._hold = 0
         self.support = 0xF
         self.ref = (0.0, 0.0)
+        self.share = [1.0] * 4              # each leg's share of the correction, 0..1 in quarters
+        self.rx_tick = tick                 # the body's tick when the last FEET arrived
+        self._ground = 0.0
 
     # ---- queue ---------------------------------------------------------------------------
     def offer(self, msg: Any, now_tick: int) -> bool:
@@ -69,6 +75,7 @@ class FeetPlayer:
         if not 1 <= d <= FEET_DEPTH:
             return False
         self.queue[now_tick + d] = msg
+        self.rx_tick = now_tick
         return True
 
     def queued(self, now_tick: int) -> int:
@@ -95,28 +102,35 @@ class FeetPlayer:
             self.dry += 1
             if self.state == "play":
                 self.state = "hold"
-                happened = ("underrun", now_tick - self.last_tick)
+                happened = ("underrun", now_tick - self.rx_tick)
             if self.state == "hold" and self.dry > FEET_HOLD_TICKS:
                 self.state = "settle"
-                down = [self.z[leg] for leg in LEGS if self.support >> leg & 1] or list(self.z)
-                ground = sum(down) / len(down)
-                tz = [self.z[leg] if self.support >> leg & 1 else ground for leg in LEGS]
-                self.target = (list(self.x), tz)
-                self.support = 0xF
+                down = [self.target[1][leg] for leg in LEGS if self.support >> leg & 1]
+                self._ground = (sum(down) / len(down) if down
+                                else self.model.stance_height(P.GAIT_STANCE_H_256))
+                self.target = (list(self.x), list(self.target[1]))
+            if self.state == "settle":  # lifted feet down SETTLE_MM a tick at their x
+                tz = self.target[1]
+                for leg in LEGS:
+                    if not self.support >> leg & 1:
+                        tz[leg] = min(self._ground, tz[leg] + SETTLE_MM)
+                        if tz[leg] >= self._ground:
+                            self.support |= 1 << leg
         self._balance(measured, rates, balance, balance_on)
         tx, tz = self.target
         tz = list(tz)
         cp, cr = math.radians(self.corr[0]), math.radians(self.corr[1])
         half_l, half_w = self.model.length_mm / 2, self.model.track_mm / 2
         for leg in LEGS:
-            if self.support >> leg & 1:
-                end = -1.0 if FRONT[leg] else 1.0
-                side = -1.0 if LEFT[leg] else 1.0
-                tz[leg] += end * half_l * math.sin(cp) + side * half_w * math.sin(cr)
+            up = 0.25 if self.support >> leg & 1 else -0.25
+            self.share[leg] = min(1.0, max(0.0, self.share[leg] + up))
+            end = -1.0 if FRONT[leg] else 1.0
+            side = -1.0 if LEFT[leg] else 1.0
+            tz[leg] += self.share[leg] * (end * half_l * math.sin(cp) + side * half_w * math.sin(cr))
         self._slew(tx, tz)
         self.physics.command(self.x, self.z)
-        if self.state == "settle" and all(abs(self.x[i] - tx[i]) < SETTLED_MM and abs(self.z[i] - tz[i]) < SETTLED_MM
-                                          for i in LEGS):
+        if self.state == "settle" and self.support == 0xF and all(
+                abs(self.x[i] - tx[i]) < SETTLED_MM and abs(self.z[i] - tz[i]) < SETTLED_MM for i in LEGS):
             happened = ("settled", 0)
         return happened
 
@@ -135,8 +149,7 @@ class FeetPlayer:
 
     def _balance(self, measured, rates, bal: dict, on: bool) -> None:
         """balance.h's step on both axes (pitch, roll)."""
-        n_down = bin(self.support & 0xF).count("1")
-        if n_down < 3:
+        if self.support & 0xF != 0xF:  # any foot up: held
             self._hold = BAL_HOLD_TICKS + 1
         if self._hold:
             self._hold -= 1

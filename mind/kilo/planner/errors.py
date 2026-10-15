@@ -2,8 +2,9 @@
 
 In GAIT the body's TELEMETRY carries the attitude it measured, the
 reference it balanced toward (the planner's prediction for that tick, from
-FEET) and the correction it applied. Their difference is the model's
-error (docs/walking-and-balance.md §9 item 4, §10):
+FEET; 0 while its balance is off, so the walker compares with its own
+prediction for the tick) and the correction it applied. Measured minus
+predicted is the model's error (docs/walking-and-balance.md §9 item 4, §10):
 
 - a **steady offset** (the mean of measured - predicted): a mass or the
   IMU placed differently from the model; learn it once;
@@ -42,10 +43,12 @@ class ErrorTracker:
         self._alpha = TICK_MS / 1000.0 / offset_s
         self._n = 0
 
-    def add(self, tick: int, msg: Any) -> tuple[float, float]:
-        """One TELEMETRY in GAIT (``tick`` unwrapped). Returns its error less the offset."""
+    def add(self, tick: int, msg: Any, ref: tuple[float, float] | None = None) -> tuple[float, float]:
+        """One TELEMETRY in GAIT (``tick`` unwrapped) and the prediction for
+        its tick (default: the reference the body reports, which is 0 while
+        its balance is off). Returns its error less the offset."""
         mp, mr = msg.pitch / A16, msg.roll / A16
-        rp, rr = msg.ref_pitch / A16, msg.ref_roll / A16
+        rp, rr = (msg.ref_pitch / A16, msg.ref_roll / A16) if ref is None else ref
         self.samples.append((tick, mp, mr, rp, rr, msg.corr_pitch / A16, msg.corr_roll / A16))
         ep, er = mp - rp, mr - rr
         self._n += 1

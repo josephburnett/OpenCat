@@ -123,12 +123,12 @@ def test_underrun_holds_then_settles():
     out = b.tick(3)
     assert events(out) == []
     out = b.tick()  # dry: the hold starts
-    assert events(out) == [(EV.FEET_UNDERRUN, 1)] and b.vb.feet.state == "hold"
+    assert events(out) == [(EV.FEET_UNDERRUN, 4)] and b.vb.feet.state == "hold"  # 4 ticks since the FEET arrived
     held = list(b.vb.feet.target[1])
     out = b.tick(P.FEET_HOLD_TICKS - 1)  # FEET_HOLD_TICKS dry ticks in all: the last pose, held
     assert events(out) == [] and b.vb.feet.state == "hold" and b.vb.feet.target[1] == held == [76, 76, 76, 60]
     b.tick()
-    assert b.vb.feet.state == "settle" and b.vb.feet.target[1] == [76, 76, 76, 76]  # then LB comes down
+    assert b.vb.feet.state == "settle" and b.vb.feet.target[1] == [76, 76, 76, 62]  # then LB comes down, 2 mm a tick
     out = b.tick(10)
     assert events(out) == [(EV.GAIT_STOPPED, 1)]
     assert b.vb.feet is None and b.vb.posture == "STANCE" and b.vb.mode == P.Mode.IDLE
@@ -171,9 +171,14 @@ def test_telemetry_carries_reference_correction_and_support():
     assert t.owners & 0xF == P.Owner.GAIT
     t = telemetry(b.tick(3))[-1]
     assert t.feet_queued == 1
-    assert t.corr_roll != 0  # three feet down: the balance corrects toward the reference
-    # on two feet the corrections are held (and for 2 ticks after the third foot lands)
-    for i in range(1, 6):
-        b.feet(i, z=[76, 70, 76, 70], support=0b0101)
-    held = telemetry(b.tick(5))
-    assert len({(t.corr_pitch, t.corr_roll) for t in held}) == 1 and held[-1].support == 0b0101
+    # a foot up: the corrections are held (frozen), flag BALANCE_HELD
+    assert (t.corr_pitch, t.corr_roll) == (0, 0) and t.flags & P.TelemetryFlags.BALANCE_HELD
+    # four feet down, the body off its reference: it corrects (after a 2-tick hold-over)
+    for i in range(1, 8):
+        b.feet(i, roll=-5 * 16)
+    four = telemetry(b.tick(7))
+    assert four[-1].corr_roll != 0 and not four[-1].flags & P.TelemetryFlags.BALANCE_HELD
+    # the balance off: the reference reads 0
+    b.vb.balance.update(enable=0)
+    b.feet(1, roll=-5 * 16)
+    assert telemetry(b.tick())[0].ref_roll == 0
