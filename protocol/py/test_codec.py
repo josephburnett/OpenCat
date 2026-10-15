@@ -35,7 +35,7 @@ def test_spec_constants():
     assert P.MAX_WIRE == 66
     assert P.TELEMETRY_DEFAULT_HZ == 25
     assert P.WD_STOP_MS == 500 and P.WD_REST_MS == 1500
-    assert P.Telemetry.MIN_LEN == 26 and P.Stats.MIN_LEN == 19 and P.Hello.MIN_LEN == 16
+    assert P.Telemetry.MIN_LEN == 35 and P.Stats.MIN_LEN == 23 and P.Hello.MIN_LEN == 16 and P.Feet.MIN_LEN == 16
 
 
 # --- CRC and COBS ------------------------------------------------------------

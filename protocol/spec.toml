@@ -35,8 +35,8 @@
 #   * epoch = true: the payload begins with the goal epoch byte.
 
 [meta]
-proto_major = 1
-proto_minor = 5                # 1.5 (2026-10-13): SET_GAIT flags SWAY, CATCH; TELEMETRY flag BALANCE_HELD; [gait] sway/touchdown constants
+proto_major = 2                # 2.0 (2026-10-14): the mind plans the steps and streams FEET; SET_GAIT, the gait tables and the gait flags are gone; TELEMETRY carries the balance reference, the correction and the support feet
+proto_minor = 0
 
 # ---------------------------------------------------------------------------
 [link]
@@ -57,6 +57,9 @@ tick_ms = 20
 telemetry_default_div = 2      # SET_STREAM telem_div default: 50 Hz / 2
 telemetry_default_hz = 25
 goal_refresh_hz = 5            # mind re-sends active goals at this rate (and on change)
+feet_depth = 8                 # FEET ticks the body queues (160 ms); a FEET further ahead than this is dropped (STATS feet_late counts both)
+feet_lookahead_ticks = 5       # how far ahead of the body's tick the mind streams (100 ms): covers a GC pause or an SD stall on the Pi
+feet_hold_ticks = 5            # queue dry in GAIT: hold the last pose this long before settling (100 ms)
 heartbeat_idle_ms = 100        # mind sends HEARTBEAT after this long with nothing sent
 mind_alive_ms = 1000           # ...but only while its asyncio loop proved alive within this
 cmd_retry_ms = 50              # command retry timeout
@@ -103,7 +106,7 @@ UNCALIBRATED = 11       # STAND refused while config_state is DEFAULTED (no cali
 [enums.goal_refused_reason]
 BAD_LEN = 1
 BAD_ARG = 2
-UNKNOWN_TYPE = 4        # a goal this firmware does not implement yet (e.g. SET_GAIT in P0)
+UNKNOWN_TYPE = 4        # a goal this firmware does not implement
 LOW_BATT = 7
 FALLEN = 8
 STALE = 10
@@ -121,13 +124,14 @@ LINK_RESTORED = 8
 IMU_FAULT = 9
 IMU_OK = 10
 TRICK_DONE = 11         # arg = trick_id | (trick_done_reason << 8)
-GAIT_STOPPED = 12
+GAIT_STOPPED = 12       # arg = 0 a posture / the mind took the legs, 1 settled after a FEET underrun
 GOAL_REFUSED = 13       # arg = (type << 8) | goal_refused_reason
 CONFIG_MIGRATED = 14
 CONFIG_DEFAULTED = 15   # arg = reason
 EEPROM_SAVED = 16
 TX_DROPPED = 17         # rate-limited
 IR_KEY = 18             # arg = NEC command byte | 0x100 for a held-key repeat
+FEET_UNDERRUN = 19      # the FEET queue ran dry while in GAIT: arg = ticks since the last FEET; the hold starts (link.feet_hold_ticks), then GAIT_STOPPED arg 1
 
 [enums.mode]            # TELEMETRY.mode
 BOOT = 0
@@ -156,11 +160,6 @@ STAND = 3
 STANCE = 4
 CALIB = 5
 ZERO = 6
-
-[enums.gait_pattern]
-WALK = 0
-TROT = 1
-CRAWL = 2
 
 [enums.head_mode]
 RELEASE = 0
@@ -221,13 +220,11 @@ EYES = 4
 [flags.posture_flags]
 BALANCE = 0
 
-[flags.gait_flags]
-BOB = 0
-WAG = 1
-BALANCE = 2
-SWAY = 3                       # planned roll/pitch away from the lifting leg ([gait] sway_*_deg; doc §3d)
-CATCH = 4                      # early touchdown: a swing ends when the body tips toward its leg ([gait] touchdown_rate_dps; doc §3d)
-PLACE = 5                      # forward placement: a lifting leg lands ahead/behind by the pitch rate ([gait] capture_*; doc §3d)
+[flags.support_flags]         # FEET.support, TELEMETRY.support: the feet on the ground
+LF = 0
+RF = 1
+RB = 2
+LB = 3
 
 [flags.trick_flags]
 BALANCE = 0
@@ -338,23 +335,20 @@ fields = [
 ]
 
 [[messages]]
-name = "SET_GAIT"
+name = "FEET"
 id = 0x11
 dir = "pi_to_body"
-kind = "goal"
+kind = "stream"
 epoch = true
-doc = "Run/stop plus gait parameters (§3d)."
+doc = "One tick of the mind's plan (doc §3d): where each foot is at `tick` and the attitude the plan predicts there. Sent every tick, about link.feet_lookahead_ticks ahead; not acked, not refreshed, not retried. The body queues up to link.feet_depth ticks and plays each at its tick, slew-limited from where the feet are (a late or missing tick never snaps). The first FEET accepted enters GAIT (gated: STALE, FALLEN, LOW_BATT, UNCALIBRATED -> EVENT GOAL_REFUSED, rate-limited) and the stream owns the legs until a SET_POSTURE or an epoch bump (GAIT_STOPPED arg 0). A tick already past is dropped (STATS feet_late). When the queue runs dry the body holds the last pose for link.feet_hold_ticks (EVENT FEET_UNDERRUN), then settles: swing feet down to the ground at their x, IDLE in STANCE (GAIT_STOPPED arg 1). In GAIT the balance loop's reference is this pitch/roll, and it corrects through the support feet only (doc §3f)."
 fields = [
   { name = "epoch", type = "u8" },
-  { name = "run", type = "u8", range = [0, 1] },
-  { name = "pattern", type = "u8", enum = "gait_pattern" },
-  { name = "period_ms", type = "u16", unit = "ms", range = [300, 2000] },
-  { name = "duty", type = "u8", unit = "1/256", range = [128, 230] },
-  { name = "stride_mm", type = "i8", unit = "mm", range = [-60, 60] },
-  { name = "turn_mm", type = "i8", unit = "mm", range = [-40, 40], note = "+ = left" },
-  { name = "step_h_mm", type = "u8", unit = "mm", range = [0, 40] },
-  { name = "body_h_mm", type = "u8", unit = "mm", note = "IK workspace" },
-  { name = "flags", type = "u8", flags = "gait_flags" },
+  { name = "tick", type = "u16", unit = "tick", note = "the body tick this pose is for (TELEMETRY.tick's clock)" },
+  { name = "x_mm", type = "i8", count = 4, unit = "mm", range = [-60, 60], note = "foot fore-aft from under the hip, + forward; legs LF RF RB LB" },
+  { name = "z_mm", type = "u8", count = 4, unit = "mm", range = [30, 95], note = "foot depth below the hip, i.e. the body height at that leg; legs LF RF RB LB" },
+  { name = "pitch", type = "i16", unit = "deg", scale = 0.0625, note = "the attitude the plan predicts at tick: the balance reference (TELEMETRY conventions)" },
+  { name = "roll", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "support", type = "u8", flags = "support_flags", note = "the feet on the ground at tick; the balance corrects through these only" },
 ]
 
 [[messages]]
@@ -619,7 +613,7 @@ id = 0x81
 dir = "body_to_pi"
 kind = "stream"
 drop_order = 3
-doc = "Body state, 25 Hz by default."
+doc = "Body state, 25 Hz by default (50 Hz while the mind streams FEET: SET_STREAM telem_div 1)."
 fields = [
   { name = "tick", type = "u16", unit = "tick", note = "wraps every 21.8 min" },
   { name = "pitch", type = "i16", unit = "deg", scale = 0.0625, note = "nose down + (legacy ypr), legacy reflection" },
@@ -634,7 +628,12 @@ fields = [
   { name = "flags", type = "u16", flags = "telemetry_flags" },
   { name = "last_rx_seq", type = "u8" },
   { name = "trick_frame", type = "u8", note = "0xFF = none" },
-  { name = "gait_phase", type = "u8", note = "phi >> 8" },
+  { name = "ref_pitch", type = "i16", unit = "deg", scale = 0.0625, note = "the balance reference in use: the FEET prediction in GAIT, else the posture's" },
+  { name = "ref_roll", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "corr_pitch", type = "i16", unit = "deg", scale = 0.0625, note = "the balance correction applied this tick (0 when held or off)" },
+  { name = "corr_roll", type = "i16", unit = "deg", scale = 0.0625 },
+  { name = "feet_queued", type = "u8", unit = "tick", note = "FEET ticks waiting in the queue (0 outside GAIT)" },
+  { name = "support", type = "u8", flags = "support_flags", note = "the feet the balance corrects through this tick" },
   { name = "tick_load", type = "u8", unit = "us", scale = 100, note = "max tick time since the last telemetry" },
   { name = "rx_err", type = "u8", note = "cumulative, mod 256" },
   { name = "epoch", type = "u8" },
@@ -750,7 +749,7 @@ id = 0x8A
 dir = "body_to_pi"
 kind = "event"
 reply_to = "STATS_REQ"
-doc = "19 B of counters."
+doc = "23 B of counters."
 fields = [
   { name = "uptime_s", type = "u32", unit = "s" },
   { name = "overruns", type = "u16" },
@@ -761,6 +760,8 @@ fields = [
   { name = "i2c_err", type = "u16" },
   { name = "imu_stale", type = "u16" },
   { name = "dmp_rate_hz", type = "u8", unit = "Hz" },
+  { name = "feet_late", type = "u16", note = "FEET dropped because their tick had passed" },
+  { name = "feet_underruns", type = "u16", note = "times the FEET queue ran dry in GAIT" },
 ]
 
 [[messages]]
@@ -978,64 +979,10 @@ doc = "Knee bend relative to the upper link at joint angle 0 (the calibration po
 # no RAM) and as plain data (Python); protocol/doc_check.py fails when the
 # docs' tables disagree. Changing one here changes the body's binary: reflash.
 
-# Gait (doc §3d; all (est.), to be tuned on Kilo).
+# Gait (doc §3d). The steps themselves are the mind's (mind/kilo/planner): the
+# body plays FEET. What the body still needs:
 [gait]
-bob_deg = 4                    # head bob amplitude: tilt += bob sin(2 * 2 pi phi), scaled by the stride ramp
-wag_deg = 15                   # tail wag amplitude: tail += wag sin(2 pi phi), scaled by the stride ramp
-sway_roll_deg = 8              # SWAY flag: roll away from a lifting leg's side at its mid-swing, scaled by the stride ramp
-sway_pitch_deg = 4             # SWAY flag: pitch away from a lifting leg's end (front/back), likewise
-sway_lead_ms = 225             # SWAY flag: the sway runs this far ahead of the legs: the servo lag (150 ms) and 75 ms more, so the lean has crossed sides by a lift-off (doc §3d), 0..300
-touchdown_rate_dps = 90        # CATCH flag: a swinging leg lands at once when the body's roll (pitch) rate toward its side (end) exceeds this
-capture_mm_per_rad_s = 7       # PLACE flag: a lifting leg lands this much further forward per rad/s of nose-down pitch rate (tau h = 0.09 s x 80 mm)
-capture_max_mm = 3             # PLACE flag: the clamp on that shift, mm: the trot's 150 ms swing at stride 25 already steps 9.62 deg/tick, +3 mm makes it 9.88 and +4 hits the 10 deg/tick safety slew; walk and crawl would take 15
-stance_h_256 = 205             # STANCE's body height when IDLE enters it from another posture: /256 of (L1 + L2), 0.80
-
-# Per pattern, keyed by the [enums.gait_pattern] names (every pattern, in enum
-# order). The body uses period_ms, duty, body_h_256 and offsets for a SET_GAIT
-# that leaves period, duty or body_h_mm 0 (outside their spec range: "the
-# pattern's default"); the mind sends every field, filling the ones the user
-# left out from here (stride and step are the mind's only: 0 is a real value,
-# turning in place / a shuffle).
-#   period_ms   gait cycle; within SET_GAIT period_ms's range
-#   duty        stance fraction, /256; within SET_GAIT duty's range
-#   stride_mm   default stride (the mind's), within SET_GAIT stride_mm's range
-#   step_h_mm   default swing height (the mind's), within SET_GAIT step_h_mm's range
-#   body_h_256  default body height, /256 of (LEG_L1_MM + LEG_L2_MM): 205 = 0.80, 179 = 0.70
-#   offsets     leg phase offsets, /256 of a cycle, legs LF RF RB LB. A leg swings
-#               when phi + offset crosses duty, so a larger offset swings earlier:
-#               WALK/CRAWL give LB -> LF -> RB -> RF (the lateral sequence), TROT
-#               the diagonal pairs LF+RB, RF+LB.
-# Periods: WALK 2000, TROT 1000, CRAWL 2000 (the SET_GAIT maximum) since
-# 2026-10-12: the owner's first floor drive with the remote at WALK 1000 /
-# TROT 500 / CRAWL 1500 was "way too fast", wobbling and tipping, so every
-# cycle is about half as fast (the owner's choice; balance stays on while
-# walking). History: §3d first said 800 / 1200; with Kilo's measured legs
-# (45 + 50 mm) those asked the knees for 9.3 and 10.0 deg per tick at the
-# default stride and step height, i.e. the safety slew (SLEW_MAX_A16,
-# 10 deg/tick) would have clipped the crawl's swing.
-[gait_patterns.WALK]
-period_ms = 2000
-duty = 192
-stride_mm = 30
-step_h_mm = 15
-body_h_256 = 205
-offsets = [128, 0, 64, 192]
-
-[gait_patterns.TROT]
-period_ms = 600                # 2026-10-13: a fixed short swing. (1 - duty) * period = 150 ms on two feet;
-duty = 192                     # the body tips with a 90 ms time constant on a diagonal pair, so the two-foot
-stride_mm = 25                 # time, not the period, is what must stay short (docs/walking-and-balance.md)
-step_h_mm = 8                  # 12 hit the 10 deg/tick safety slew in a 150 ms swing (test_gait); 8 was clean on the floor (P2)
-body_h_256 = 205
-offsets = [0, 128, 0, 128]
-
-[gait_patterns.CRAWL]
-period_ms = 2000
-duty = 218
-stride_mm = 25
-step_h_mm = 18
-body_h_256 = 179
-offsets = [128, 0, 64, 192]
+stance_h_256 = 205             # STANCE's body height when IDLE enters it from another posture, and the settle height after a FEET underrun: /256 of (L1 + L2), 0.80
 
 # Joint limits (doc §3b), whole degrees in the joint (OpenCat) convention, by
 # legacy joint id 0..15 (every id, in order; from src/OpenCat.h angleLimit[]).

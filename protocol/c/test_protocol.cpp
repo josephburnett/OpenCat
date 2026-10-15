@@ -345,12 +345,13 @@ static void test_frames(const Json &frames) {
             CHECK(tf.count == 4 && tf.frames[1].ang[0] == -128 &&
                       tf.frames[3].dur == v["fields"]["frames"].arr[3]["dur"].num,
                   "trick frames struct");
-        } else if (v["msg"].str == "SET_GAIT") {
-            kilo_set_gait_t g;
-            memcpy(&g, p.data(), sizeof g);
-            CHECK(g.epoch == v["fields"]["epoch"].num && g.period_ms == v["fields"]["period_ms"].num &&
-                      g.turn_mm == v["fields"]["turn_mm"].num,
-                  "gait struct");
+        } else if (v["msg"].str == "FEET") {
+            kilo_feet_t ft;
+            memcpy(&ft, p.data(), sizeof ft);
+            CHECK(ft.epoch == v["fields"]["epoch"].num && ft.tick == v["fields"]["tick"].num &&
+                      ft.x_mm[3] == v["fields"]["x_mm"].arr[3].num && ft.z_mm[2] == v["fields"]["z_mm"].arr[2].num &&
+                      ft.roll == v["fields"]["roll"].num && ft.support == v["fields"]["support"].num,
+                  "feet struct");
         }
     }
 }

@@ -127,8 +127,8 @@ def validate(spec: dict) -> None:
         if m["kind"] not in KINDS:
             raise SpecError(f"{n}: bad kind {m['kind']}")
         if m["dir"] == "pi_to_body":
-            if not 0x01 <= i <= 0x7F or m["kind"] not in ("goal", "command"):
-                raise SpecError(f"{n}: Pi->body must be 0x01..0x7F and goal/command")
+            if not 0x01 <= i <= 0x7F or m["kind"] not in ("goal", "command", "stream"):
+                raise SpecError(f"{n}: Pi->body must be 0x01..0x7F and goal/command/stream (a stream is not acked)")
         elif m["dir"] == "body_to_pi":
             if not 0x80 <= i <= 0xFF or m["kind"] not in ("stream", "event"):
                 raise SpecError(f"{n}: body->Pi must be 0x80..0xFF and stream/event")
@@ -191,45 +191,19 @@ def field_range(spec: dict, msg: str, name: str) -> tuple[int, int]:
 
 
 def validate_shared(spec: dict) -> None:
-    """The shared defaults and limits ([gait], [gait_patterns.*], [[joints]],
-    [balance], [head]) against each other and the wire ranges."""
+    """The shared defaults and limits ([gait], link.feet_*, [[joints]], [balance],
+    [head]) against each other and the wire ranges."""
     link = spec["link"]
     g = spec["gait"]
-    if set(g) != {"bob_deg", "wag_deg", "sway_roll_deg", "sway_pitch_deg", "sway_lead_ms", "touchdown_rate_dps",
-                  "capture_mm_per_rad_s", "capture_max_mm", "stance_h_256"}:
+    if set(g) != {"stance_h_256"}:
         raise SpecError("gait: unexpected or missing keys")
-    for k in ("bob_deg", "wag_deg"):
-        if not 0 <= g[k] <= 90:
-            raise SpecError(f"gait.{k}: 0..90")
-    for k in ("sway_roll_deg", "sway_pitch_deg"):
-        if not 0 <= g[k] <= 30:
-            raise SpecError(f"gait.{k}: 0..30")
-    if not 0 <= g["sway_lead_ms"] <= 300:  # dphi (<= 4369, period 300 ms) x 15 ticks fits a u16
-        raise SpecError("gait.sway_lead_ms: 0..300")
-    if not 0 <= g["capture_mm_per_rad_s"] <= 20:
-        raise SpecError("gait.capture_mm_per_rad_s: 0..20")
-    if not 0 <= g["capture_max_mm"] <= 30:  # an i8 in q2 (1/4 mm)
-        raise SpecError("gait.capture_max_mm: 0..30")
-    if not 10 <= g["touchdown_rate_dps"] <= 1000:
-        raise SpecError("gait.touchdown_rate_dps: 10..1000")
     if not 1 <= g["stance_h_256"] <= 255:
         raise SpecError("gait.stance_h_256: 1..255")
-    pats = spec["gait_patterns"]
-    if list(pats) != list(spec["enums"]["gait_pattern"]):
-        raise SpecError("gait_patterns: need every enums.gait_pattern name, in enum order")
-    if list(spec["enums"]["gait_pattern"].values()) != list(range(len(pats))):
-        raise SpecError("enums.gait_pattern: values must be dense from 0 (they index the pattern table)")
-    for n, p in pats.items():
-        if set(p) != {"period_ms", "duty", "stride_mm", "step_h_mm", "body_h_256", "offsets"}:
-            raise SpecError(f"gait_patterns.{n}: unexpected or missing keys")
-        for k in ("period_ms", "duty", "stride_mm", "step_h_mm"):
-            lo, hi = field_range(spec, "SET_GAIT", k)
-            if not lo <= p[k] <= hi:
-                raise SpecError(f"gait_patterns.{n}.{k} outside SET_GAIT's range {lo}..{hi}")
-        if not 1 <= p["body_h_256"] <= 255:
-            raise SpecError(f"gait_patterns.{n}.body_h_256: 1..255")
-        if len(p["offsets"]) != 4 or not all(0 <= o <= 255 for o in p["offsets"]):
-            raise SpecError(f"gait_patterns.{n}.offsets: 4 values 0..255 (LF RF RB LB)")
+    for k in ("feet_depth", "feet_lookahead_ticks", "feet_hold_ticks"):
+        if not 1 <= link[k] <= 32:
+            raise SpecError(f"link.{k}: 1..32")
+    if link["feet_lookahead_ticks"] >= link["feet_depth"]:
+        raise SpecError("link.feet_lookahead_ticks must be below feet_depth")
     joints = spec["joints"]
     if [j["id"] for j in joints] != list(range(link["channel_count"])):
         raise SpecError("joints: ids 0..channel_count-1, in order")
@@ -579,31 +553,8 @@ def gen_c_shared(spec: dict, w) -> None:
         return f"({v})" if v < 0 else str(v)
 
     g = spec["gait"]
-    w("/* ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ---- */")
-    w(f"#define KILO_GAIT_BOB_DEG {g['bob_deg']} /* head bob amplitude, deg */")
-    w(f"#define KILO_GAIT_WAG_DEG {g['wag_deg']} /* tail wag amplitude, deg */")
-    w(f"#define KILO_GAIT_SWAY_ROLL_DEG {g['sway_roll_deg']} /* SWAY: roll amplitude, deg */")
-    w(f"#define KILO_GAIT_SWAY_PITCH_DEG {g['sway_pitch_deg']} /* SWAY: pitch amplitude, deg */")
-    w(f"#define KILO_GAIT_SWAY_LEAD_MS {g['sway_lead_ms']} /* SWAY: lead of the sway over the legs, ms */")
-    w(f"#define KILO_GAIT_TOUCHDOWN_RATE_DPS {g['touchdown_rate_dps']} /* CATCH: tipping rate that ends a swing, deg/s */")
-    w(f"#define KILO_GAIT_CAPTURE_MM_PER_RAD_S {g['capture_mm_per_rad_s']} /* PLACE: touchdown shift per rad/s of pitch rate, mm */")
-    w(f"#define KILO_GAIT_CAPTURE_MAX_MM {g['capture_max_mm']} /* PLACE: clamp on the shift, mm */")
+    w("/* ---- Shared defaults and limits (spec [gait], [[joints]], [balance], [head]) ---- */")
     w(f"#define KILO_GAIT_STANCE_H_256 {g['stance_h_256']} /* STANCE's body height, /256 of L1 + L2 */")
-    pats = spec["gait_patterns"]
-    w(f"#define KILO_GAIT_PATTERN_COUNT {len(pats)}")
-    for n, p in pats.items():
-        for k in ("period_ms", "duty", "stride_mm", "step_h_mm", "body_h_256"):
-            w(f"#define KILO_GAIT_{n}_{k.upper()} {num(p[k])}")
-        for leg, o in zip(("LF", "RF", "RB", "LB"), p["offsets"]):
-            w(f"#define KILO_GAIT_{n}_OFFSET_{leg} {o}")
-    w("/* Initializer for a [KILO_GAIT_PATTERN_COUNT] table of {uint16_t period_ms;")
-    w("   uint8_t duty, body_h_256; uint8_t offsets[4] (LF RF RB LB)}, in enum")
-    w("   gait_pattern order. */")
-    w("#define KILO_GAIT_PATTERN_TABLE_INIT { \\")
-    for n, p in pats.items():
-        offs = ", ".join(str(o) for o in p["offsets"])
-        w(f"    {{{p['period_ms']}, {p['duty']}, {p['body_h_256']}, {{{offs}}}}}, /* {n} */ \\")
-    w("}")
     w("/* Joint limits, whole degrees, by legacy joint id. */")
     for j in spec["joints"]:
         n = j["name"].upper()
@@ -938,33 +889,8 @@ def gen_py_shared(spec: dict, w) -> None:
     """Shared defaults and limits as plain data: the raw spec values (a derived
     value such as Kp = kp_q8 / 256 is computed by its one consumer)."""
     g = spec["gait"]
-    w("# ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ----")
-    w(f"GAIT_BOB_DEG = {g['bob_deg']}")
-    w(f"GAIT_WAG_DEG = {g['wag_deg']}")
-    w(f"GAIT_SWAY_ROLL_DEG = {g['sway_roll_deg']}")
-    w(f"GAIT_SWAY_PITCH_DEG = {g['sway_pitch_deg']}")
-    w(f"GAIT_SWAY_LEAD_MS = {g['sway_lead_ms']}")
-    w(f"GAIT_TOUCHDOWN_RATE_DPS = {g['touchdown_rate_dps']}")
-    w(f"GAIT_CAPTURE_MM_PER_RAD_S = {g['capture_mm_per_rad_s']}")
-    w(f"GAIT_CAPTURE_MAX_MM = {g['capture_max_mm']}")
+    w("# ---- Shared defaults and limits (spec [gait], [[joints]], [balance], [head]) ----")
     w(f"GAIT_STANCE_H_256 = {g['stance_h_256']}")
-    w("")
-    w("")
-    w("@dataclass(frozen=True)")
-    w("class GaitPatternDefaults:")
-    w('    """A gait pattern\'s defaults (spec [gait_patterns.*]): body_h_256 is /256 of')
-    w('    LEG_L1_MM + LEG_L2_MM, offsets are /256 of a cycle for legs LF RF RB LB."""')
-    for k, t in (("pattern", "int"), ("name", "str"), ("period_ms", "int"), ("duty", "int"), ("stride_mm", "int"),
-                 ("step_h_mm", "int"), ("body_h_256", "int"), ("offsets", "tuple[int, int, int, int]")):
-        w(f"    {k}: {t}")
-    w("")
-    w("")
-    enum = spec["enums"]["gait_pattern"]
-    w("GAIT_PATTERN_DEFAULTS: dict[int, GaitPatternDefaults] = {")
-    for n, p in spec["gait_patterns"].items():
-        w(f"    {enum[n]}: GaitPatternDefaults({enum[n]}, {n!r}, {p['period_ms']}, {p['duty']}, {p['stride_mm']}, "
-          f"{p['step_h_mm']}, {p['body_h_256']}, {tuple(p['offsets'])!r}),")
-    w("}")
     w("")
     w("")
     w("@dataclass(frozen=True)")
