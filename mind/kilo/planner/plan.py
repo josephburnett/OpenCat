@@ -102,7 +102,7 @@ class Lean:
 
 @dataclass
 class PlannerConfig:
-    margin_mm: float = 10.0       # the centre of mass this far inside the three feet, every swing
+    margin_mm: float = 14.0       # the centre of mass this far inside the three feet, every swing (14: a 10 mm / 50 g model error keeps every direction within 3 deg; 10 was enough only for the exact model)
     dx_max_mm: float = 18.0       # the body's fore-aft shift over its feet
     dx_speed_mm_s: float = 100.0  # ...and its fastest move
     roll_max_deg: float = 14.0

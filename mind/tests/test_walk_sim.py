@@ -192,7 +192,7 @@ def test_wrong_mass_helper():
 @pytest.mark.parametrize("pattern", ("walk", "crawl", "trot"))
 def test_a_wrong_centre_of_mass_stays_up(pattern):
     """The physics' centre of mass 10 mm ahead of and 5 mm left of the
-    planner's, 50 g more battery: Kilo stays up. With the 10 mm margin the
+    planner's, 50 g more battery: Kilo stays up. With a 10 mm margin the
     walk can leave its plan in some directions (here -10/-5: the mass past
     the edge, catches, up to ~12 deg off), the gate and the catch keep it up."""
     for dx, dy in ((10, 5), (-10, -5)):

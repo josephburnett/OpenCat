@@ -381,7 +381,8 @@ foot disc radius 6 mm, shoulders 123 mm apart, track 65 mm. Estimates
 middle and 5 mm above the shoulder axles, battery 150 g 15 mm below,
 upper leg 20 g (its centre at 0.8 of the link: the knee servo), lower leg
 8 g, the Pi not carried; 962 g in all; servo lag 150 ms. Chosen: margin
-10 mm, shift at most 18 mm, roll 14°, pitch 6°, lift gate 5°, catch 7°,
+14 mm (10 until the masses are measured would have left the plan with a
+plausible model error, below), shift at most 18 mm, roll 14°, pitch 6°, lift gate 5°, catch 7°,
 patterns and swing times as in mind/README.md. Replace the masses with the
 per-foot scale readings and the lag with the servo step test.
 
@@ -411,9 +412,9 @@ the edge and the body tips 9-11° onto the swinging foot every swing (the
 rigid catch stops it short of a fall; on the floor the balance loop of the
 old firmware took it over); the trot stays within 2°; speed, direction and
 pattern changes mid-walk stay within 4°; a centre of mass 10 mm ahead and
-5 mm left of the model's with 50 g more battery stays up (with the 10 mm
+5 mm left of the model's with 50 g more battery stays up (with a 10 mm
 margin the walk leaves its plan by up to ~12° in some directions and the
-catch holds it; a 14 mm margin keeps every direction within 3°); a 60 ms stall of the producer is
+catch holds it; the 14 mm margin now the default keeps every direction within 3°); a 60 ms stall of the producer is
 caught up with no underrun; a slower servo (200 ms) and a tilted IMU show
 in the error estimates (lag +40..60 ms, the offset). The real body is the
 next test.
