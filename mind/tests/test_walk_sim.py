@@ -13,8 +13,11 @@ it neither adds nor takes away on three feet. The rigid catch stops the
 tip short of a fall, so the test for "today's steps" is that they tip over
 the edge every swing."""
 
+from dataclasses import replace
+
 import pytest
 
+from kilo.planner.model import BodyModel, Mass
 from kilo.planner.plan import PlannerConfig
 from kilo.protocol import kilo_protocol as P
 
@@ -88,12 +91,13 @@ def test_speed_changes_mid_walk_stay_up():
         elif i == 500:
             sim.planner.set_direction("back")
         elif i == 650:
-            sim.planner.set_pattern("trot")
-        elif i == 750:
+            sim.planner.set_pattern("trot")  # the legs go home first (up to ~5.5 s from the walk)
+        elif i == 700:
             sim.planner.set_speed(90)
-    assert sim.run(900, each=each) == 900
+    assert sim.run(1150, each=each) == 1150
     assert not sim.fell() and sim.max_error() < 4
     assert sim.planner.pattern.name == "trot" and sim.planner.timing().speed_mm_s == pytest.approx(90)
+    assert sim.vb.feet_underruns == 0 and not sim.vb.feet_refused
 
 
 def test_a_stalled_producer_is_caught_up():
@@ -164,3 +168,47 @@ def test_feet_are_sent_five_ticks_ahead():
     sim.run(50, each=lambda i: seen.append(sim.link.sent[-1].tick - (sim.vb.tick & 0xFFFF)))
     assert set(seen[1:]) == {P.FEET_LOOKAHEAD_TICKS}
     assert all(t.feet_queued >= P.FEET_LOOKAHEAD_TICKS - 1 for t in sim.gait()[2:])
+
+
+def wrong_mass(dx: float, dy: float, battery_g: float) -> BodyModel:
+    """The planner's model with ``battery_g`` more battery and the whole
+    centre of mass moved ``dx`` forward and ``dy`` left (body and battery
+    moved together): a plausible error of the estimated masses."""
+    m0 = BodyModel()
+    m = replace(m0, battery=Mass(m0.battery.grams + battery_g, m0.battery.x, m0.battery.y, m0.battery.z))
+    c0, c1 = m0.com([0] * 4, [76] * 4), m.com([0] * 4, [76] * 4)
+    k = m.total_g / (m.body.grams + m.battery.grams)
+    ex, ey = (c0[0] + dx - c1[0]) * k, (c0[1] + dy - c1[1]) * k
+    return replace(m, body=Mass(m.body.grams, m.body.x + ex, m.body.y + ey, m.body.z),
+                   battery=Mass(m.battery.grams, m.battery.x + ex, m.battery.y + ey, m.battery.z))
+
+
+def test_wrong_mass_helper():
+    m, m0 = wrong_mass(10, 5, 50), BodyModel()
+    c, c0 = m.com([0] * 4, [76] * 4), m0.com([0] * 4, [76] * 4)
+    assert (c[0] - c0[0], c[1] - c0[1]) == pytest.approx((10, 5)) and m.total_g == m0.total_g + 50
+
+
+@pytest.mark.parametrize("pattern", ("walk", "crawl", "trot"))
+def test_a_wrong_centre_of_mass_stays_up(pattern):
+    """The physics' centre of mass 10 mm ahead of and 5 mm left of the
+    planner's, 50 g more battery: Kilo stays up. With the 10 mm margin the
+    walk can leave its plan in some directions (here -10/-5: the mass past
+    the edge, catches, up to ~12 deg off), the gate and the catch keep it up."""
+    for dx, dy in ((10, 5), (-10, -5)):
+        sim = WalkSim(pattern, body_model=wrong_mass(dx, dy, 50))
+        assert sim.run(1000) == 1000, (dx, dy)
+        assert not sim.fell() and sim.vb.max_tilt < 20, (dx, dy)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("pattern", ("walk", "crawl"))
+def test_a_14_mm_margin_keeps_a_wrong_centre_of_mass_on_its_plan(pattern):
+    """The same error in all four directions: with margin_mm 14 the walk and
+    the crawl stay within 3 deg of the plan with no catch and no hold (with
+    10 they need the catch or the gate in one or two directions)."""
+    for dx, dy in ((10, 5), (10, -5), (-10, 5), (-10, -5)):
+        sim = WalkSim(pattern, body_model=wrong_mass(dx, dy, 50), config=PlannerConfig(margin_mm=14.0))
+        assert sim.run(1500) == 1500
+        assert not sim.fell() and sim.max_error() < 3, (dx, dy, sim.max_error())
+        assert sim.planner.stats["catches"] == 0 and sim.planner.stats["holds"] == 0, (dx, dy)
