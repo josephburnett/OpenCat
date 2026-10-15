@@ -106,7 +106,9 @@ def test_trick_ops_through_the_daemon(start_daemon):
 
 
 def test_cli_trick_through_the_daemon(start_daemon):
-    d, vb, path, sock = start_daemon()
+    # idle REST lasts idle_limp_s before LIMP: long enough for the last CLI
+    # process to exit on a loaded machine (with 1 s, -n 4 saw LIMP already)
+    d, vb, path, sock = start_daemon(idle_limp_s=5.0)
     rc, out, err = _kilo("trick", "upload", "check_around")
     assert rc == 0 and "check_around: trick_id" in out and "uploaded" in out, err
     rc, out, err = _kilo("trick", "play", "check_around", "--posture", "stand")
