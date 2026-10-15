@@ -30,17 +30,20 @@ both the same frames and compares the replies:
   point mass on four feet that tips over an edge of its support as an
   inverted pendulum, with the servo lag ``lag_ms``). FEET is never acked. A
   FEET is refused (EVENT GOAL_REFUSED, rate-limited like a goal) BAD_ARG
-  (x, z out of range, support bits above 3), STALE, FALLEN, LOW_BATT or
-  UNCALIBRATED (config DEFAULTED, as STAND); the first accepted one enters
-  GAIT from STANCE's feet (the posture becomes STANCE; a playing trick keeps
-  the legs it moves): mode GAIT, flag GAIT, leg owner GAIT, TELEMETRY's
+  (x, z, pitch or roll (+-30 deg) out of range, support bits above 3),
+  STALE, FALLEN, LOW_BATT or UNCALIBRATED (config DEFAULTED, as STAND); the
+  first accepted one enters GAIT from STANCE's feet (the posture becomes
+  STANCE, also from LIMP or REST: the legs are powered; a playing trick
+  keeps the legs it moves): mode GAIT, flag GAIT, leg owner GAIT, TELEMETRY's
   measured attitude from the physics (plus ``imu_offset``), ref_* (0 while
   the balance is off), corr_*, feet_queued and support from the player,
   flag BALANCE_HELD while a foot is up. Outside GAIT, support is all four in
   SIT, STAND and STANCE, else 0. GAIT ends with EVENT GAIT_STOPPED: arg 0 on a SET_POSTURE (the
-  posture takes the legs) or an epoch bump (watchdog, fall, low battery: the
-  legs stay in STANCE unless the reflex moves them), arg 1 when the settle
-  after an underrun is done (posture STANCE, mode IDLE). Past 35 degrees of
+  posture takes the legs), an epoch bump (watchdog, fall, low battery) or a
+  reflex (at once), arg 1 the tick the settle after an underrun has every
+  foot down (posture STANCE, mode IDLE). In STANCE outside a reflex the
+  physics goes on for the arbiter's XFADE_TICKS crossfade to STANCE's feet
+  (``xfade``). Past 35 degrees of
   tilt the physics falls: the fall reflex as ``trigger_fall``. SET_BODY_POSE:
   STALE, FALLEN, LOW_BATT (the spec gives its fields no range: no BAD_ARG);
   the pose tilts the reported pitch/roll in STANCE; an epoch bump resets it;
@@ -131,6 +134,7 @@ FAKE_ANGLES = {"REST": (0, 0, 0, -60, -60, 60, 60, 60, 60, -60, -60),
 FAKE_STAND = (0, 0, 0, 30, 30, -30, -30, 30, 30, -30, -30)
 HEAD_HOLD_S = P.HEAD_HOLD_MS / 1000.0
 REST_MOVE_S = 1.0  # REST_MOVE_TICKS on the body: reflex moves to REST take 1 s
+FEET_ATT_MAX = 480  # FEET pitch / roll range, 1/16 deg (+-30 deg; feet.cpp feet_check)
 
 
 def _a16(deg: float) -> int:
@@ -278,6 +282,7 @@ class VirtualBody:
         self.save_until: float | None = None
         self.trick = TrickStore()
         self.feet: FeetPlayer | None = None  # GAIT: the FEET player
+        self.xfade: FeetPlayer | None = None  # after GAIT: IDLE STANCE's crossfade from the stream's legs
         self.feet_late = 0
         self.feet_underruns = 0
         self.feet_refused: list[tuple[int, int]] = []  # (tick, reason) of refused FEET (tests)
@@ -332,12 +337,17 @@ class VirtualBody:
         self._gait_end(0, "stopped (epoch bump)")  # GAIT_STOPPED too; the legs stay in STANCE
 
     def _gait_end(self, arg: int, why: str) -> None:
-        """GAIT is over: EVENT GAIT_STOPPED(arg) once (with the current epoch)."""
-        if self.feet is None:
+        """GAIT is over: EVENT GAIT_STOPPED(arg) once (with the current epoch).
+        In STANCE outside a reflex IDLE takes the legs from where they are
+        (the arbiter's XFADE_TICKS crossfade, on the physics); a reflex or
+        another posture takes them at once (the physics ends)."""
+        g = self.feet
+        if g is None:
             return
         self.feet = None
-        if self.posture not in ("LIMP", "REST"):
-            self.posture = "STANCE"
+        if self.posture == "STANCE" and not self.reflex:
+            g.handover(self.params[P.ParamId.XFADE_TICKS])
+            self.xfade = g
         self.gait_stops.append(arg)
         self._event(EV.GAIT_STOPPED, arg)
         self._say(f"gait {why}")
@@ -551,8 +561,15 @@ class VirtualBody:
         if self.trick.running and self.trick.player.step():
             self.trick.player.running = True  # _trick_end ends a running trick
             self._trick_end(TDR.DONE)
-        if self.feet is not None and not self.reflex:
+        # the FEET player (body.cpp): a reflex ends the stream at once
+        if self.feet is not None and self.reflex:
+            self._gait_end(0, "ended: a reflex took the legs")
+        if self.reflex:
+            self.xfade = None
+        if self.feet is not None:
             self._walk_tick()
+        elif self.xfade is not None:
+            self._xfade_tick()
         if self.joints_div and self.tick % self.joints_div == 0:
             self._send_joints()
         if self.tick % 500 == 0:
@@ -573,7 +590,12 @@ class VirtualBody:
         rate_p, rate_r = 1.4 * math.cos(t * 0.7), 1.6 * math.cos(t * 1.1)
         ref = corr = (0.0, 0.0)
         queued, support = 0, 0
-        if g is not None:  # walking: the physics' attitude
+        if g is None and self.xfade is not None:  # STANCE taking the legs from the stream: still the physics
+            ph = self.xfade.physics
+            pitch, roll = ph.pitch + self.imu_offset[0], ph.roll + self.imu_offset[1]
+            rate_p, rate_r = ph.rates
+            corr = (self.xfade.corr[0], self.xfade.corr[1])
+        elif g is not None:  # walking: the physics' attitude
             ph = g.physics
             pitch, roll = ph.pitch + self.imu_offset[0], ph.roll + self.imu_offset[1]
             rate_p, rate_r = ph.rates
@@ -626,6 +648,7 @@ class VirtualBody:
         if self.posture == "LIMP" and g is None and not self.trick.running:
             return [None] * P.JOINT_COUNT
         a = [float(v) for v in FAKE_ANGLES.get(self.posture, FAKE_STAND)]
+        g = g if g is not None else self.xfade
         if g is not None:  # the IK angles of the played feet (core/ik.h: before the per-joint dir)
             for leg in range(4):
                 t1, t2 = self.model.ik(leg, g.x[leg], g.z[leg])
@@ -795,6 +818,7 @@ class VirtualBody:
         if not self.p2:
             reason = R.UNKNOWN_TYPE
         elif (any(not -60 <= v <= 60 for v in msg.x_mm) or any(not 30 <= v <= 95 for v in msg.z_mm)
+              or not -FEET_ATT_MAX <= msg.pitch <= FEET_ATT_MAX or not -FEET_ATT_MAX <= msg.roll <= FEET_ATT_MAX
               or msg.support > 0xF):
             reason = R.BAD_ARG
         elif msg.epoch != self.epoch:
@@ -816,7 +840,11 @@ class VirtualBody:
             return None
         if self.feet is None:  # GAIT (a playing trick keeps the legs it moves)
             self.feet = g
-            if self.posture not in ("LIMP", "REST"):
+            self.xfade = None
+            # body_feet: IDLE becomes STANCE (also from LIMP or REST: the legs
+            # are powered); a reflex keeps its posture and ends the stream on
+            # its next tick
+            if not self.reflex:
                 self.posture = "STANCE"
             self._say(f"gait: FEET from tick {msg.tick}")
         return None
@@ -839,6 +867,23 @@ class VirtualBody:
             return
         if ph.fallen:
             self.trigger_fall(1 if ph.roll >= 0 else -1)
+
+    def _xfade_tick(self) -> None:
+        """IDLE STANCE crossfading the legs from the stream's last output (the arbiter, XFADE_TICKS)."""
+        g = self.xfade
+        if self.posture != "STANCE":  # another posture took the legs
+            self.xfade = None
+            return
+        ph = g.physics
+        on = bool(self.balance_req or self.balance["enable"])
+        g.tick(self.tick, (ph.pitch + self.imu_offset[0], ph.roll + self.imu_offset[1]), ph.rates, self.balance, on)
+        ph.step()
+        self.max_tilt = max(self.max_tilt, ph.max_tilt)
+        if ph.fallen:
+            self.xfade = None
+            self.trigger_fall(1 if ph.roll >= 0 else -1)
+        elif g.xfade_done:
+            self.xfade = None
 
     def _pose_goal(self, msg: Any, payload: bytes, now: float) -> None:
         R = P.GoalRefusedReason

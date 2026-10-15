@@ -79,6 +79,11 @@ def test_feet_gating():
     f.vb.trigger_fall(1)
     f.vb.take_sent()
     assert events(f.feet()) == [(EV.GOAL_REFUSED, M.FEET << 8 | R.FALLEN)]
+    r = Body()
+    assert events(r.feet(pitch=481)) == [(EV.GOAL_REFUSED, M.FEET << 8 | R.BAD_ARG)]  # +-30 deg (feet_check)
+    r.now += 1.1
+    assert events(r.feet(roll=-481)) == [(EV.GOAL_REFUSED, M.FEET << 8 | R.BAD_ARG)]
+    assert r.feet(pitch=480, roll=-480) == [] and r.vb.feet is not None
     p1 = Body(p2=False)
     assert events(p1.feet()) == [(EV.GOAL_REFUSED, M.FEET << 8 | R.UNKNOWN_TYPE)]
 
@@ -124,12 +129,14 @@ def test_underrun_holds_then_settles():
     assert events(out) == []
     out = b.tick()  # dry: the hold starts
     assert events(out) == [(EV.FEET_UNDERRUN, 4)] and b.vb.feet.state == "hold"  # 4 ticks since the FEET arrived
-    held = list(b.vb.feet.target[1])
+    held = list(b.vb.feet.cur[1])
     out = b.tick(P.FEET_HOLD_TICKS - 1)  # FEET_HOLD_TICKS dry ticks in all: the last pose, held
-    assert events(out) == [] and b.vb.feet.state == "hold" and b.vb.feet.target[1] == held == [76, 76, 76, 60]
+    assert events(out) == [] and b.vb.feet.state == "hold" and b.vb.feet.cur[1] == held == [76, 76, 76, 60]
     b.tick()
-    assert b.vb.feet.state == "settle" and b.vb.feet.target[1] == [76, 76, 76, 62]  # then LB comes down, 2 mm a tick
-    out = b.tick(10)
+    assert b.vb.feet.state == "settle" and b.vb.feet.cur[1] == [76, 76, 76, 62]  # then LB comes down, 2 mm a tick
+    out = b.tick(6)
+    assert events(out) == [] and b.vb.feet.cur[1][3] == 74
+    out = b.tick()  # within 2 mm: on the ground, every bit set: the stream ends that tick
     assert events(out) == [(EV.GAIT_STOPPED, 1)]
     assert b.vb.feet is None and b.vb.posture == "STANCE" and b.vb.mode == P.Mode.IDLE
     assert b.vb.gait_stops == [1] and b.vb.feet_underruns == 1
@@ -182,3 +189,85 @@ def test_telemetry_carries_reference_correction_and_support():
     b.vb.balance.update(enable=0)
     b.feet(1, roll=-5 * 16)
     assert telemetry(b.tick())[0].ref_roll == 0
+
+
+def test_a_lost_frame_holds_the_pose_without_an_underrun():
+    """No FEET for this tick but later ones queued (feet.cpp: a lost frame):
+    the pose is held, no event, and the hold's count does not run."""
+    b = Body()
+    b.feet(1, x=[5, 5, 5, 5])
+    b.feet(3, x=[9, 9, 9, 9])
+    b.tick()
+    out = b.tick()  # tick 2: nothing for it, tick 3 queued
+    assert events(out) == [] and b.vb.feet.state == "play" and b.vb.feet.cur[0] == [5, 5, 5, 5]
+    assert b.vb.feet_underruns == 0
+    b.tick()
+    assert b.vb.feet.cur[0] == [9, 9, 9, 9]
+    # in the hold, a FEET queued further ahead stops the count until it plays
+    h = Body()
+    h.feet(1)
+    h.tick(2)  # tick 2: dry, the hold starts (one held tick)
+    assert h.vb.feet.state == "hold" and h.vb.feet.held == 1
+    h.feet(P.FEET_DEPTH)
+    out = h.tick(P.FEET_DEPTH - 1)  # the queue is not empty: held, never settling
+    assert h.vb.feet.state == "hold" and h.vb.feet.held == 1 and events(out) == []
+    h.tick()
+    assert h.vb.feet.state == "play"
+
+
+def test_the_settle_puts_the_foot_on_the_plane_of_the_support_feet():
+    """A leaning body on three feet: the lifted foot goes to the plane
+    through them (feet.cpp ground_plane), not their mean depth."""
+    b = Body()
+    for i in range(1, 3):
+        b.feet(i, z=[70, 80, 84, 60], support=0b0111)  # LB up; LF 70, RF 80, RB 84: the plane gives 74 under LB
+    b.tick(2 + 1 + P.FEET_HOLD_TICKS)
+    assert b.vb.feet.state == "settle"
+    out = b.tick(8)
+    assert events(out) == [(EV.GAIT_STOPPED, 1)]
+    assert b.vb.xfade is not None and b.vb.xfade.cur[1] == [70, 80, 84, 74]  # the mean would be 78
+    # two support feet: their mean depth
+    t = Body()
+    t.feet(1, z=[70, 60, 82, 60], support=0b0101)
+    t.tick(2 + P.FEET_HOLD_TICKS)
+    assert events(t.tick(10)) == [(EV.GAIT_STOPPED, 1)]
+    assert t.vb.xfade.cur[1] == [70, 76, 82, 76]
+
+
+def test_the_end_of_the_stream_crossfades_to_stance():
+    """GAIT_STOPPED, then IDLE STANCE takes the legs over XFADE_TICKS from
+    where they are (feet x 0, STANCE's height, no lean), on the physics."""
+    b = Body()
+    for i in range(1, 6):
+        b.feet(i, x=[20, 20, -20, -20], z=[70, 82, 82, 70])
+    b.tick(5)
+    out = b.send("SET_POSTURE", epoch=b.vb.epoch, posture=P.Posture.STANCE)
+    assert events(out) == [(EV.GAIT_STOPPED, 0)] and b.vb.mode == P.Mode.IDLE
+    g = b.vb.xfade
+    assert g is not None and g.x == [20, 20, -20, -20]
+    xs = []
+    for _ in range(10):
+        b.tick()
+        xs.append(list(g.x))
+    assert all(abs(a) <= 20 for x in xs for a in x) and abs(xs[4][0]) > 1  # gradually, not at once
+    assert all(abs(a) < 0.5 for a in xs[-1]) and all(abs(z - 76) < 0.5 for z in g.z)
+    assert b.vb.xfade is None  # done: STANCE as before
+
+
+def test_feet_from_limp_or_rest_power_the_legs_in_stance():
+    for posture in ("LIMP", "REST"):
+        b = Body()
+        b.vb.posture = posture
+        b.feet(1)
+        t = telemetry(b.tick())[0]
+        assert b.vb.posture == "STANCE" and t.mode == P.Mode.GAIT and t.flags & P.TelemetryFlags.SERVOS_POWERED
+
+
+def test_a_reflex_ends_the_stream_at_once():
+    b = Body()
+    for i in range(1, 6):
+        b.feet(i)
+    b.tick()
+    b.vb.wd_stage = 2  # the watchdog's REST: a reflex holds the joints
+    out = b.tick()
+    assert events(out) == [(EV.GAIT_STOPPED, 0)] and b.vb.feet is None and b.vb.xfade is None
