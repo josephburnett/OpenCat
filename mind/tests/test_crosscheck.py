@@ -40,7 +40,7 @@ def harness(tmp_path_factory):
     subprocess.run(["bash", str(BUILD_SCRIPT), str(out)], check=True, capture_output=True, timeout=300)
     proc = subprocess.Popen([str(out)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     h = Harness(proc)
-    h.p2 = h.implements_gait()
+    h.p2 = h.implements_feet()
     yield h
     proc.stdin.close()
     proc.wait(5)
@@ -51,13 +51,14 @@ class Harness:
         self.proc = proc
         self.p2 = True
 
-    def implements_gait(self) -> bool:
-        """Whether this firmware has the P2 goals: a body without them refuses
-        SET_GAIT UNKNOWN_TYPE, and the vbody then plays the P1 body (p2=False)."""
+    def implements_feet(self) -> bool:
+        """Whether this firmware plays FEET: a body without GAIT refuses it
+        UNKNOWN_TYPE, and the vbody then plays that body (p2=False). The probe's
+        tick has passed (late: dropped without a word by a body that plays FEET)."""
         self.cmd("reset 0 0")
-        out = self.cmd("rx " + wire("SET_GAIT", 1, epoch=0, run=0, pattern=1, period_ms=500, duty=140,
-                                    stride_mm=0, turn_mm=0, step_h_mm=10, body_h_mm=80, flags=0).hex())
-        unknown = (P.MsgId.SET_GAIT << 8) | P.GoalRefusedReason.UNKNOWN_TYPE
+        out = self.cmd("rx " + wire("FEET", 1, epoch=0, tick=0, x_mm=[0] * 4, z_mm=[76] * 4, pitch=0, roll=0,
+                                    support=15).hex())
+        unknown = (P.MsgId.FEET << 8) | P.GoalRefusedReason.UNKNOWN_TYPE
         return not any(t == P.MsgId.EVENT and P.decode_payload(t, p).code == P.EventCode.GOAL_REFUSED
                        and P.decode_payload(t, p).arg == unknown for t, p in out)
 
@@ -230,8 +231,7 @@ def test_goals(harness):
         wire("SET_POSTURE", 3, epoch=7, posture=S.SIT, transition_ticks=0, flags=0),     # rate-limited
         wire("SET_POSTURE", 4, epoch=7, posture=S.REST, transition_ticks=0, flags=0),    # never stale
         wire("SET_POSTURE", 5, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),  # P1: BAD_ARG
-        wire("SET_GAIT", 6, epoch=0, run=1, pattern=1, period_ms=500, duty=140, stride_mm=10,
-             turn_mm=0, step_h_mm=10, body_h_mm=80, flags=0),                              # P1: UNKNOWN_TYPE
+        wire("FEET", 6, epoch=0, tick=0, x_mm=[0] * 4, z_mm=[76] * 4, pitch=0, roll=0, support=15),  # late / P1
         wire("BEEP", 7, notes=[{"note": 12, "dur_10ms": 10}]),
         wire("HEARTBEAT", 8),
         raw(P.MsgId.SET_POSTURE, 9, b"\x00\x03\x00"),                                     # BAD_LEN
@@ -434,25 +434,23 @@ def test_head_goal(harness):
     ], batt_level=P.BatteryLevel.LOW)
 
 
-def test_gait_goal(harness):
-    """P2 (§3d): refusals, the start, the stop's one-period ramp-down and
-    GAIT_STOPPED on the same tick. The body in this tree has the gait
-    generator, so a harness that refuses SET_GAIT is a failure, not a skip."""
-    assert harness.p2, "the link harness has no gait generator (SET_GAIT is UNKNOWN_TYPE)"
+def test_feet_stream(harness):
+    """Protocol 2.0 (§3d): FEET is refused STALE for another epoch, never
+    acked; the first FEET for a coming tick enters GAIT; when the queue runs
+    dry the body says FEET_UNDERRUN (1 tick since the last), holds, settles
+    and ends with GAIT_STOPPED arg 1. The body in this tree plays FEET, so a
+    harness that refuses it is a failure, not a skip."""
+    assert harness.p2, "the link harness does not play FEET (UNKNOWN_TYPE)"
     S = P.Posture
-    g = dict(pattern=1, period_ms=500, duty=140, stride_mm=20, turn_mm=0, step_h_mm=10, body_h_mm=80, flags=7)
+    feet = lambda seq, tick, epoch=0: wire("FEET", seq, epoch=epoch, tick=tick, x_mm=[0] * 4, z_mm=[76] * 4,
+                                           pitch=0, roll=0, support=15)
     hb = lambda seq: wire("HEARTBEAT", seq)
     play(harness, [
-        wire("SET_GAIT", 1, epoch=0, run=1, **{**g, "period_ms": 200}),   # BAD_ARG
-        # The body's GOAL_REFUSED rate limit is one per goal type per second
-        # of link_tick(), which the C harness never runs: the STALE check
-        # therefore uses the other P2 goal type.
-        wire("SET_BODY_POSE", 2, epoch=9, pitch=0, roll=0, dheight_mm=0, xshift_mm=0),  # STALE
-        wire("SET_POSTURE", 3, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),
-        ("tick", 20), hb(4),
-        wire("SET_GAIT", 5, epoch=0, run=1, **g),
-        ("tick", 20), hb(6), ("tick", 20), hb(7),
-        wire("SET_GAIT", 8, epoch=0, run=0, **g),                          # ramp down over 25 ticks
-        ("tick", 20), hb(9), ("tick", 20), hb(10),                         # GAIT_STOPPED in here
-        wire("SET_GAIT", 11, epoch=9, run=0, **g),                         # a stop is never stale
+        feet(1, 5, epoch=9),                                               # STALE
+        wire("SET_POSTURE", 2, epoch=0, posture=S.STANCE, transition_ticks=0, flags=0),
+        ("tick", 20), hb(3),
+        feet(4, 21), feet(5, 22), feet(6, 23),                             # GAIT, played on ticks 21-23
+        ("tick", 3),
+        ("tick", 1),                                                       # dry: FEET_UNDERRUN(1)
+        ("tick", 40), hb(7),                                               # hold, settle: GAIT_STOPPED(1)
     ])

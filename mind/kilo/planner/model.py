@@ -198,7 +198,7 @@ def leg_lengths(model: BodyModel, xs, height: float, pitch_deg: float, roll_deg:
 
 
 def fit_attitude(model: BodyModel, xs, zs, support: int, prev: tuple[float, float] = (0.0, 0.0),
-                 reg: float = 1.0) -> tuple[float, float]:
+                 reg: float = 1e-3) -> tuple[float, float]:
     """The attitude (pitch, roll) in degrees the body takes standing on the
     feet in ``support`` (bit i = leg i): least squares of the plane through
     them, pulled toward ``prev`` (pitch, roll) with weight ``reg`` (mm^2),

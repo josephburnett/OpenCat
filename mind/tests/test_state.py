@@ -7,7 +7,7 @@ from kilo.protocol import kilo_protocol as P
 def tel(**kw):
     f = dict(tick=1, pitch=0, roll=0, rate_pitch=0, rate_roll=0, rate_yaw=0, dist_mm=0,
              batt_mv=7600, mode=2, owners=0x40, flags=(1 << 2) | (1 << 7), last_rx_seq=0,
-             trick_frame=255, gait_phase=0, tick_load=35, rx_err=0, epoch=0)
+             trick_frame=255, tick_load=35, rx_err=0, epoch=0)
     f.update(kw)
     return P.Telemetry(**f)
 

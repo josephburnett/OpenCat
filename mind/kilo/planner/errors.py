@@ -77,28 +77,28 @@ def estimate(samples: Iterable[tuple]) -> dict[str, Any] | None:
 
 
 def _lag(ref: list, meas: dict) -> tuple[float | None, float | None]:
-    """The shift k (ticks) maximising the correlation of ref[t - k] with
-    meas[t]: + = the body is later than the prediction."""
+    """The shift k (ticks) maximising the correlation (Pearson, over the
+    overlapping samples) of ref[t - k] with meas[t]: + = the body is later
+    than the prediction. None while the prediction hardly moves."""
     vals = [v for _, v in ref]
     m_ref = sum(vals) / len(vals)
-    sd = math.sqrt(sum((v - m_ref) ** 2 for v in vals) / len(vals))
-    if sd < MIN_SWING_DEG:
+    if math.sqrt(sum((v - m_ref) ** 2 for v in vals) / len(vals)) < MIN_SWING_DEG:
         return None, None
-    mv = list(meas.values())
-    m_meas = sum(mv) / len(mv)
-    sd_meas = math.sqrt(sum((v - m_meas) ** 2 for v in mv) / len(mv)) or 1e-9
     best_k, best_c = None, -2.0
     for k in range(-MAX_LAG_TICKS, MAX_LAG_TICKS + 1):
-        acc, cnt = 0.0, 0
-        for t, v in ref:
-            w = meas.get(t + k)
-            if w is not None:
-                acc += (v - m_ref) * (w - m_meas)
-                cnt += 1
-        if cnt < MIN_SAMPLES // 2:
+        pairs = [(v, meas[t + k]) for t, v in ref if t + k in meas]
+        n = len(pairs)
+        if n < MIN_SAMPLES // 2:
             continue
-        c = acc / cnt / (sd * sd_meas)
-        if c > best_c:
+        ma = sum(a for a, _ in pairs) / n
+        mb = sum(b for _, b in pairs) / n
+        cov = sum((a - ma) * (b - mb) for a, b in pairs)
+        va = sum((a - ma) ** 2 for a, _ in pairs)
+        vb = sum((b - mb) ** 2 for _, b in pairs)
+        if va <= 0 or vb <= 0:
+            continue
+        c = cov / math.sqrt(va * vb)
+        if c > best_c + 1e-9:
             best_k, best_c = k, c
     if best_k is None:
         return None, None

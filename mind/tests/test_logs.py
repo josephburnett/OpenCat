@@ -58,7 +58,7 @@ def _session(t0: float = 1000.0):
                           rate_pitch=round(rng.uniform(-2, 2) * 16), rate_roll=0, rate_yaw=0,
                           dist_mm=dist, batt_mv=7900 - i // 50, mode=mode, owners=0,
                           flags=SERVOS | (1 << 7) | (FRESH if fresh else 0), last_rx_seq=0,
-                          trick_frame=255, gait_phase=0, tick_load=55, rx_err=0, epoch=1)
+                          trick_frame=255, tick_load=55, rx_err=0, epoch=1)
         frames.append((t0 + t, "rx", tel, i & 0xFF))
         if i % 3 == 0:
             frames.append((t0 + t + 0.001, "tx", P.Heartbeat() if hasattr(P, "Heartbeat") else None, i & 0xFF))
@@ -226,8 +226,8 @@ def test_plot_falls_back_to_csv(session_logs, tmp_path):
     assert rows[0] == ["t", "pitch_deg", "roll_deg", "dist_mm", "mode"]
     assert len(rows) == 350
     assert rows[1][4] == str(int(P.Mode.IDLE))
-    with pytest.raises(ValueError, match="balance corrections"):
-        analysis.plot(load(jl), ["corr"])
+    path, _ = analysis.plot(load(jl), ["corr_pitch", "corr_roll", "ref_roll"], tmp_path / "corr.csv")
+    assert list(csv.reader(open(path)))[0] == ["t", "corr_pitch_deg", "corr_roll_deg", "ref_roll_deg"]
     with pytest.raises(ValueError, match="unknown field"):
         analysis.plot(load(jl), ["nope"])
 

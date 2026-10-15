@@ -180,16 +180,6 @@ class Stream:
 
     def ingest(self) -> None:
         tel, evs = self._new_items()
-        gait = int(P.Mode.GAIT)
-        for rx, m in tel:
-            tick = self.clock.add(m.tick, rx)
-            self.last_tel = m
-            if m.mode == gait:
-                self.gait_seen = True
-                ep, er = self.tracker.add(tick, m)
-                self.planner.observe(ep, er)
-            elif self.gait_seen and self.handover_at is None and self.ended is None:
-                self._end(f"the body left GAIT (mode {consts.MODES.get(m.mode, m.mode)})")
         EV = consts.EV
         for _, e in evs:
             if e.code == EV["GAIT_STOPPED"]:
@@ -208,6 +198,16 @@ class Stream:
                     self._end(f"the body refused FEET: {consts.REFUSE_REASON.get(reason, reason)}")
             elif e.code == EV["FELL"]:
                 self._end("Kilo fell")
+        gait = int(P.Mode.GAIT)
+        for rx, m in tel:
+            tick = self.clock.add(m.tick, rx)
+            self.last_tel = m
+            if m.mode == gait:
+                self.gait_seen = True
+                ep, er = self.tracker.add(tick, m)
+                self.planner.observe(ep, er)
+            elif self.gait_seen and self.handover_at is None and self.ended is None:
+                self._end(f"the body left GAIT (mode {consts.MODES.get(m.mode, m.mode)})")
 
     # ---- one wake ------------------------------------------------------------------------------
     def wake(self, now: float) -> bool:
@@ -360,7 +360,19 @@ class Walker:
         self.wait(1.0)
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self._done.wait(timeout)
+        """Until the walk has ended (True) or ``timeout``. The CLI's main
+        thread stamps the link's liveness while it waits here (the stream
+        stops sending when the mind looks dead)."""
+        if not getattr(self.client, "stamp_liveness", False):
+            return self._done.wait(timeout)
+        end = None if timeout is None else time.monotonic() + timeout
+        while True:
+            self.link.mark_alive()
+            left = 0.05 if end is None else min(0.05, end - time.monotonic())
+            if left <= 0:
+                return self._done.is_set()
+            if self._done.wait(left):
+                return True
 
 
     # ---- setup and teardown -------------------------------------------------------------------------
