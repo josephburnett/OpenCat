@@ -233,8 +233,13 @@ shortest shift allows, the speed is capped. The shortest shift: the trot's
 60 ms (three ticks on four feet, so the body's balance can correct at all);
 the walk's and crawl's 250 ms (the servo lag, 150 ms, plus a 100 ms move of
 the body). The speed can change at any tick while walking (the stride moves
-at most 0.5 mm per tick toward the new one, so nothing jumps); a direction
-change does the same; a pattern change waits for the next four-foot phase.
+at most 0.5 mm per tick toward the new one and the time a foot is on the
+ground at most 2 % per tick, so nothing jumps); a direction change does
+the same. A pattern change goes through the legs' way home: the strides go
+to 0 and each leg steps under its shoulder as for a stop, then the new
+pattern starts from its first lift as a walk starts (up to ~5.5 s out of
+the walk, ~1.5 s out of the trot); a second change meanwhile only changes
+where it goes.
 A turn in place uses 20 mm per side at the default stride (less at a lower
 speed).
 
@@ -249,13 +254,16 @@ direction the two-servo legs move in), rolling it (one side's legs longer
 than the other's) and, a little, pitching it. The move is finished one
 servo lag (150 ms) before the foot lifts and held until it is down again;
 a side the body drops is lowered no faster than gravity can follow. The
+search for that move is spread over the swing before it (a few pieces a
+tick), so no 20 ms tick carries all of it; after a change mid-swing it is
+redone at the slot's start while the plan waits a few ticks. The
 trot does not lean: on a diagonal pair there is no triangle to lean into,
 so its two-foot phase stays short (150 ms).
 
 **From what the body reports.** Every tick the planner gets the body's
 error (measured minus predicted attitude, less the steady offset). A leg
-does not lift while the body is more than 5° off the plan (the shift is
-held, up to 0.5 s); a swinging leg comes down at once where it is when the
+does not lift while the body is more than 5° off the plan (the plan
+waits, every foot where it is, up to 0.5 s); a swinging leg comes down at once where it is when the
 body tips toward it by more than 7°.
 
 **The model's error.** While Kilo walks the body reports, every tick, the

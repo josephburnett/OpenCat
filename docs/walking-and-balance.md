@@ -352,18 +352,26 @@ depth z under its shoulder), which feet are on the ground, and the
 attitude the body will have. The pattern's legs take turns in slots: a
 *shift* with all four feet down, then a *swing*. Feet on the ground slide
 back at the stride speed; a swinging foot lifts on a cosine arc to half a
-stride ahead of its shoulder. For the walk and the crawl, before every lift
+stride ahead of its shoulder. Speed changes move the stride (0.5 mm a
+tick) and the ground time (2 % a tick) gradually; a pattern change takes
+every leg home first (strides to 0, a step each, as a stop), then starts
+the new pattern from its first lift. For the walk and the crawl, before every lift
 the planner solves for the smallest move of the body (a fore-aft shift of
 every foot, a roll and a little pitch by making legs longer or shorter)
 that puts the centre of mass at least 10 mm inside the triangle of the
 three feet that stay down, at lift-off and at touchdown, and moves the body
 there during the shift: done a servo lag before the lift, held until the
-foot is down, dropping a side no faster than gravity can follow. The trot
+foot is down, dropping a side no faster than gravity can follow. That solve
+is spread over the swing before the slot, a few pieces a tick (on this
+desktop Planner.next() costs at most ~0.3 ms a tick, where one tick at each
+walk slot's start cost 2.7 ms, 43 ms on the Pi 2); after a change
+mid-swing it is redone at the slot's start while the plan waits. The trot
 stands on diagonal pairs for 150 ms and does not lean. The predicted
 attitude for a tick is the plane through the support feet the plan
 commanded a servo lag earlier; it goes to the body as the balance
-reference. From the body's reports: no lift while the body is more than 5°
-off the plan (the shift waits, up to 0.5 s); a swinging leg lands at once
+reference (kept inside FEET's ±30°). From the body's reports: no lift
+while the body is more than 5° off the plan (the plan waits with every foot
+where it is, up to 0.5 s); a swinging leg lands at once
 where it is when the body tips toward it by 7°. A stop takes every leg home
 in one more step, levels the body and hands over to the STANCE posture.
 
@@ -381,11 +389,13 @@ per-foot scale readings and the lag with the servo step test.
 `kilo walk`) wakes every 20 ms. The body's clock is estimated from the
 TELEMETRY arrival times (50 Hz while walking): body time = local time + the
 largest (tick x 20 ms - arrival) of the last 2 s, i.e. the least delayed
-frame. Each wake sends every planned tick from the last one sent up to the
+frame; the window restarts when five frames in a row are more than a tick
+below that (the body's tick fell back after a stall over 40 ms). Each wake sends every planned tick from the last one sent up to the
 body's tick + 5 (100 ms ahead), so a late wake (a garbage-collector pause,
 an SD stall) catches up in one go; a tick already played is planned but not
 sent. The body queues 8 ticks and holds the last pose on an underrun, then
-settles. The thread never writes to disk (its records go to the frame
+settles (lifted feet onto the plane of the three support feet), and IDLE
+STANCE crossfades the legs home. The thread never writes to disk (its records go to the frame
 log's queue), freezes the existing objects for the garbage collector and
 raises its young-generation threshold while it runs, and sends nothing
 while the mind's main loop looks dead. FEET goes out at once on the
@@ -400,7 +410,10 @@ on purpose; the same steps without the lean put the mass up to 4 mm past
 the edge and the body tips 9-11° onto the swinging foot every swing (the
 rigid catch stops it short of a fall; on the floor the balance loop of the
 old firmware took it over); the trot stays within 2°; speed, direction and
-pattern changes mid-walk stay within 4°; a 60 ms stall of the producer is
+pattern changes mid-walk stay within 4°; a centre of mass 10 mm ahead and
+5 mm left of the model's with 50 g more battery stays up (with the 10 mm
+margin the walk leaves its plan by up to ~12° in some directions and the
+catch holds it; a 14 mm margin keeps every direction within 3°); a 60 ms stall of the producer is
 caught up with no underrun; a slower servo (200 ms) and a tilted IMU show
 in the error estimates (lag +40..60 ms, the offset). The real body is the
 next test.
