@@ -10,21 +10,26 @@
 //     the hips at (+-Lb/2, +-W/2) around the body centre;
 //   - the mass: one point at the body centre, `com_up` mm above the hips
 //     (and `com_x`, `com_y` forward / left of the centre), configurable;
-//   - the floor: level and rigid; the feet are points;
-//   - resting: the body rests on three feet whose triangle holds the
-//     mass's projection with the fourth foot not below their plane (on
-//     four coplanar feet any of them); the legs move it quasi-statically
-//     (the attitude is that plane's, every 1 ms sub-step);
-//   - tipping: when no such triangle is within reach of the current
-//     attitude (a foot lifted from under the mass, the mass carried over an
-//     edge, a shove), the body turns about the edge of the feet on the
-//     ground nearest the mass (or about one foot) as an inverted pendulum,
+//   - the floor: level and rigid; the feet are points, and a foot within
+//     `comply` (1 mm) of the plane of the others carries weight with them
+//     (the servos' give and the foot pads: four feet commanded onto one
+//     plane, a fraction of a millimetre off it through the lag and the
+//     quantisation, stand on all four rather than rock on a diagonal);
+//   - standing: the body lies on three feet with the fourth not below
+//     their plane (all four when it is on it), the plane nearest its
+//     attitude; the legs carry it quasi-statically (every 1 ms sub-step the
+//     attitude is that plane's), and it rests there while the polygon of
+//     those feet holds the mass's vertical projection;
+//   - tipping: when it does not (a foot lifted from under the mass, the
+//     mass carried over an edge, a rocking diagonal, a shove), the body
+//     turns about the edge of those feet nearest the mass (or about one
+//     foot) as an inverted pendulum,
 //     alpha = g d / L^2 (d the mass's horizontal distance outside the edge,
 //     L its distance from the edge), until another foot reaches the floor:
 //     an inelastic impact (the turn stops) and it rests again if it can;
 //     with the mass ~76 mm above the feet the time constant is
-//     sqrt(L/g) ~ 90 ms: from 2 deg past an edge, 30 deg in ~0.25 s (the
-//     floor, 2026-10-14: about 30 deg in 0.2 s once it went);
+//     sqrt(L/g) ~ 90 ms: from 2 to 30 deg of tilt in ~0.2 s (the floor,
+//     2026-10-14: about 30 deg in 0.2 s once it went);
 //   - fallen: more than 80 deg from level (it stays there: past the fall
 //     reflex's 75 deg);
 //   - the IMU: the world pitch and roll (Kilo's convention: nose down +,
@@ -42,6 +47,7 @@ struct TipPlant {
   // Configuration.
   double com_up = 0, com_x = 0, com_y = 0;  // mm
   double servo_tau = 0.15;                  // s
+  double comply = 1.0;                      // mm: a foot this close to the support plane carries weight too
   int substeps = 20;                        // per 20 ms tick
   // State.
   double ang[8] = {};      // the joints through the servo lag, deg (shoulders LF RF RB LB, knees)
@@ -51,10 +57,12 @@ struct TipPlant {
   double out_n[2] = {0, 0};  // horizontal unit normal of the pivot edge, outward (the falling side)
   double w = 0;            // turn rate about the pivot, rad/s (+ = falling outward)
   bool fallen = false;
-  int tips = 0;            // tips started (each one that went past a support)
+  int tips = 0;            // tips that turned the body more than 1 deg before a foot stopped them
+  double tip_turn = 0;     // the turn of the tip in progress, deg
+  double max_turn = 0;     // the largest turn of one tip since reset_max(), deg
   // Outputs (deg, deg/s).
   double pitch = 0, roll = 0, rate_pitch = 0, rate_roll = 0;
-  double max_tilt = 0;     // largest |pitch| or |roll| since reset_max()
+  double max_tilt = 0;     // largest tilt from level since reset_max(), deg
 
   static constexpr double D2R = M_PI / 180.0;
   static constexpr double G = 9810.0;  // mm/s^2
@@ -101,51 +109,6 @@ struct TipPlant {
       for (int j = 0; j < 3; j++) R[i][j] = N[i][j];
   }
 
-  // The rest attitude nearest (p0, r0): the plane of three feet that hold
-  // the mass with the fourth not below it. False if there is none.
-  bool rest(double p0, double r0, double* pr, double* rr) const {
-    double f[4][3], c[3];
-    for (int l = 0; l < 4; l++) foot(l, f[l]);
-    com(c);
-    bool any = false;
-    double best = 1e9;
-    for (int skip = 0; skip < 4; skip++) {
-      int t[3], n = 0;
-      for (int l = 0; l < 4; l++)
-        if (l != skip) t[n++] = l;
-      double u[3], v[3], nn[3];
-      for (int i = 0; i < 3; i++) u[i] = f[t[1]][i] - f[t[0]][i], v[i] = f[t[2]][i] - f[t[0]][i];
-      nn[0] = u[1] * v[2] - u[2] * v[1], nn[1] = u[2] * v[0] - u[0] * v[2], nn[2] = u[0] * v[1] - u[1] * v[0];
-      double len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
-      if (len < 1e-9) continue;
-      if (nn[2] < 0) len = -len;  // the normal toward the body (up)
-      for (int i = 0; i < 3; i++) nn[i] /= len;
-      // The fourth foot not below the plane.
-      double d4 = 0;
-      for (int i = 0; i < 3; i++) d4 += (f[skip][i] - f[t[0]][i]) * nn[i];
-      if (d4 < -0.05) continue;
-      // The mass's projection along the normal inside the triangle.
-      bool in = true;
-      for (int e = 0; e < 3 && in; e++) {
-        const double* a = f[t[e]];
-        const double* b = f[t[(e + 1) % 3]];
-        const double* o = f[t[(e + 2) % 3]];
-        double ab[3], ac[3], ao[3], x1[3], x2[3];
-        for (int i = 0; i < 3; i++) ab[i] = b[i] - a[i], ac[i] = c[i] - a[i], ao[i] = o[i] - a[i];
-        x1[0] = ab[1] * ac[2] - ab[2] * ac[1], x1[1] = ab[2] * ac[0] - ab[0] * ac[2], x1[2] = ab[0] * ac[1] - ab[1] * ac[0];
-        x2[0] = ab[1] * ao[2] - ab[2] * ao[1], x2[1] = ab[2] * ao[0] - ab[0] * ao[2], x2[2] = ab[0] * ao[1] - ab[1] * ao[0];
-        double s1 = x1[0] * nn[0] + x1[1] * nn[1] + x1[2] * nn[2];
-        double s2 = x2[0] * nn[0] + x2[1] * nn[1] + x2[2] * nn[2];
-        in = s1 * s2 >= 0;
-      }
-      if (!in) continue;
-      double p = std::asin(-nn[0]) / D2R, r = std::atan2(-nn[1], nn[2]) / D2R;
-      double d = std::fabs(p - p0) + std::fabs(r - r0);
-      if (d < best) best = d, *pr = p, *rr = r, any = true;
-    }
-    return any;
-  }
-
   // World positions of the feet relative to the body centre, and the index
   // of the lowest.
   int feet_world(double w[4][3]) const {
@@ -159,14 +122,20 @@ struct TipPlant {
     return lo;
   }
 
-  // The feet the body stands on now: of the triangles whose fourth foot is
-  // not below their plane, the one whose plane is nearest the current
-  // attitude (all four when the fourth is on it). Bits LF RF RB LB.
-  uint8_t standing_on(double p0, double r0) const {
-    double f[4][3];
+  // The feet the body stands on now. Candidates: the four triangles whose
+  // fourth foot is not below their plane (with it when it is within
+  // `comply` of the plane). Of those whose feet hold the mass (its
+  // projection along the plane's normal inside their polygon) the one whose
+  // plane is nearest the current attitude; if none holds it, the nearest of
+  // all (the body then tips off it). Bits LF RF RB LB; the plane's attitude
+  // in *pp, *rp; *held: the mass is held.
+  uint8_t standing_on(double p0, double r0, double* pp = nullptr, double* rp = nullptr, bool* held = nullptr) const {
+    double f[4][3], c[3];
     for (int l = 0; l < 4; l++) foot(l, f[l]);
+    com(c);
     uint8_t on = 0xF;
     double best = 1e9;
+    bool best_holds = false;
     for (int skip = 0; skip < 4; skip++) {
       int t[3], n = 0;
       for (int l = 0; l < 4; l++)
@@ -176,15 +145,38 @@ struct TipPlant {
       nn[0] = u[1] * v[2] - u[2] * v[1], nn[1] = u[2] * v[0] - u[0] * v[2], nn[2] = u[0] * v[1] - u[1] * v[0];
       double len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
       if (len < 1e-9) continue;
-      if (nn[2] < 0) len = -len;
+      if (nn[2] < 0) len = -len;  // the normal toward the body (up)
       for (int i = 0; i < 3; i++) nn[i] /= len;
       double d4 = 0;
       for (int i = 0; i < 3; i++) d4 += (f[skip][i] - f[t[0]][i]) * nn[i];
-      if (d4 < -0.05) continue;
+      if (d4 < -0.05) continue;  // the fourth foot would be under the floor
+      uint8_t set = (uint8_t)((0xF & ~(1 << skip)) | (d4 < comply ? (1 << skip) : 0));
+      // The polygon of `set` in the cyclic order LF RF RB LB, the mass
+      // projected along the normal: inside when on the same side of every
+      // edge (signs from (b - a) x (c - a) . n).
+      int poly[4], m = 0;
+      for (int l = 0; l < 4; l++)
+        if (set & (1 << l)) poly[m++] = l;
+      int pos = 0, neg = 0;
+      for (int e = 0; e < m; e++) {
+        const double* a = f[poly[e]];
+        const double* bq = f[poly[(e + 1) % m]];
+        double ab[3], ac[3];
+        for (int i = 0; i < 3; i++) ab[i] = bq[i] - a[i], ac[i] = c[i] - a[i];
+        double x = (ab[1] * ac[2] - ab[2] * ac[1]) * nn[0] + (ab[2] * ac[0] - ab[0] * ac[2]) * nn[1] +
+                   (ab[0] * ac[1] - ab[1] * ac[0]) * nn[2];
+        pos += x >= 0;
+        neg += x <= 0;
+      }
+      bool h = pos == m || neg == m;
       double p = std::asin(-nn[0]) / D2R, r = std::atan2(-nn[1], nn[2]) / D2R;
       double d = std::fabs(p - p0) + std::fabs(r - r0);
-      if (d < best - 1e-6) best = d, on = (uint8_t)(0xF & ~(1 << skip)) | (d4 < 0.05 ? (1 << skip) : 0);
+      if ((h && !best_holds) || (h == best_holds && d < best - 1e-9)) {
+        best = d, best_holds = h, on = set;
+        if (pp) *pp = p, *rp = r;
+      }
     }
+    if (held) *held = best_holds;
     return on;
   }
 
@@ -221,7 +213,7 @@ struct TipPlant {
     if (ln < 1e-6) nx = 1, ny = 0, ln = 1;  // on the edge: either way
     out_n[0] = nx / ln, out_n[1] = ny / ln;
     tipping = true;
-    tips++;
+    tip_turn = 0;
   }
 
   // A shove: start a turn about the support edge on the side `dir` (world
@@ -275,6 +267,13 @@ struct TipPlant {
     double L2 = d * d + hz * hz;
     w += G * d / L2 * h;
     rotate(k, w * h);
+    tip_turn += std::fabs(w * h) / D2R;
+  }
+
+  void end_tip() {
+    if (tip_turn > 1) tips++;
+    max_turn = std::fmax(max_turn, tip_turn);
+    tip_turn = 0;
   }
 
   // One 20 ms tick: the joints move toward `out` (a16, canonical order; the
@@ -288,12 +287,16 @@ struct TipPlant {
       double p, r;
       attitude(&p, &r);
       if (!tipping) {
-        double pr, rr;
-        // Within reach: the legs move the body at most 0.3 deg per 1 ms.
-        if (rest(p, r, &pr, &rr) && std::fabs(pr - p) + std::fabs(rr - r) < 0.3)
-          set_attitude(pr, rr);
-        else
+        // The legs carry the body: it lies on the feet it stands on (the
+        // support plane nearest its attitude), and rests there if they
+        // hold the mass; else it tips about their edge nearest the mass.
+        double ps = p, rs = r;
+        bool held = false;
+        standing_on(p, r, &ps, &rs, &held);
+        set_attitude(ps, rs);
+        if (!held) {
           start_tip(), w = 0;
+        }
       }
       if (tipping) {
         tip_step(h);
@@ -305,30 +308,34 @@ struct TipPlant {
         double floor = w4[piv[0]][2];
         for (int l = 0; l < 4; l++)
           if (l != piv[0] && l != piv[1] && w4[l][2] < floor - 1e-6) tipping = false, w = 0;
+        if (!tipping) end_tip();
       }
       attitude(&p, &r);
-      if (std::fabs(p) > 80 || std::fabs(r) > 80) fallen = true;
+      if (std::fabs(p) > 80 || std::fabs(r) > 80) fallen = true, end_tip();
     }
     attitude(&pitch, &roll);
     rate_pitch = (pitch - p0) * 50;
     rate_roll = (roll - r0) * 50;
-    max_tilt = std::fmax(max_tilt, std::fmax(std::fabs(pitch), std::fabs(roll)));
+    max_tilt = std::fmax(max_tilt, tilt());
   }
+  // The angle between the body's up and the world's, deg.
+  double tilt() const { return std::acos(std::fmax(-1.0, std::fmin(1.0, R[2][2]))) / D2R; }
 
-  // Start with the joints at `out` and the body at rest on them.
+  // Start with the joints at `out` and the body on the feet nearest level
+  // (it tips from there if they do not hold the mass).
   void init(const int16_t* out) {
     for (int j = 0; j < 8; j++) ang[j] = out[3 + j] / 16.0;
-    set_attitude(0, 0);
-    double pr, rr;
-    if (rest(0, 0, &pr, &rr)) set_attitude(pr, rr);
+    double pr = 0, rr = 0;
+    standing_on(0, 0, &pr, &rr);
+    set_attitude(pr, rr);
     attitude(&pitch, &roll);
     rate_pitch = rate_roll = 0;
     tipping = fallen = false;
     w = 0;
     tips = 0;
-    max_tilt = 0;
+    tip_turn = max_turn = max_tilt = 0;
   }
-  void reset_max() { max_tilt = 0; }
+  void reset_max() { max_tilt = max_turn = 0, tips = 0; }
 };
 
 #endif

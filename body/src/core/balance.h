@@ -36,9 +36,9 @@
 #define BAL_MAX_DEG KILO_BALANCE_MAX_CORR_DEG
 #define BAL_MAX_DEG_LIMIT KILO_BALANCE_LIMIT_DEG  // SET_BALANCE max_corr_deg / deadband_deg above this: BAD_ARG
 #define BAL_SLEW_A16 16       // 1 deg per tick
-// The geometric balance under a FEET stream holds its corrections while
-// fewer than three feet are support feet and for this many ticks after
-// (body.cpp; doc §3f "Held on two feet").
+// The geometric balance under a FEET stream holds its corrections while a
+// foot is off the ground (a support bit clear) and for this many ticks
+// after (body.cpp; doc §3f "Held off four feet").
 #define BAL_HOLD_TICKS 2
 
 // Sign of the deviation fed to the legacy gains (balance_map), relative to

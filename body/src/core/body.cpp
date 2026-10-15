@@ -367,12 +367,17 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   // 2x the model's. Leaving it for a joint-space owner zeroes the
   // corrections (they mean something else there).
   //
-  // On fewer than three support feet (this tick's FEET support bits) the
-  // body pivots on a diagonal and what it reads is the fall (90 ms time
-  // constant), not the slope; the loop acts 250 ms later and would push the
-  // wrong way. So the corrections are held there, neither updated nor
-  // decayed, and for BAL_HOLD_TICKS after the third foot lands (the body
-  // still settles from the rock). bal.hold counts that down.
+  // With a foot off the ground (this tick's FEET support bits) the body can
+  // tip: about a diagonal on two feet, and on three as soon as a shove, a
+  // lag or a model error carries the mass over the triangle's edge. Then
+  // what it reads is the tip (90 ms time constant), and the corrections,
+  // which can only act through the feet it is pivoting on, push it further
+  // over (the floor, 2026-10-14; the tipping plant, test_feet.cpp "three
+  // feet"). So the corrections are held while any foot is up, neither
+  // updated nor decayed, and for BAL_HOLD_TICKS after all four are down
+  // again (the body still settles from the step). bal.hold counts that
+  // down. The loop trims on four feet; on three the plan's own lean holds
+  // the mass inside the triangle.
   bool geo = !b.kf.run && !b.arb.reflex_active && (gait_on || (p == POSTURE_STANCE && !arbiter_idle_moving(b.arb)));
   if (f.geo && !geo) balance_reset(b.bal);
   f.geo = geo;
@@ -383,9 +388,7 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
     balance_step(b.bal, kf_balance(b.kf) && !b.imu_fault, b.att, ref_r, ref_p);
   } else if (geo) {
     bool want = (b.balance_req || b.bal.enable) && !b.imu_fault;
-    uint8_t sup = gait_on ? feet_support(f) : 0xF;
-    uint8_t n = (uint8_t)((sup & 1) + ((sup >> 1) & 1) + ((sup >> 2) & 1) + ((sup >> 3) & 1));
-    if (n < 3)
+    if (gait_on && feet_support(f) != 0xF)
       b.bal.hold = BAL_HOLD_TICKS + 1;
     else if (b.bal.hold)
       b.bal.hold--;
