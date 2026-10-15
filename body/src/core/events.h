@@ -30,6 +30,7 @@ enum EventCode : uint8_t {
   EV_EEPROM_SAVED = 16,
   EV_TX_DROPPED = 17,
   EV_IR_KEY = 18,  // arg = NEC command | 0x100 for a held-key repeat
+  EV_FEET_UNDERRUN = 19,  // arg = ticks since the last FEET arrived
 };
 
 #define EVENT_QUEUE_LEN 8

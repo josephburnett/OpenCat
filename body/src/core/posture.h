@@ -2,11 +2,12 @@
 //
 // Ids are the SET_POSTURE values of the protocol (Appendix E). LIMP has no
 // angles (every channel full-off). STANCE (P2) has no table either: its
-// legs come from the IK (core/gait.h: all four feet under the shoulders at
+// legs come from the IK (core/feet.h: all four feet under the shoulders at
 // STANCE's height, 0.80 (L1 + L2) by default, with SET_BODY_POSE and the
-// geometric balance on top; the arbiter reads them from Gait::leg) and its
+// geometric balance on top; the arbiter reads them from Feet::leg) and its
 // head and tail are STAND's (all 0, which posture_angle returns for it).
-// It is the posture the gait starts from and hands back to. "balance" in
+// It is IDLE's posture while a FEET stream plays, and the one the stream
+// hands the legs back to. "balance" in
 // InstinctNybble.h has exactly the angles of "up" (STAND); on the new body
 // it is STAND with the balance flag set.
 #ifndef KILO_CORE_POSTURE_H
@@ -18,7 +19,7 @@ enum PostureId : uint8_t {
   POSTURE_REST = 1,
   POSTURE_SIT = 2,
   POSTURE_STAND = 3,
-  POSTURE_STANCE = 4,  // P2: the IK posture (core/gait.h)
+  POSTURE_STANCE = 4,  // P2: the IK posture (core/feet.h)
   POSTURE_CALIB = 5,
   POSTURE_ZERO = 6,
   POSTURE_COUNT = 7,

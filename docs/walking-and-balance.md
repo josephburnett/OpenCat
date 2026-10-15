@@ -303,6 +303,23 @@ body covers garbage-collector pauses and SD stalls; if Python itself
 becomes the limit the planner can be rewritten in Rust (owner).
 
 Not started: the owner asked to discuss before any balance work, and did.
+
+**Body side, 2026-10-14 (protocol 2.0, branch fw/stream).** The gait
+generator left the firmware; the body plays the mind's `FEET` stream
+(docs/architecture.md §3d) and its balance takes the predicted attitude as
+the reference and corrects through the feet on the ground (§3f). The host
+plant now tips: a point mass on the four legs, standing on the feet whose
+triangle holds it and turning about the nearest edge as an inverted
+pendulum when they do not (2 to 30° in 180 ms, the floor's ~0.2 s). In it a
+walk that rolls the body 10° away from each lifting side stays up with
+corrections of 1.4°; the same steps without the roll sink 8° toward every
+lifting foot. One finding changed the body: a three-foot stance shoved
+onto its lifted foot leaned 19.2° with the loop updating on three feet and
+12.9° with it off, because the corrections act through the two feet the
+body pivots on. The body now holds its corrections whenever a foot is up;
+the loop trims on four feet only, and the plan's lean has to hold the mass
+on three. The mass model, the servo step test and the planner are still
+the mind's to do.
 Next concrete steps, in order: weigh Kilo per foot; servo step test; put
 both into the host plant (which today treats three feet as safe, which is
 why the sway passed there); then the protocol change (streamed poses,

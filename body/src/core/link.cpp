@@ -1,8 +1,10 @@
 #include "link.h"
+#include <stddef.h>
 #include <string.h>
 #include "../proto/kilo_frame.h"
 #include "body.h"
 #include "config.h"
+#include "ik.h"
 #include "params.h"
 #include "pgm.h"
 #include "posture.h"
@@ -20,7 +22,8 @@ static_assert(SAME(EV_BOOT, KILO_EVENT_BOOT) && SAME(EV_FELL, KILO_EVENT_FELL) &
                   SAME(EV_TRICK_DONE, KILO_EVENT_TRICK_DONE) && SAME(EV_GAIT_STOPPED, KILO_EVENT_GAIT_STOPPED) &&
                   SAME(EV_GOAL_REFUSED, KILO_EVENT_GOAL_REFUSED) && SAME(EV_CONFIG_MIGRATED, KILO_EVENT_CONFIG_MIGRATED) &&
                   SAME(EV_CONFIG_DEFAULTED, KILO_EVENT_CONFIG_DEFAULTED) && SAME(EV_EEPROM_SAVED, KILO_EVENT_EEPROM_SAVED) &&
-                  SAME(EV_TX_DROPPED, KILO_EVENT_TX_DROPPED) && SAME(EV_IR_KEY, KILO_EVENT_IR_KEY),
+                  SAME(EV_TX_DROPPED, KILO_EVENT_TX_DROPPED) && SAME(EV_IR_KEY, KILO_EVENT_IR_KEY) &&
+                  SAME(EV_FEET_UNDERRUN, KILO_EVENT_FEET_UNDERRUN),
               "core/events.h codes != spec");
 static_assert(SAME(EVENT_QUEUE_LEN, KILO_EVENT_QUEUE_DEPTH), "event queue depth != spec");
 static_assert(SAME(GOAL_BAD_ARG, KILO_GOAL_REFUSED_REASON_BAD_ARG) && SAME(GOAL_LOW_BATT, KILO_GOAL_REFUSED_REASON_LOW_BATT) &&
@@ -30,10 +33,13 @@ static_assert(SAME(GOAL_BAD_ARG, KILO_GOAL_REFUSED_REASON_BAD_ARG) && SAME(GOAL_
                   SAME(GOAL_UNCALIBRATED, KILO_GOAL_REFUSED_REASON_UNCALIBRATED) &&
                   SAME(KILO_GOAL_REFUSED_REASON_UNCALIBRATED, KILO_ACK_STATUS_UNCALIBRATED),
               "GoalResult != GOAL_REFUSED reasons");
-static_assert(SAME(GS_OFF, 0) && SAME(KILO_GAIT_PATTERN_WALK, 0) && SAME(KILO_GAIT_PATTERN_TROT, 1) &&
-                  SAME(KILO_GAIT_PATTERN_CRAWL, 2) && SAME(KILO_GAIT_FLAGS_BOB, 1) && SAME(KILO_GAIT_FLAGS_WAG, 2) &&
-                  SAME(KILO_GAIT_FLAGS_BALANCE, 4) && SAME(KILO_SET_GAIT_LEN, 11) && SAME(KILO_SET_BODY_POSE_LEN, 7),
-              "core/gait.cpp's pattern rows, flag bits and payload offsets != spec");
+static_assert(SAME(KILO_FEET_LEN, 16) && offsetof(kilo_feet_t, tick) == 1 && offsetof(kilo_feet_t, x_mm) == 3 &&
+                  offsetof(kilo_feet_t, z_mm) == 7 && offsetof(kilo_feet_t, pitch) == 11 &&
+                  offsetof(kilo_feet_t, roll) == 13 && offsetof(kilo_feet_t, support) == 15 &&
+                  SAME(KILO_SUPPORT_FLAGS_LF, 1u << LEG_LF) && SAME(KILO_SUPPORT_FLAGS_RF, 1u << LEG_RF) &&
+                  SAME(KILO_SUPPORT_FLAGS_RB, 1u << LEG_RB) && SAME(KILO_SUPPORT_FLAGS_LB, 1u << LEG_LB) &&
+                  SAME(KILO_SET_BODY_POSE_LEN, 7),
+              "core/feet.cpp's payload offsets and leg bits != spec");
 static_assert(SAME(POSTURE_LIMP, KILO_POSTURE_LIMP) && SAME(POSTURE_REST, KILO_POSTURE_REST) &&
                   SAME(POSTURE_SIT, KILO_POSTURE_SIT) && SAME(POSTURE_STAND, KILO_POSTURE_STAND) &&
                   SAME(POSTURE_STANCE, KILO_POSTURE_STANCE) && SAME(POSTURE_CALIB, KILO_POSTURE_CALIB) &&
@@ -71,7 +77,6 @@ static_assert(SAME(KF_LINEAR, KILO_EASING_LINEAR) && SAME(KF_COSINE, KILO_EASING
 // rather than a pointer: on the AVR every access is then a direct load.
 extern Body g_body;
 #define B (&g_body)
-static uint8_t wire[KILO_MAX_WIRE];
 // Everything else in one struct, so link_init() can reset it in one go.
 static struct {
   kilo_rx_t rx;
@@ -107,7 +112,10 @@ static inline uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] <
 // wait for room, at most TX_WAIT_US; streams are dropped at once. A drop is
 // counted (tx_dropped, EVENT TX_DROPPED); for a dropped ACK or reply the
 // mind's retry (50 ms, same seq for commands, so the de-dup re-acks) covers.
+// The wire buffer is emit's own (on the stack only while a frame is built:
+// RAM is shared with the deepest call path rather than held for good).
 KILO_NOINLINE static bool emit(uint8_t type, const void* payload, uint8_t len, bool must) {
+  uint8_t wire[KILO_MAX_WIRE];
   uint8_t n = (uint8_t)(len + KILO_FRAME_OVERHEAD);
   if (link_hal_tx_free() < n) {
     uint16_t t0 = link_hal_us();
@@ -148,7 +156,7 @@ static void send_hello(void) {
   emit(KILO_MSG_HELLO, &h, sizeof h, true);
 }
 
-// One bit per goal type for the 1/s GOAL_REFUSED rate limit.
+// One bit per goal type (and FEET) for the 1/s GOAL_REFUSED rate limit.
 static uint8_t goal_bit(uint8_t t) {
   if (t >= KILO_MSG_SET_EYES) return (uint8_t)(0x20u << (t & 1u));  // SET_EYES, BEEP
   if (t == KILO_MSG_HEARTBEAT) return 0x80u;
@@ -173,11 +181,6 @@ static void goal(uint8_t t, const uint8_t* p) {
     }
     case KILO_MSG_SET_HEAD: {
       uint8_t r = body_goal_head(*B, p);
-      if (r != GOAL_OK) refuse(t, r);
-      return;
-    }
-    case KILO_MSG_SET_GAIT: {
-      uint8_t r = body_goal_gait(*B, p);
       if (r != GOAL_OK) refuse(t, r);
       return;
     }
@@ -229,6 +232,8 @@ static uint8_t query(uint8_t t, const uint8_t* p) {
       u.st.rx_overflow = (uint16_t)(u.st.rx_overflow + L.cnt.rx_overflow);
       u.st.imu_stale = B->imu_stale_total;
       u.st.dmp_rate_hz = L.dmp_rate;
+      u.st.feet_late = B->feet.late;
+      u.st.feet_underruns = B->feet.underruns;
       rt = KILO_MSG_STATS;
       len = sizeof u.st;
       break;
@@ -340,12 +345,19 @@ static void on_frame(uint8_t st, const kilo_frame_t& f) {
     return;
   }
   if (t & 0x80u) return;  // a known body->Pi type: an echo, or a confused peer
-  bool is_goal = kilo_msg_is_goal(t);
+  // FEET, the one Pi->body stream, is handled like a goal: never acked,
+  // refused with EVENT GOAL_REFUSED (rate-limited), never de-duplicated.
+  bool is_goal = kilo_msg_is_goal(t) || t == KILO_MSG_FEET;
   if (st != KILO_FRAME_OK) {  // KILO_FRAME_BAD_PAYLOAD_LEN
     if (is_goal)
       refuse(t, KILO_GOAL_REFUSED_REASON_BAD_LEN);
     else
       ack(f.seq, t, KILO_ACK_STATUS_BAD_LEN);
+    return;
+  }
+  if (t == KILO_MSG_FEET) {
+    uint8_t r = body_feet(*B, f.payload);
+    if (r != GOAL_OK) refuse(t, r);
     return;
   }
   if (is_goal) {
@@ -427,14 +439,10 @@ static void telemetry(const Body& b) {
   m.dist_mm = s.dist_mm;
   m.batt_mv = battery_mv(b.batt);
   m.mode = body_mode(b);
-  // A leg, the head (PI_HOLD when held). The gait reports itself from the
-  // moment its goal is accepted (IDLE still moves the legs to STANCE
-  // first), and on the head while it bobs or wags IDLE's head.
+  // A leg, the head (PI_HOLD when held). The FEET stream reports itself
+  // from the first FEET accepted (the legs stay IDLE's until its tick).
   uint8_t leg = b.arb.owner[3], head = b.arb.owner[0];
-  if (body_gait_active(b)) {
-    if (leg == OWN_IDLE) leg = OWN_GAIT;
-    if (head == OWN_IDLE && (b.gait.flags & (KILO_GAIT_FLAGS_BOB | KILO_GAIT_FLAGS_WAG))) head = OWN_GAIT;
-  }
+  if (body_gait_active(b) && leg == OWN_IDLE) leg = OWN_GAIT;
   m.owners = (uint8_t)(leg | (head << 4));
   uint16_t fl = 0;
   for (uint8_t k = 0; k < DRIVEN_COUNT; k++)
@@ -454,7 +462,15 @@ static void telemetry(const Body& b) {
   m.flags = fl;
   m.last_rx_seq = L.last_rx_seq;
   m.trick_frame = kf_frame(b.kf);
-  m.gait_phase = body_gait_running(b) ? (uint8_t)(b.gait.phi >> 8) : 0;
+  m.ref_pitch = b.bal.ref[BAL_PITCH];
+  m.ref_roll = b.bal.ref[BAL_ROLL];
+  // The correction the legs carry this tick: the IK's (geometric) or the
+  // joints' (joint-space); frozen while BALANCE_HELD, decaying to 0 after
+  // the balance is turned off.
+  m.corr_pitch = b.bal.ax[BAL_PITCH].corr;
+  m.corr_roll = b.bal.ax[BAL_ROLL].corr;
+  m.feet_queued = body_gait_active(b) ? feet_queued(b.feet) : 0;
+  m.support = body_support(b);
   m.tick_load = s.tick_load;
   m.rx_err = (uint8_t)(L.cnt.rx_crc_err + L.cnt.rx_overflow);
   m.epoch = b.epoch;

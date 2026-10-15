@@ -11,12 +11,16 @@ the personality. That left no room to grow, so we rewrote it as two minds
 that share the work:
 
 - `body/`: new firmware for the NyBoard, the lower mind. It does only what
-  has to be fast and safe: moving the joints, balancing, walking, catching
-  falls, watching the battery and the link to the Pi. If the Pi goes quiet,
-  the body stops, lies down and goes limp on its own.
+  has to be fast and safe: moving the joints, playing the steps the Pi
+  sends (one set of foot positions every 20 ms, a little ahead of time),
+  correcting the small errors between what the Pi predicted and what the
+  body feels, catching falls, watching the battery and the link to the Pi.
+  If the Pi goes quiet, the body puts its feet down, stops, lies down and
+  goes limp on its own.
 - `mind/`: a Python daemon on the Pi, the upper mind. It decides what Kilo
-  does: postures, tricks, walking, the IR remote, perception and, later, a
-  personality. It talks to the body over a serial link and offers a `kilo`
+  does: postures, tricks, walking (it plans every step from a model of the
+  body and streams them to the body), the IR remote, perception and, later,
+  a personality. It talks to the body over a serial link and offers a `kilo`
   command line.
 - `protocol/`: the single definition of the messages between the two; the C
   and Python sides are generated from it.
