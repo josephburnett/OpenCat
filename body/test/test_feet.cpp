@@ -10,7 +10,8 @@
 //     (STATS feet_late), a repeat replacing its tick, no ACK, refusals.
 //   Playing: the IK of the pose, a lost tick held, a wild pose slew-limited.
 //   Underrun: FEET_UNDERRUN, the hold, the settle, GAIT_STOPPED 1; a FEET
-//     during the hold resumes.
+//     during the hold resumes; the settle on a leaning body (the plane of
+//     the support feet; on two feet their mean).
 //   The end: SET_POSTURE, an epoch bump (a fall), a reflex: GAIT_STOPPED 0.
 //   TELEMETRY at 50 Hz with FEET at 50 Hz on a 250 kbaud budget.
 //   The tipping plant: its time constant; a walk plan that moves the mass
@@ -532,6 +533,92 @@ static void test_underrun() {
   CHECK(count_ev(EV_FEET_UNDERRUN) == 2 && count_ev(EV_GAIT_STOPPED, 1) == 1);
 }
 
+// The settle on a leaning body: the lifted foot goes to the plane through
+// the three support feet at its x, not to their mean depth; on two support
+// feet (no plane) to their mean.
+static double plane_z(const Pose& p, const int abc[3], int leg) {
+  double lb = PARAM(LEG_LB_MM), w = PARAM(LEG_W_MM), X[4], Y[4], Z[4];
+  int idx[4] = {abc[0], abc[1], abc[2], leg};
+  for (int k = 0; k < 4; k++) {
+    int l = idx[k];
+    X[k] = (leg_front((uint8_t)l) ? lb / 2 : -lb / 2) + p.x[l];
+    Y[k] = leg_left((uint8_t)l) ? -w / 2 : w / 2;
+    Z[k] = p.z[l];
+  }
+  double ux = X[1] - X[0], uy = Y[1] - Y[0], vx = X[2] - X[0], vy = Y[2] - Y[0];
+  double wx = X[3] - X[0], wy = Y[3] - Y[0], d = ux * vy - uy * vx;
+  return Z[0] + ((wx * vy - wy * vx) * (Z[1] - Z[0]) + (ux * wy - uy * wx) * (Z[2] - Z[0])) / d;
+}
+// Stream p, stop, run to GAIT_STOPPED 1 (lb: LEG_LB_MM, 0 = the default).
+// The settle's ticks.
+static int settle_run(const Pose& p, int16_t lb = 0) {
+  stance();
+  if (lb) g_param[KILO_PARAM_LEG_LB_MM] = lb;
+  Stream st = start_stream(p);
+  for (int t = 0; t < 40; t++) stream_tick(st, p);
+  int n = 0;
+  while (count_ev(EV_GAIT_STOPPED) == 0 && n++ < 60) tick();
+  CHECK(count_ev(EV_GAIT_STOPPED, 1) == 1 && feet_support(b.feet) == 0xF);
+  return n;
+}
+static void test_settle_plane() {
+  // The walk's lean (6 deg pitch, 14 deg roll; doc §3d): support depths
+  // z = 70 + tan(6) X - tan(14) Y (X forward, Y right of the body's centre).
+  double lb = PARAM(LEG_LB_MM), w = PARAM(LEG_W_MM);
+  Pose p;
+  p.pitch = 6, p.roll = 14;
+  for (int l = 0; l < 4; l++) {
+    p.x[l] = leg_front((uint8_t)l) ? 20 : -20;
+    double X = (leg_front((uint8_t)l) ? lb / 2 : -lb / 2) + p.x[l], Y = leg_left((uint8_t)l) ? -w / 2 : w / 2;
+    p.z[l] = std::round(70 + std::tan(6 * D2R) * X - std::tan(14 * D2R) * Y);
+  }
+  Pose q0 = p;  // all four on the plane
+  p.z[LEG_LF] = 66, p.sup = 0xE;  // LF lifted, 20 mm above the floor
+  int abc[3] = {LEG_RF, LEG_RB, LEG_LB};
+  double want = plane_z(p, abc, LEG_LF), mean = (p.z[LEG_RF] + p.z[LEG_RB] + p.z[LEG_LB]) / 3;
+  settle_run(p);
+  int got = b.feet.cur.zs[LEG_LF] & 0x7F;
+  std::printf("feet: settle on a leaning body: LF at %d mm (the support plane %.2f, their mean %.2f)\n", got, want,
+              mean);
+  CHECKF(std::fabs(got - want) <= 0.5, "LF settled at %d, plane %.2f", got, want);
+  CHECK(std::fabs(want - mean) > 10);  // the mean would have left it ~20 mm off the floor
+  CHECK(b.feet.cur.x[LEG_LF] == 20);
+  // Each leg lifted in turn: on the plane of the other three.
+  for (int lift = 0; lift < 4; lift++) {
+    Pose q = q0;
+    q.z[lift] = 60, q.sup = (uint8_t)(0xF & ~(1u << lift));
+    int sup[3], k = 0;
+    for (int l = 0; l < 4; l++)
+      if (l != lift) sup[k++] = l;
+    double wz = plane_z(q, sup, lift);
+    settle_run(q);
+    int g = b.feet.cur.zs[lift] & 0x7F;
+    CHECKF(std::fabs(g - wz) <= 0.5 && std::fabs(g - q0.z[lift]) <= 1, "leg %d settled at %d, plane %.2f", lift, g,
+           wz);
+  }
+  // Two support feet (a diagonal) define no plane: their mean depth.
+  Pose d = q0;
+  d.z[LEG_LF] = 60, d.z[LEG_RB] = 60, d.sup = 0xA;  // RF, LB down
+  settle_run(d);
+  int m2 = (int)std::lround((d.z[LEG_RF] + d.z[LEG_LB]) / 2);
+  CHECK((b.feet.cur.zs[LEG_LF] & 0x7F) == m2 && (b.feet.cur.zs[LEG_RB] & 0x7F) == m2);
+  // Three support feet on no plane: with Lb = 80 mm, RF 40 mm back and RB
+  // 40 mm forward stand on the same spot (D = 0): their mean.
+  Pose c;
+  c.x[LEG_RF] = -40, c.x[LEG_RB] = 40, c.x[LEG_LB] = 40;
+  c.z[LEG_RF] = 70, c.z[LEG_RB] = 80, c.z[LEG_LB] = 70, c.z[LEG_LF] = 60, c.sup = 0xE;
+  settle_run(c, 80);
+  CHECK((b.feet.cur.zs[LEG_LF] & 0x7F) == 73);
+  // A thin triangle (RB 1 mm further forward): the plane is steep, the
+  // quotient is capped and the depth kept in FEET's 30..95.
+  c.x[LEG_RB] = 41;
+  settle_run(c, 80);
+  CHECK((b.feet.cur.zs[LEG_LF] & 0x7F) == 95);
+  c.z[LEG_RB] = 60;
+  settle_run(c, 80);
+  CHECK((b.feet.cur.zs[LEG_LF] & 0x7F) == 30);
+}
+
 // ---- The end: a posture, an epoch bump, a reflex ------------------------------------------
 static void test_end() {
   Pose p;
@@ -953,6 +1040,7 @@ int main() {
   test_refusals();
   test_play();
   test_underrun();
+  test_settle_plane();
   test_end();
   test_shares();
   test_budget();

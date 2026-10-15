@@ -607,12 +607,33 @@ also releases the warm-boot hold, as a goal does.
   FEET_UNDERRUN` (arg = ticks since the last FEET arrived, STATS
   `feet_underruns`), the pose is held for `link.feet_hold_ticks` = 5 ticks
   (100 ms), then the body **settles**: every foot whose support bit is
-  clear goes down 2 mm per tick at its x to the ground (the mean depth of
-  the support feet, or STANCE's default height if none are down), its bit
-  set when it is there; with all four down IDLE takes the legs in STANCE at
-  the default height (a 200 ms crossfade) and `EVENT GAIT_STOPPED` arg 1 is
-  sent. A FEET that arrives during the hold or the settle is played on its
-  tick and the stream goes on.
+  clear goes down (or up) 2 mm per tick at its x to the ground (below),
+  its bit set when it is there; with all four down IDLE takes the legs in
+  STANCE at the default height (a 200 ms crossfade) and `EVENT
+  GAIT_STOPPED` arg 1 is sent. A FEET that arrives during the hold or the
+  settle is played on its tick and the stream goes on.
+
+**The settle's ground.** The walk leans the body on its support feet (up to
+about 14° of roll and 6° of pitch), so their depths differ by up to about
+16 mm, and a foot set at their mean depth would land several mm above or
+into the floor and the handover to STANCE would jolt and tilt the body. On
+three support feet the ground is the plane through them, at the lifted
+foot's x (`feet.cpp` `ground_plane`; the mind's planner fits the same
+plane, `fit_attitude`): each foot at X = ±Lb/2 + x (front +), Y = ±W/2
+(right +), its depth z, and the lifted foot P gets
+z_A + s (z_B − z_A) + t (z_C − z_A) with s = (P−A)×(C−A)/D,
+t = (B−A)×(P−A)/D, D = (B−A)×(C−A). Fixed point: coordinates in doubled mm
+(|X| ≤ 320, |Y| ≤ 150 at the parameters' limits) so Lb/2 stays whole;
+each cross product int16 × int16 → int32, ≤ 384000; the numerator
+≤ 2 × 65 × 384000 ≈ 50 M (int32); one int32 division rounded to the
+nearest mm, the quotient capped at 127 mm before it returns to int16 (a
+thin triangle extrapolates steeply) and the depth kept in FEET's 30..95.
+On fewer than three support feet, or three whose (X, Y) are on one line
+(D = 0), the ground is their mean depth; with none down, STANCE's default
+height. Host tests (`test_feet.cpp` `test_settle_plane`): each leg lifted
+in turn under that lean lands within 0.5 mm of the plane (the mean is
+23 mm off for LF), two feet give their mean, D = 0 the mean, a thin
+triangle the clamp.
 
 **Entering and leaving GAIT.** The first FEET accepted makes the mode GAIT
 (TELEMETRY mode 3, flag `GAIT`, leg-owner nibble GAIT) and IDLE's posture
@@ -1337,7 +1358,11 @@ under the 1540 B ceiling the link's 66 B frame-encoding buffer and the
 tick's 16 B of leg angles moved from globals to the stack, where they are
 only held while used), stack 365 B (`main` 128 → `link_poll` 111 →
 `send_hello` 20 → `emit` 78 → `clock_micros` 2, + 26 B ISR), **margin
-146 B** (from 197 B: the queue costs about 50 B of real headroom). RAM is
+146 B** (from 197 B: the queue costs about 50 B of real headroom). **With
+the settle on the support plane and the FEET pitch/roll check**
+(2026-10-14): 27368 B flash (+694 B, the plane fit's int32 arithmetic),
+globals, stack and margin unchanged (the settle's path, `main` 128 →
+`ground_plane` 44 → `cross` 6, is not the deepest). RAM is
 the tight resource. If needed, shrink in this order:
 1. keyframe store 32 → 24 frames (−112 B; the first-version library's
    largest trick has 6 frames, HELLO reports the capacity to the mind).

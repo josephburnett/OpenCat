@@ -19,10 +19,11 @@
 // no entry is an underrun: EVENT FEET_UNDERRUN (arg = ticks since the last
 // FEET arrived), then the pose is held for link.feet_hold_ticks (5) ticks,
 // then the body settles: every foot whose support bit is clear goes down
-// SETTLE_MM per tick at its x to the ground (the mean depth of the support
-// feet, or STANCE's default height when there are none), its bit set when
-// it is there; with all four down the stream ends (IDLE STANCE, GAIT_STOPPED
-// arg 1, body.cpp). A FEET that arrives during the hold or the settle is
+// SETTLE_MM per tick at its x to the ground (the plane through the support
+// feet when three are down, so a leaning body lands its foot on the floor;
+// else their mean depth, or STANCE's default height when none are down),
+// its bit set when it is there; with all four down the stream ends (IDLE
+// STANCE, GAIT_STOPPED arg 1, body.cpp). A FEET that arrives during the hold or the settle is
 // played on its tick and the stream goes on.
 //
 // Every played pose goes through the IK and then the arbiter's safety stage

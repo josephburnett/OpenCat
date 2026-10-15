@@ -101,20 +101,75 @@ int16_t feet_ref(const Feet& f, uint8_t axis) {
   return r;
 }
 
+// A foot in the body's plane, doubled so that half the hip spacing stays
+// whole (mm x 2): X forward from the body's centre (hips at +-Lb/2, the foot
+// x ahead of its hip), Y to the right (hips at +-W/2). |X| <= 200 + 120,
+// |Y| <= 150 at the parameters' limits.
+KILO_NOINLINE static void foot_xy2(const Feet& f, uint8_t i, int16_t* X, int16_t* Y) {
+  int16_t lb = PARAM(LEG_LB_MM), w = PARAM(LEG_W_MM);
+  *X = (int16_t)((leg_front(i) ? lb : -lb) + 2 * f.cur.x[i]);
+  *Y = leg_left(i) ? (int16_t)-w : w;
+}
+
+// a x b for 2-D vectors in doubled mm, int16 x int16 products.
+KILO_NOINLINE static int32_t cross(int16_t ax, int16_t ay, int16_t bx, int16_t by) {
+  return (int32_t)ax * by - (int32_t)ay * bx;
+}
+
+// The ground's depth (mm below the hip) at foot `i` on the plane through
+// the three support feet a, b, c (the leaning body on three feet: the walk
+// tilts the body up to ~14 deg, so the support depths differ by up to
+// ~16 mm). Barycentric: P - A = s (B - A) + t (C - A) with s = (P-A)x(C-A) / D,
+// t = (B-A)x(P-A) / D, D = (B-A)x(C-A); z = zA + s (zB - zA) + t (zC - zA).
+// In doubled mm the differences are <= 640 (X) and 300 (Y), each cross
+// product <= 2 x 640 x 300 = 384000 and the numerator <= 2 x 65 x 384000 =
+// 49.9 M: int32. The quotient (s, t may be large for a thin triangle) is
+// capped at 127 mm before it goes back to int16, then the depth is rounded
+// to the nearest mm and kept in FEET's 30..95. -1 when the three are on one
+// line (D = 0: no plane, the caller takes the mean).
+KILO_NOINLINE static int16_t ground_plane(const Feet& f, uint8_t i, const uint8_t abc[3]) {
+  int16_t X[4], Y[4], z[3];  // [0..2] the support feet, [3] foot i
+  for (uint8_t k = 0; k < 4; k++) {
+    uint8_t l = k < 3 ? abc[k] : i;
+    foot_xy2(f, l, &X[k], &Y[k]);
+    if (k < 3) z[k] = (int16_t)(f.cur.zs[l] & 0x7F);
+  }
+  for (uint8_t k = 1; k < 4; k++) X[k] = (int16_t)(X[k] - X[0]), Y[k] = (int16_t)(Y[k] - Y[0]);
+  int32_t d = cross(X[1], Y[1], X[2], Y[2]);
+  if (!d) return -1;
+  int32_t num = cross(X[3], Y[3], X[2], Y[2]) * (int16_t)(z[1] - z[0]) +
+                cross(X[1], Y[1], X[3], Y[3]) * (int16_t)(z[2] - z[0]);
+  if (d < 0) d = -d, num = -num;
+  bool neg = num < 0;
+  int32_t q32 = ((neg ? -num : num) + d / 2) / d;
+  int16_t q = (int16_t)(q32 > 127 ? 127 : q32);
+  q = (int16_t)(z[0] + (neg ? -q : q));
+  return q < 30 ? 30 : q > 95 ? 95 : q;
+}
+
 // The settle: every foot off the ground goes down (or up) toward the ground
-// at its x by FEET_SETTLE_MM per tick. True when all four are down.
+// at its x by FEET_SETTLE_MM per tick. True when all four are down. The
+// ground: the plane through the support feet when three are down (the body
+// leans on them: a foot set at their mean depth would land above or into
+// the floor), else the support feet's mean depth, else STANCE's default
+// height when none are down.
 static bool settle(Feet& f) {
   uint16_t sum = 0;
-  uint8_t n = 0;
+  uint8_t n = 0, abc[3];
   for (uint8_t i = 0; i < 4; i++)
-    if (f.cur.zs[i] & FEET_SUP) sum = (uint16_t)(sum + (f.cur.zs[i] & 0x7Fu)), n++;
-  // The ground: the support feet's mean depth, else STANCE's default height.
-  uint8_t g = n ? (uint8_t)((sum + n / 2) / n)
-                : (uint8_t)((((int32_t)ik_reach_q2() * KILO_GAIT_STANCE_H_256) >> 8) / 4);
+    if (f.cur.zs[i] & FEET_SUP) {
+      sum = (uint16_t)(sum + (f.cur.zs[i] & 0x7Fu));
+      if (n < 3) abc[n] = i;
+      n++;
+    }
+  uint8_t mean = n ? (uint8_t)((sum + n / 2) / n)
+                   : (uint8_t)((((int32_t)ik_reach_q2() * KILO_GAIT_STANCE_H_256) >> 8) / 4);
   bool all = true;
   for (uint8_t i = 0; i < 4; i++) {
     uint8_t z = f.cur.zs[i];
     if (z & FEET_SUP) continue;
+    int16_t p = n == 3 ? ground_plane(f, i, abc) : -1;
+    uint8_t g = p < 0 ? mean : (uint8_t)p;
     if (z + FEET_SETTLE_MM < g)
       z = (uint8_t)(z + FEET_SETTLE_MM), all = false;
     else if (z > g + FEET_SETTLE_MM)
