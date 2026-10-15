@@ -92,3 +92,8 @@ The worst tick was a tenth of the 100 ms lookahead the FEET stream gives
 the body (link.feet_lookahead_ticks). Not covered: real serial traffic on
 the same USB controller as the dongle (Kilo was unplugged), and a longer
 soak.
+
+Planner cost on the Pi (`Planner.next()` per tick, 1500 ticks per pattern,
+`~/kilo-logs/plan_cost.py`), after the review fixes at 49e7d64: trot median
+0.74 ms, max 2.1; walk median 0.77, 99 % 3.9, max 4.0; crawl max 4.5 ms.
+Before the fixes a walk or crawl step boundary took up to 43 ms.
