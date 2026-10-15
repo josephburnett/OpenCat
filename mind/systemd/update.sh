@@ -7,8 +7,9 @@
 # - git pull --ff-only (prints what came in)
 # - .venv/bin/pip install -e mind, only if mind/pyproject.toml changed
 # - sudo -n systemctl restart kilo.service, only if mind/ or protocol/ changed
-#   (or --flash: body/ changed means the firmware is rebuilt and flashed after
-#   the restart: Kilo goes limp for about a minute; floor only, owner informed)
+# - --flash: the firmware is rebuilt and flashed after the restart, whether or
+#   not this pull changed it (an earlier pull may have): Kilo goes limp for
+#   about a minute; floor or stand only, owner informed
 # - kilo daemon: the daemon's one-line status at the end
 # Writes only under the checkout and /run: works in safe mode.
 set -eu
@@ -63,11 +64,8 @@ else
     [ -z "$changed" ] || echo "daemon code unchanged: no restart"
 fi
 if [ "$flash" = 1 ]; then
-    if in_changed '^body/' || in_changed '^protocol/'; then
-        run "$kilo" -v flash
-    else
-        echo "firmware unchanged: no flash"
-    fi
+    # always: the pull that brought the firmware may have happened earlier, without --flash
+    run "$kilo" -v flash
 elif in_changed '^body/' || in_changed '^protocol/'; then
     echo "firmware changed: flash it when Kilo is on the floor and the owner knows:  $0 --flash   (or: kilo flash)"
 fi
