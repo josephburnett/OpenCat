@@ -149,7 +149,7 @@ ground" if it also watches pitch.
    swing. Period 600 ms, duty 192 (0.75): swing 150 ms, four-foot phases of
    150 ms, stride 20–25 mm. Expect much less wobble than 1000/0.70. This is
    a test of section 2, not a fix. Measure: roll amplitude per cycle from
-   telemetry (`kilo monitor`), on the stand and on the floor.
+   telemetry (`kilo monitor`), held in the hand and on the floor.
 2. **Speed mapping in the mind** (small): the remote's speed keys and
    `kilo walk` set stride and stance time with a fixed swing, instead of a
    period. Continuous speed, two-foot time constant.
@@ -210,7 +210,7 @@ ground" if it also watches pitch.
    sway now runs 225 ms ahead (`[gait] sway_lead_ms`) and the body leans at
    least 4.0° (walk) and 7.5° (crawl) away from every leg as it lifts.
 
-Each step is testable on the stand first (legs in the air: cadence, servo
+Each step is testable in the hand first (legs in the air: cadence, servo
 slew, sway pattern) and then on the floor with the roll trace as the
 number that must go down.
 

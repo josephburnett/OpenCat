@@ -26,8 +26,8 @@ board and dips).
 
 ## 0. Flash and check the versions
 
-On the Pi (or from rtb over ssh), Kilo on its stand or on the floor,
-switched on, plugged in:
+On the Pi (or from rtb over ssh), Kilo on the floor (or on the desk, not
+walking), switched on, plugged in:
 
 ```sh
 ~/OpenCat/mind/systemd/update.sh --flash      # git pull, pip, restart, kilo flash (~1 min)
@@ -39,9 +39,10 @@ Expected: `kilo status` shows the new build id, `proto 1.5`, mode IDLE,
 wait a minute, it reboots clean (safe mode), then run `kilo status` again
 and `kilo flash` once more if the build id is still the old one.
 
-## 1. On the stand: the sway is visible and the right way round
+## 1. In the hand: the sway is visible and the right way round
 
-Kilo on his stand, feet in the air (nothing to tip over), balance on:
+There is no stand for Kilo. The owner holds him under the belly with all
+four feet in the air (nothing to tip over), balance on:
 
 ```sh
 kilo walk march --pattern walk --for 8        # one leg at a time, sway on by default
@@ -61,10 +62,10 @@ If the lean goes TOWARD the lifted leg, stop: the sign is wrong on the
 real cat (the host test agrees with §3f's convention, so this would mean
 the attitude convention is off; record it, do not go to the floor).
 
-## 2. On the stand: the reflex lands a leg
+## 2. In the hand: the reflex lands a leg
 
-Still on the stand, `kilo monitor` in a second terminal. Start a slow
-walk and, while a leg is in the air, tip the whole stand quickly toward
+Still in the hand, `kilo monitor` in a second terminal. Start a slow
+walk and, while a leg is in the air, tip the whole body quickly toward
 that leg (a few degrees in a fraction of a second, the way a push would):
 
 ```sh
@@ -99,7 +100,8 @@ Then, with the remote or the CLI:
    lands early and he stays up or at least falls less; `FELL` /
    `RECOVERED` in the daemon log if not.
 
-Stop between runs with the stand key; `kilo walk stop` from the CLI.
+Stop between runs with the remote's stand-posture key (>>|); `kilo walk stop`
+from the CLI.
 
 ## 4. What to read off the telemetry
 
