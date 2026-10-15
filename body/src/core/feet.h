@@ -36,6 +36,8 @@
 // of `share`, 0..4 per leg) toward 4 while its support bit is set and
 // toward 0 while it is clear, so a lifting foot lets go of it and a landing
 // foot takes it back without a step. STANCE corrects through all four.
+// While any support bit is clear the corrections are held (body.cpp: on
+// three feet they act through the feet a tipping body pivots on).
 //
 // RAM: 8 x 12 B queue + 12 B pose + 11 B player state + 15 B STANCE and the
 // pose (the leg angles are body_tick's, on the stack). (The z field fits
