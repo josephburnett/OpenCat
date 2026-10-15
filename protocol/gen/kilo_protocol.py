@@ -11,8 +11,8 @@ import struct
 from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, ClassVar
 
-PROTO_MAJOR = 1
-PROTO_MINOR = 5
+PROTO_MAJOR = 2
+PROTO_MINOR = 0
 BAUD = 250000
 MAX_PAYLOAD = 60
 HEADER_BYTES = 2
@@ -30,6 +30,9 @@ TICK_MS = 20
 TELEMETRY_DEFAULT_DIV = 2
 TELEMETRY_DEFAULT_HZ = 25
 GOAL_REFRESH_HZ = 5
+FEET_DEPTH = 8
+FEET_LOOKAHEAD_TICKS = 5
+FEET_HOLD_TICKS = 5
 HEARTBEAT_IDLE_MS = 100
 MIND_ALIVE_MS = 1000
 CMD_RETRY_MS = 50
@@ -82,7 +85,7 @@ class MsgId(enum.IntEnum):
     STATS_REQ = 0x05
     PCA_READ = 0x06
     SET_POSTURE = 0x10
-    SET_GAIT = 0x11
+    FEET = 0x11
     SET_HEAD = 0x12
     SET_BODY_POSE = 0x13
     SET_BALANCE = 0x14
@@ -161,6 +164,7 @@ class EventCode(enum.IntEnum):
     EEPROM_SAVED = 16
     TX_DROPPED = 17
     IR_KEY = 18
+    FEET_UNDERRUN = 19
 
 
 class Mode(enum.IntEnum):
@@ -192,12 +196,6 @@ class Posture(enum.IntEnum):
     STANCE = 4
     CALIB = 5
     ZERO = 6
-
-
-class GaitPattern(enum.IntEnum):
-    WALK = 0
-    TROT = 1
-    CRAWL = 2
 
 
 class HeadMode(enum.IntEnum):
@@ -266,13 +264,11 @@ class PostureFlags(enum.IntFlag):
     BALANCE = 1 << 0
 
 
-class GaitFlags(enum.IntFlag):
-    BOB = 1 << 0
-    WAG = 1 << 1
-    BALANCE = 1 << 2
-    SWAY = 1 << 3
-    CATCH = 1 << 4
-    PLACE = 1 << 5
+class SupportFlags(enum.IntFlag):
+    LF = 1 << 0
+    RF = 1 << 1
+    RB = 1 << 2
+    LB = 1 << 3
 
 
 class TrickFlags(enum.IntFlag):
@@ -662,56 +658,51 @@ class SetPosture:
 
 
 @dataclass
-class SetGait:
-    """0x11 SET_GAIT (goal). Run/stop plus gait parameters (§3d)."""
+class Feet:
+    """0x11 FEET (stream). One tick of the mind's plan (doc §3d): where each foot is at `tick` and the attitude the plan predicts there. Sent every tick, about link.feet_lookahead_ticks ahead; not acked, not refreshed, not retried. The body queues up to link.feet_depth ticks and plays each at its tick, slew-limited from where the feet are (a late or missing tick never snaps). The first FEET accepted enters GAIT (gated: STALE, FALLEN, LOW_BATT, UNCALIBRATED -> EVENT GOAL_REFUSED, rate-limited) and the stream owns the legs until a SET_POSTURE or an epoch bump (GAIT_STOPPED arg 0). A tick already past is dropped (STATS feet_late). When the queue runs dry the body holds the last pose for link.feet_hold_ticks (EVENT FEET_UNDERRUN), then settles: swing feet down to the ground at their x, IDLE in STANCE (GAIT_STOPPED arg 1). In GAIT the balance loop's reference is this pitch/roll, it corrects through the support feet only, and it holds its corrections while any support bit is clear (TELEMETRY flag BALANCE_HELD; doc §3f)."""
     ID: ClassVar[int] = 0x11
-    NAME: ClassVar[str] = 'SET_GAIT'
-    KIND: ClassVar[Kind] = Kind.GOAL
+    NAME: ClassVar[str] = 'FEET'
+    KIND: ClassVar[Kind] = Kind.STREAM
     DIR: ClassVar[Dir] = Dir.PI_TO_BODY
     HAS_EPOCH: ClassVar[bool] = True
     IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
-    MIN_LEN: ClassVar[int] = 11
-    MAX_LEN: ClassVar[int] = 11
-    _FMT: ClassVar[struct.Struct] = struct.Struct('<BBBHBbbBBB')
+    MIN_LEN: ClassVar[int] = 16
+    MAX_LEN: ClassVar[int] = 16
+    _FMT: ClassVar[struct.Struct] = struct.Struct('<BHbbbbBBBBhhB')
     epoch: int = 0
-    run: int = 0  # range 0..1
-    pattern: int = 0  # enum gait_pattern
-    period_ms: int = 0  # ms; range 300..2000
-    duty: int = 0  # 1/256; range 128..230
-    stride_mm: int = 0  # mm; range -60..60
-    turn_mm: int = 0  # mm; range -40..40; + = left
-    step_h_mm: int = 0  # mm; range 0..40
-    body_h_mm: int = 0  # mm; IK workspace
-    flags: int = 0  # flags gait_flags
+    tick: int = 0  # tick; the body tick this pose is for (TELEMETRY.tick's clock)
+    x_mm: list[int] = field(default_factory=lambda: [0] * 4)  # mm; range -60..60; foot fore-aft from under the hip, + forward; legs LF RF RB LB
+    z_mm: list[int] = field(default_factory=lambda: [0] * 4)  # mm; range 30..95; foot depth below the hip, i.e. the body height at that leg; legs LF RF RB LB
+    pitch: int = 0  # deg x 0.0625; the attitude the plan predicts at tick: the balance reference (TELEMETRY conventions)
+    roll: int = 0  # deg x 0.0625
+    support: int = 0  # flags support_flags; the feet on the ground at tick; the balance corrects through these only
 
     def _fixed_values(self) -> list:
         v: list = []
         v.append(self.epoch)
-        v.append(self.run)
-        v.append(self.pattern)
-        v.append(self.period_ms)
-        v.append(self.duty)
-        v.append(self.stride_mm)
-        v.append(self.turn_mm)
-        v.append(self.step_h_mm)
-        v.append(self.body_h_mm)
-        v.append(self.flags)
+        v.append(self.tick)
+        if len(self.x_mm) != 4:
+            raise PayloadError('x_mm: expected 4 elements')
+        v.extend(self.x_mm)
+        if len(self.z_mm) != 4:
+            raise PayloadError('z_mm: expected 4 elements')
+        v.extend(self.z_mm)
+        v.append(self.pitch)
+        v.append(self.roll)
+        v.append(self.support)
         return v
 
     @classmethod
     def _from_fixed(cls, v: tuple, **extra):
         kw: dict = {}
         kw['epoch'] = v[0]
-        kw['run'] = v[1]
-        kw['pattern'] = v[2]
-        kw['period_ms'] = v[3]
-        kw['duty'] = v[4]
-        kw['stride_mm'] = v[5]
-        kw['turn_mm'] = v[6]
-        kw['step_h_mm'] = v[7]
-        kw['body_h_mm'] = v[8]
-        kw['flags'] = v[9]
+        kw['tick'] = v[1]
+        kw['x_mm'] = list(v[2:6])
+        kw['z_mm'] = list(v[6:10])
+        kw['pitch'] = v[10]
+        kw['roll'] = v[11]
+        kw['support'] = v[12]
         kw.update(extra)
         return cls(**kw)
 
@@ -1685,7 +1676,7 @@ class Hello:
 
 @dataclass
 class Telemetry:
-    """0x81 TELEMETRY (stream). Body state, 25 Hz by default."""
+    """0x81 TELEMETRY (stream). Body state, 25 Hz by default (50 Hz while the mind streams FEET: SET_STREAM telem_div 1)."""
     ID: ClassVar[int] = 0x81
     NAME: ClassVar[str] = 'TELEMETRY'
     KIND: ClassVar[Kind] = Kind.STREAM
@@ -1693,9 +1684,9 @@ class Telemetry:
     HAS_EPOCH: ClassVar[bool] = False
     IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = None
-    MIN_LEN: ClassVar[int] = 26
-    MAX_LEN: ClassVar[int] = 26
-    _FMT: ClassVar[struct.Struct] = struct.Struct('<HhhhhhHHBBHBBBBBB')
+    MIN_LEN: ClassVar[int] = 35
+    MAX_LEN: ClassVar[int] = 35
+    _FMT: ClassVar[struct.Struct] = struct.Struct('<HhhhhhHHBBHBBhhhhBBBBB')
     tick: int = 0  # tick; wraps every 21.8 min
     pitch: int = 0  # deg x 0.0625; nose down + (legacy ypr), legacy reflection
     roll: int = 0  # deg x 0.0625; right side up + (legacy ypr)
@@ -1709,7 +1700,12 @@ class Telemetry:
     flags: int = 0  # flags telemetry_flags
     last_rx_seq: int = 0
     trick_frame: int = 0  # 0xFF = none
-    gait_phase: int = 0  # phi >> 8
+    ref_pitch: int = 0  # deg x 0.0625; the balance reference in use, 0 while the balance is off: in GAIT the FEET prediction plus SET_BODY_POSE, in STANCE the pose, else the posture's or the trick's
+    ref_roll: int = 0  # deg x 0.0625
+    corr_pitch: int = 0  # deg x 0.0625; the balance correction the legs carry this tick (frozen while BALANCE_HELD; decays to 0 when the balance is off)
+    corr_roll: int = 0  # deg x 0.0625
+    feet_queued: int = 0  # tick; FEET ticks waiting in the queue (0 outside GAIT)
+    support: int = 0  # flags support_flags; the feet the balance corrects through this tick
     tick_load: int = 0  # us x 100; max tick time since the last telemetry
     rx_err: int = 0  # cumulative, mod 256
     epoch: int = 0
@@ -1729,7 +1725,12 @@ class Telemetry:
         v.append(self.flags)
         v.append(self.last_rx_seq)
         v.append(self.trick_frame)
-        v.append(self.gait_phase)
+        v.append(self.ref_pitch)
+        v.append(self.ref_roll)
+        v.append(self.corr_pitch)
+        v.append(self.corr_roll)
+        v.append(self.feet_queued)
+        v.append(self.support)
         v.append(self.tick_load)
         v.append(self.rx_err)
         v.append(self.epoch)
@@ -1751,10 +1752,15 @@ class Telemetry:
         kw['flags'] = v[10]
         kw['last_rx_seq'] = v[11]
         kw['trick_frame'] = v[12]
-        kw['gait_phase'] = v[13]
-        kw['tick_load'] = v[14]
-        kw['rx_err'] = v[15]
-        kw['epoch'] = v[16]
+        kw['ref_pitch'] = v[13]
+        kw['ref_roll'] = v[14]
+        kw['corr_pitch'] = v[15]
+        kw['corr_roll'] = v[16]
+        kw['feet_queued'] = v[17]
+        kw['support'] = v[18]
+        kw['tick_load'] = v[19]
+        kw['rx_err'] = v[20]
+        kw['epoch'] = v[21]
         kw.update(extra)
         return cls(**kw)
 
@@ -2156,7 +2162,7 @@ class Pong:
 
 @dataclass
 class Stats:
-    """0x8A STATS (event). 19 B of counters."""
+    """0x8A STATS (event). 23 B of counters."""
     ID: ClassVar[int] = 0x8A
     NAME: ClassVar[str] = 'STATS'
     KIND: ClassVar[Kind] = Kind.EVENT
@@ -2164,9 +2170,9 @@ class Stats:
     HAS_EPOCH: ClassVar[bool] = False
     IS_QUERY: ClassVar[bool] = False
     REPLY_TO: ClassVar[int | None] = 0x05
-    MIN_LEN: ClassVar[int] = 19
-    MAX_LEN: ClassVar[int] = 19
-    _FMT: ClassVar[struct.Struct] = struct.Struct('<IHHHHHHHB')
+    MIN_LEN: ClassVar[int] = 23
+    MAX_LEN: ClassVar[int] = 23
+    _FMT: ClassVar[struct.Struct] = struct.Struct('<IHHHHHHHBHH')
     uptime_s: int = 0  # s
     overruns: int = 0
     max_tick_us: int = 0  # us
@@ -2176,6 +2182,8 @@ class Stats:
     i2c_err: int = 0
     imu_stale: int = 0
     dmp_rate_hz: int = 0  # Hz
+    feet_late: int = 0  # FEET dropped because their tick had passed
+    feet_underruns: int = 0  # times the FEET queue ran dry in GAIT
 
     def _fixed_values(self) -> list:
         v: list = []
@@ -2188,6 +2196,8 @@ class Stats:
         v.append(self.i2c_err)
         v.append(self.imu_stale)
         v.append(self.dmp_rate_hz)
+        v.append(self.feet_late)
+        v.append(self.feet_underruns)
         return v
 
     @classmethod
@@ -2202,6 +2212,8 @@ class Stats:
         kw['i2c_err'] = v[6]
         kw['imu_stale'] = v[7]
         kw['dmp_rate_hz'] = v[8]
+        kw['feet_late'] = v[9]
+        kw['feet_underruns'] = v[10]
         kw.update(extra)
         return cls(**kw)
 
@@ -2313,7 +2325,7 @@ MESSAGES: dict[int, type] = {
     0x05: StatsReq,
     0x06: PcaRead,
     0x10: SetPosture,
-    0x11: SetGait,
+    0x11: Feet,
     0x12: SetHead,
     0x13: SetBodyPose,
     0x14: SetBalance,
@@ -2437,37 +2449,8 @@ PARAMS: dict[int, ParamInfo] = {
 PARAMS_BY_NAME: dict[str, ParamInfo] = {p.name: p for p in PARAMS.values()}
 
 
-# ---- Shared defaults and limits (spec [gait], [gait_patterns.*], [[joints]], [balance], [head]) ----
-GAIT_BOB_DEG = 4
-GAIT_WAG_DEG = 15
-GAIT_SWAY_ROLL_DEG = 8
-GAIT_SWAY_PITCH_DEG = 4
-GAIT_SWAY_LEAD_MS = 225
-GAIT_TOUCHDOWN_RATE_DPS = 90
-GAIT_CAPTURE_MM_PER_RAD_S = 7
-GAIT_CAPTURE_MAX_MM = 3
+# ---- Shared defaults and limits (spec [gait], [[joints]], [balance], [head]) ----
 GAIT_STANCE_H_256 = 205
-
-
-@dataclass(frozen=True)
-class GaitPatternDefaults:
-    """A gait pattern's defaults (spec [gait_patterns.*]): body_h_256 is /256 of
-    LEG_L1_MM + LEG_L2_MM, offsets are /256 of a cycle for legs LF RF RB LB."""
-    pattern: int
-    name: str
-    period_ms: int
-    duty: int
-    stride_mm: int
-    step_h_mm: int
-    body_h_256: int
-    offsets: tuple[int, int, int, int]
-
-
-GAIT_PATTERN_DEFAULTS: dict[int, GaitPatternDefaults] = {
-    0: GaitPatternDefaults(0, 'WALK', 2000, 192, 30, 15, 205, (128, 0, 64, 192)),
-    1: GaitPatternDefaults(1, 'TROT', 600, 192, 25, 8, 205, (0, 128, 0, 128)),
-    2: GaitPatternDefaults(2, 'CRAWL', 2000, 218, 25, 18, 179, (128, 0, 64, 192)),
-}
 
 
 @dataclass(frozen=True)
@@ -2525,7 +2508,7 @@ def payload_len_status(msg_type: int, payload: bytes) -> int:
     if msg_type == 0x10:
         return LEN_OK if n == 4 else LEN_BAD
     if msg_type == 0x11:
-        return LEN_OK if n == 11 else LEN_BAD
+        return LEN_OK if n == 16 else LEN_BAD
     if msg_type == 0x12:
         return LEN_OK if n == 10 else LEN_BAD
     if msg_type == 0x13:
@@ -2571,7 +2554,7 @@ def payload_len_status(msg_type: int, payload: bytes) -> int:
     if msg_type == 0x80:
         return LEN_OK if n == 16 else LEN_BAD
     if msg_type == 0x81:
-        return LEN_OK if n == 26 else LEN_BAD
+        return LEN_OK if n == 35 else LEN_BAD
     if msg_type == 0x82:
         return LEN_OK if n == 24 else LEN_BAD
     if msg_type == 0x83:
@@ -2589,7 +2572,7 @@ def payload_len_status(msg_type: int, payload: bytes) -> int:
     if msg_type == 0x89:
         return LEN_OK if n == 4 else LEN_BAD
     if msg_type == 0x8A:
-        return LEN_OK if n == 19 else LEN_BAD
+        return LEN_OK if n == 23 else LEN_BAD
     if msg_type == 0x8B:
         return LEN_OK if n == 32 else LEN_BAD
     if msg_type == 0x8F:

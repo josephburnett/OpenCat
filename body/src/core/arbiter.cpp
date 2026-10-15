@@ -4,16 +4,15 @@
 #include "posture.h"
 #include "params.h"
 
-// ---- GAIT (P2, core/gait.h) ----------------------------------------------
-// The gait owns the legs (canonical k >= 3) while it runs or stops, and
-// supplies this tick's IK angles from g.leg[] (shoulders LF RF RB LB then
-// knees, i.e. k - 3). TRICK (core/keyframe.h) is wired the same way in
-// arbiter_run. The crossfade, layers and safety stage then apply unchanged.
-static inline bool gait_claims(const Gait* g, uint8_t k) { return g && k >= 3 && g->state != GS_OFF; }
+// ---- GAIT (core/feet.h) ---------------------------------------------------
+// The FEET player owns the legs (canonical k >= 3) while the stream plays
+// (and holds, and settles), and supplies this tick's IK angles in legs[]
+// (shoulders LF RF RB LB then knees, i.e. k - 3; body_tick's feet_legs).
+// TRICK (core/keyframe.h) is wired the same way in arbiter_run. The
+// crossfade, layers and safety stage then apply unchanged.
 // Head layer (P1, doc §3c layer 1): a held head joint (k = 0..2) under IDLE
-// or GAIT steps toward the Pi's target from its last output, at most
-// head_step a16 per tick (the safety slew still applies after). The gait's
-// bob and wag (P2) are added to the IDLE base when nothing is held.
+// steps toward the Pi's target from its last output, at most head_step a16
+// per tick (the safety slew still applies after).
 static inline bool head_holds(const Arbiter& a, uint8_t k, uint8_t own) {
   return k < 3 && a.head_ttl && own <= OWN_GAIT && a.head_tgt[k] != JOINT_OFF;
 }
@@ -31,7 +30,7 @@ static inline int16_t head_layer(const Arbiter& a, uint8_t k) {
 // controller only for frames with the balance bit while a trick plays, and
 // lets the corrections decay otherwise); GAIT and STANCE get the geometric
 // balance through the IK instead (body.cpp passes bal = null then, core/
-// gait.h); REFLEX never balances.
+// feet.h); REFLEX never balances.
 static inline int16_t balance_layer(uint8_t k, uint8_t own, int16_t base, const Balance* bal) {
   if (!bal || own == OWN_GAIT || own == OWN_REFLEX) return base;
   return (int16_t)(base + balance_joint(*bal, k));
@@ -51,7 +50,7 @@ KILO_NOINLINE static void mover_start(Mover& m, uint8_t posture, uint8_t ticks, 
   m.i = 0;
 }
 
-// legs: STANCE's leg angles this tick (Gait::leg, from the IK), or null.
+// legs: STANCE's leg angles this tick (from the IK, feet_legs), or null.
 KILO_NOINLINE static int16_t mover_angle(const Mover& m, uint8_t k, const int16_t* legs) {
   if (m.posture == POSTURE_LIMP) return JOINT_OFF;
   int16_t from = m.from[k];
@@ -101,8 +100,7 @@ bool arbiter_reflex_settled(const Arbiter& a) { return a.reflex.i >= a.reflex.n;
 
 
 void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], const Balance* bal,
-                 const Keyframe* kf, const Gait* g) {
-  const int16_t* legs = g ? g->leg : 0;
+                 const Keyframe* kf, const int16_t* legs, bool gait) {
   // Unused channels (joints 3-7) stay full-off; driven ones are set below.
   for (uint8_t c = 0; c < JOINT_COUNT; c++) counts[c] = PCA_FULL_OFF;
   if (a.idle.i < a.idle.n) a.idle.i++;
@@ -116,7 +114,7 @@ void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], 
       own = OWN_REFLEX;
     else if (kf && kf_claims(*kf, k))
       own = OWN_TRICK;
-    else if (gait_claims(g, k))
+    else if (gait && legs && k >= 3)
       own = OWN_GAIT;
     else
       own = OWN_IDLE;
@@ -144,12 +142,9 @@ void arbiter_run(Arbiter& a, const JointCal& cal, uint16_t counts[JOINT_COUNT], 
     } else if (own == OWN_TRICK) {
       raw = kf_angle(*kf, k, a.xsrc[k]);
     } else if (own == OWN_GAIT) {
-      raw = g->leg[k - 3];
+      raw = legs[k - 3];
     } else {
       raw = mover_angle(a.idle, k, legs);
-      // Head bob and tail wag ride on IDLE's head while the gait runs (a
-      // hold replaces the base below, so it wins).
-      if (g && k < 3 && raw != JOINT_OFF) raw = (int16_t)(raw + gait_head(*g, k));
     }
     int16_t b = raw;
     if (a.xi[k] < a.xn[k]) {

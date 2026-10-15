@@ -23,28 +23,28 @@ both the same frames and compares the replies:
   and head owner PI_HOLD (unless a trick owns the head or a reflex holds
   it); SET_EYES is refused UNKNOWN_TYPE. At most one GOAL_REFUSED per goal
   type per second;
-- the gait (P2, §3d; the body's gait generator and IK are not simulated, only
-  its state machine): SET_GAIT BAD_ARG for a field outside its spec range,
-  an unknown pattern or flag bits; run=0 is never stale and stops; run=1:
-  STALE, FALLEN, LOW_BATT, UNCALIBRATED (config DEFAULTED, as STAND). A start
-  from another posture first moves to STANCE (POSTURE_TICKS ticks), then the
-  phase starts at 0 and advances 65536·20/period_ms per tick (TELEMETRY
-  gait_phase = phase >> 8); the stride ramps up over one period. From the
-  accepted run=1 to the end: mode GAIT, flag GAIT, leg owner GAIT. A refresh
-  updates the parameters; another pattern is a stop then a start (no
-  GAIT_STOPPED in between). run=0: the stride ramps down over one period, then
-  posture STANCE, EVENT GAIT_STOPPED (arg 0) once, mode IDLE. The watchdog's
-  epoch bump (stage 1) ramps a running gait down like run=0 and stage 2's
-  REST waits for it (§3g: Kilo never lies down mid-stride); a fall, LOW
-  battery or SET_POSTURE LIMP ends it at once (a reflex took the legs). Either
-  way GAIT_STOPPED carries the new epoch. A trick owns the legs it moves (TRICK
-  owner, mode TRICK) while the gait keeps its phase underneath and resumes
-  after. SET_POSTURE while walking only changes the posture under the gait
-  (the stop hands over to STANCE). SET_BODY_POSE: STALE, FALLEN, LOW_BATT (the
-  spec gives its fields no range: no BAD_ARG); the pose tilts the reported
-  pitch/roll in STANCE and while walking; an epoch bump resets it;
-- JOINTS at the SET_STREAM joints divider: fake angles (LIMP: -32768), legs
-  oscillating with the gait phase, head tilt bob and tail wag when flagged;
+- GAIT (P2, §3d; protocol 2.0): the body plays the mind's FEET stream
+  (kilo.vbody.feet: the queue, tick matching, late and too-early drops, the
+  slew-limited play, the hold and the settle on an underrun, the balance
+  through the support feet) on the walking physics (kilo.vbody.physics: a
+  point mass on four feet that tips over an edge of its support as an
+  inverted pendulum, with the servo lag ``lag_ms``). FEET is never acked. A
+  FEET is refused (EVENT GOAL_REFUSED, rate-limited like a goal) BAD_ARG
+  (x, z out of range, support bits above 3), STALE, FALLEN, LOW_BATT or
+  UNCALIBRATED (config DEFAULTED, as STAND); the first accepted one enters
+  GAIT from STANCE's feet (the posture becomes STANCE; a playing trick keeps
+  the legs it moves): mode GAIT, flag GAIT, leg owner GAIT, TELEMETRY's
+  measured attitude from the physics (plus ``imu_offset``), ref_* (0 while
+  the balance is off), corr_*, feet_queued and support from the player,
+  flag BALANCE_HELD while a foot is up. Outside GAIT, support is all four in
+  SIT, STAND and STANCE, else 0. GAIT ends with EVENT GAIT_STOPPED: arg 0 on a SET_POSTURE (the
+  posture takes the legs) or an epoch bump (watchdog, fall, low battery: the
+  legs stay in STANCE unless the reflex moves them), arg 1 when the settle
+  after an underrun is done (posture STANCE, mode IDLE). Past 35 degrees of
+  tilt the physics falls: the fall reflex as ``trigger_fall``. SET_BODY_POSE:
+  STALE, FALLEN, LOW_BATT (the spec gives its fields no range: no BAD_ARG);
+  the pose tilts the reported pitch/roll in STANCE; an epoch bump resets it;
+- JOINTS at the SET_STREAM joints divider: fake angles (LIMP: -32768);
 - balance (P1): the SET_POSTURE balance flag or SET_BALANCE enable (both
   cleared by an epoch bump; SET_BALANCE's gains stay) turns it on in SIT and
   STAND outside any reflex; TELEMETRY
@@ -106,7 +106,9 @@ from kilo.link.messages import Messages, default_messages
 from kilo.link.transport import FdTransport, Transport
 from kilo.protocol import kilo_link_codec as LC
 from kilo.protocol import kilo_protocol as P
+from kilo.planner.model import BodyModel
 from kilo.tricks.player import Player
+from kilo.vbody.feet import FeetPlayer
 
 EV = consts.EventCode
 
@@ -120,22 +122,20 @@ EEPROM_SIZE = 1024
 # Goals the body implements; every other goal is refused UNKNOWN_TYPE.
 P0_GOALS = frozenset({P.MsgId.HEARTBEAT, P.MsgId.SET_POSTURE, P.MsgId.BEEP, P.MsgId.SET_BALANCE,
                       P.MsgId.SET_HEAD})
-P2_GOALS = frozenset({P.MsgId.SET_GAIT, P.MsgId.SET_BODY_POSE})
-GAIT_RANGES = consts.field_ranges("SET_GAIT")
-GAIT_FLAGS = int(P.GaitFlags.BOB | P.GaitFlags.WAG | P.GaitFlags.BALANCE | P.GaitFlags.SWAY
-                 | P.GaitFlags.CATCH | P.GaitFlags.PLACE)  # SWAY, CATCH, PLACE: accepted, not simulated
-# Leg phase offsets (fractions of a cycle) in the order LF, RF, RB, LB (§3d,
-# spec [gait_patterns.*] offsets /256).
-LEG_OFFSETS = {P.GaitPattern(d.pattern): tuple(o / 256 for o in d.offsets) for d in P.GAIT_PATTERN_DEFAULTS.values()}
+P2_GOALS = frozenset({P.MsgId.SET_BODY_POSE})
 # Fake joint angles (degrees, canonical order: pan, tilt, tail, shoulders
 # LF RF RB LB, knees LF RF RB LB) for the JOINTS stream. Not the body's tables.
 FAKE_ANGLES = {"REST": (0, 0, 0, -60, -60, 60, 60, 60, 60, -60, -60),
                "SIT": (0, 20, 0, 30, 30, 75, 75, -30, -30, 60, 60),
                "CALIB": (0,) * 11, "ZERO": (0,) * 11}
 FAKE_STAND = (0, 0, 0, 30, 30, -30, -30, 30, 30, -30, -30)
-BOB_DEG, WAG_DEG = float(P.GAIT_BOB_DEG), float(P.GAIT_WAG_DEG)  # §3d head bob and tail wag amplitudes
 HEAD_HOLD_S = P.HEAD_HOLD_MS / 1000.0
 REST_MOVE_S = 1.0  # REST_MOVE_TICKS on the body: reflex moves to REST take 1 s
+
+
+def _a16(deg: float) -> int:
+    """Degrees -> the wire's 1/16 degree, clamped to i16."""
+    return max(-32768, min(32767, int(round(deg * 16))))
 
 
 def boot_epoch(last_epoch: int) -> int:
@@ -179,51 +179,6 @@ class TrickStore:
         return bool(self.hdr.joint_mask >> joint & 1)
 
 
-class Gait:
-    """The gait generator's state machine (§3d "Start and stop"), no IK.
-
-    ``state``: "stance" (moving to STANCE first), "run", "stop" (ramping the
-    stride down). ``amp`` is the stride ramp 0..1; ``phase`` the u16 phi."""
-
-    def __init__(self, msg: Any, to_stance_ticks: int = 0):
-        self.phase = 0
-        self.amp = 0.0
-        self.t = 0
-        self.state = "stance" if to_stance_ticks > 0 else "run"
-        self.stance_ticks = to_stance_ticks
-        self.restart: Any = None  # a pattern change: the SET_GAIT to start once stopped
-        self.update(msg)
-
-    def update(self, msg: Any) -> None:
-        self.msg = msg
-        self.pattern = int(msg.pattern)
-        self.period_ticks = max(1, round(msg.period_ms / P.TICK_MS))
-        self.step = 65536 * P.TICK_MS // msg.period_ms
-
-    @property
-    def flags(self) -> int:
-        return int(self.msg.flags)
-
-    def start_stop(self) -> None:
-        if self.state != "stop":
-            self.state, self.t = "stop", 0
-            self._amp0 = self.amp
-
-    def step_tick(self) -> bool:
-        """One tick. Returns True when the gait has stopped (ramp-down done)."""
-        self.t += 1
-        if self.state == "stance":
-            if self.t >= self.stance_ticks:
-                self.state, self.t, self.phase = "run", 0, 0
-            return False
-        self.phase = (self.phase + self.step) & 0xFFFF
-        if self.state == "run":
-            self.amp = min(1.0, self.amp + 1.0 / self.period_ticks)
-            return False
-        self.amp = max(0.0, self._amp0 * (1.0 - self.t / self.period_ticks))
-        return self.t >= self.period_ticks
-
-
 def open_pty() -> tuple[FdTransport, str, int]:
     """Open a pty pair. Returns (transport on the master, slave path, slave fd).
 
@@ -243,12 +198,20 @@ class VirtualBody:
                  config_state: int = P.ConfigState.OK, batt_mv: int = 8100,
                  batt_level: int = 0, reset_cause: int = P.ResetCause.COLD,
                  fw_build: int = FW_BUILD, save_busy_s: float = 0.1,
-                 clock: Callable[[], float] = time.monotonic, boot_delay: float = 0.0, p2: bool = True):
+                 clock: Callable[[], float] = time.monotonic, boot_delay: float = 0.0, p2: bool = True,
+                 model: BodyModel | None = None, lag_ms: float | None = None,
+                 imu_offset: tuple[float, float] = (0.0, 0.0)):
         self.t = transport
-        # p2=False: the P1 body (SET_GAIT / SET_BODY_POSE refused UNKNOWN_TYPE,
+        # p2=False: the P1 body (FEET / SET_BODY_POSE refused UNKNOWN_TYPE,
         # SET_POSTURE STANCE BAD_ARG), for the cross-check against a firmware
-        # without the gait generator.
+        # without GAIT.
         self.p2 = p2
+        # Walking physics: the body model (kilo.planner.model; masses and
+        # lengths), the servo lag (default: the model's) and a constant IMU
+        # mounting error added to the measured attitude in GAIT.
+        self.model = model or BodyModel()
+        self.lag_ms = lag_ms
+        self.imu_offset = imu_offset
         self.goal_types = P0_GOALS | P2_GOALS if p2 else P0_GOALS
         self.codec = codec or default_codec()
         self.msgs = messages or default_messages()
@@ -314,9 +277,13 @@ class VirtualBody:
         self.refused_at: dict[int, float] = {}
         self.save_until: float | None = None
         self.trick = TrickStore()
-        self.gait: Gait | None = None
+        self.feet: FeetPlayer | None = None  # GAIT: the FEET player
+        self.feet_late = 0
+        self.feet_underruns = 0
+        self.feet_refused: list[tuple[int, int]] = []  # (tick, reason) of refused FEET (tests)
+        self.max_tilt = 0.0  # the largest |pitch| or |roll| the walking physics reached (tests)
         self.pose: tuple[int, int, int, int] = (0, 0, 0, 0)  # SET_BODY_POSE pitch, roll (a16), dheight, xshift
-        self.gait_stops = 0  # EVENT GAIT_STOPPED sent (tests)
+        self.gait_stops: list[int] = []  # EVENT GAIT_STOPPED args sent (tests)
         self.booted_at = self.clock()
 
     # ---- derived state --------------------------------------------------------
@@ -332,7 +299,7 @@ class VirtualBody:
             return P.Mode.LINK_LOST
         if self.trick.running:
             return P.Mode.TRICK
-        if self.gait is not None:
+        if self.feet is not None:
             return P.Mode.GAIT
         return P.Mode.LIMP if self.posture == "LIMP" else P.Mode.IDLE
 
@@ -348,11 +315,11 @@ class VirtualBody:
 
     @property
     def balance_active(self) -> bool:
-        """TELEMETRY flags bit 0, as the body gates it (§3c): requested, SIT or STAND, no reflex."""
-        return ((self.balance_req or bool(self.balance["enable"])) and self.posture in BALANCE_POSTURES
-                and not self.reflex)
+        """TELEMETRY flags bit 0, as the body gates it (§3c): requested, SIT, STAND or GAIT, no reflex."""
+        return ((self.balance_req or bool(self.balance["enable"]))
+                and (self.posture in BALANCE_POSTURES or self.feet is not None) and not self.reflex)
 
-    def _epoch_bump(self, trick_reason: int = TDR.PREEMPTED, gait_ramp: bool = False) -> None:
+    def _epoch_bump(self, trick_reason: int = TDR.PREEMPTED) -> None:
         self.epoch = (self.epoch + 1) & 0xFF
         self.goals.clear()
         self.balance_req = False  # the posture flag is a motion goal
@@ -362,33 +329,17 @@ class VirtualBody:
         self.head_until = None    # the head hold too
         self.pose = (0, 0, 0, 0)  # and the body pose
         self._trick_end(trick_reason)  # TRICK_DONE carries the new epoch
-        # The body's bump stops the gait through its ramp (body_epoch_bump ->
-        # gait_stop); a reflex taking the legs on the same tick (fall, low
-        # battery) cuts it short. Only the watchdog leaves the legs to the gait.
-        if gait_ramp:
-            self._gait_stop("epoch bump")
-        else:
-            self._gait_end("stopped (epoch bump)")
+        self._gait_end(0, "stopped (epoch bump)")  # GAIT_STOPPED too; the legs stay in STANCE
 
-    def _gait_stop(self, why: str = "run=0") -> None:
-        """Stop through the ramp-down if the gait runs; at once if it has not
-        started (still moving to STANCE), like the body's gait_stop()."""
-        g = self.gait
-        if g is None:
+    def _gait_end(self, arg: int, why: str) -> None:
+        """GAIT is over: EVENT GAIT_STOPPED(arg) once (with the current epoch)."""
+        if self.feet is None:
             return
-        g.restart = None
-        if g.state == "stance":
-            self._gait_end(f"stopped before starting ({why})")
-        else:
-            g.start_stop()
-
-    def _gait_end(self, why: str = "stopped") -> None:
-        """The gait is over: EVENT GAIT_STOPPED once (with the current epoch)."""
-        if self.gait is None:
-            return
-        self.gait = None
-        self.gait_stops += 1
-        self._event(EV.GAIT_STOPPED, 0)
+        self.feet = None
+        if self.posture not in ("LIMP", "REST"):
+            self.posture = "STANCE"
+        self.gait_stops.append(arg)
+        self._event(EV.GAIT_STOPPED, arg)
         self._say(f"gait {why}")
 
     def _trick_end(self, reason: int) -> None:
@@ -584,11 +535,10 @@ class VirtualBody:
             limp_s = REST_MOVE_S + self.params[P.ParamId.WD_LIMP_S]
             if self.wd_stage == 0 and silent >= stop_s:
                 self.wd_stage = 1
-                self._epoch_bump(gait_ramp=True)
+                self._epoch_bump()
                 self._event(EV.WATCHDOG, 0)
                 self._say("watchdog: stop")
-            # Stage 2 also waits for the gait's ramp-down and landing.
-            if self.wd_stage == 1 and silent >= rest_s and self.gait is None:
+            if self.wd_stage == 1 and silent >= rest_s:
                 self.wd_stage = 2
                 if self.posture != "LIMP":  # already limp stays limp
                     self.posture = "REST"
@@ -601,14 +551,8 @@ class VirtualBody:
         if self.trick.running and self.trick.player.step():
             self.trick.player.running = True  # _trick_end ends a running trick
             self._trick_end(TDR.DONE)
-        g = self.gait
-        if g is not None and g.step_tick():
-            if g.restart is not None:  # a pattern change: start the new one at phase 0
-                self.gait = Gait(g.restart)
-                self._say(f"gait {P.GaitPattern(self.gait.pattern).name.lower()}")
-            else:
-                self.posture = "STANCE"  # the hand-over to IDLE STANCE
-                self._gait_end()
+        if self.feet is not None and not self.reflex:
+            self._walk_tick()
         if self.joints_div and self.tick % self.joints_div == 0:
             self._send_joints()
         if self.tick % 500 == 0:
@@ -625,12 +569,24 @@ class VirtualBody:
         if self.balance_active:
             flags |= F.BALANCE_ACTIVE
             pitch, roll = pitch * 0.25, roll * 0.25  # the body holds itself level
-        g = self.gait
-        if g is not None or self.posture == "STANCE":
+        g = self.feet
+        rate_p, rate_r = 1.4 * math.cos(t * 0.7), 1.6 * math.cos(t * 1.1)
+        ref = corr = (0.0, 0.0)
+        queued, support = 0, 0
+        if g is not None:  # walking: the physics' attitude
+            ph = g.physics
+            pitch, roll = ph.pitch + self.imu_offset[0], ph.roll + self.imu_offset[1]
+            rate_p, rate_r = ph.rates
+            ref = g.ref if self.balance_active else (0.0, 0.0)  # 0 while the balance is off
+            corr = (g.corr[0], g.corr[1])
+            queued, support = g.queued(self.tick), g.support
+            if g.support != 0xF and self.balance_active:
+                flags |= F.BALANCE_HELD  # held while a foot is up
+        elif self.posture == "STANCE":
             pitch += self.pose[0] / 16.0  # the body pose tilts the body (IK, §3d pose terms)
             roll += self.pose[1] / 16.0
-        if g is not None and g.state != "stance":
-            pitch += 0.8 * g.amp * math.sin(4 * math.pi * g.phase / 65536)  # the twice-per-cycle body bob
+        if g is None and self.posture in ("SIT", "STAND", "STANCE") and not self.reflex and not self.trick.running:
+            support = 0xF  # IDLE standing or sitting: all four
         if self.fall_until is not None:
             roll = 85.0 * self.fall_side
         if self.posture != "LIMP" or g is not None:
@@ -646,8 +602,6 @@ class VirtualBody:
         if g is not None and not self.reflex:
             flags |= F.GAIT
             leg = int(P.Owner.GAIT)
-            if g.flags & (P.GaitFlags.BOB | P.GaitFlags.WAG):
-                head = int(P.Owner.GAIT)  # bob and wag drive the head tilt and the tail
         if self.trick.running:
             flags |= F.TRICK
             leg = int(P.Owner.TRICK) if self.trick.claims(8) else leg
@@ -656,33 +610,28 @@ class VirtualBody:
             flags |= F.HEAD_HELD
             if head in (P.Owner.IDLE, P.Owner.GAIT) and self.head[0] != -32768:
                 head = int(P.Owner.PI_HOLD)
-        self._send("TELEMETRY", tick=self.tick, pitch=int(pitch * 16), roll=int(roll * 16),
-                   rate_pitch=int(1.4 * math.cos(t * 0.7) * 16), rate_roll=int(1.6 * math.cos(t * 1.1) * 16),
+        self._send("TELEMETRY", tick=self.tick, pitch=_a16(pitch), roll=_a16(roll),
+                   rate_pitch=_a16(rate_p), rate_roll=_a16(rate_r),
                    rate_yaw=0, dist_mm=600 + int(100 * math.sin(t * 0.3)), batt_mv=self.batt_mv,
                    mode=int(self.mode), owners=leg | head << 4, flags=int(flags),
                    last_rx_seq=self.last_rx_seq,
                    trick_frame=self.trick.player.frame if self.trick.running else 0xFF,
-                   gait_phase=0 if g is None else g.phase >> 8, tick_load=31,
+                   ref_pitch=_a16(ref[0]), ref_roll=_a16(ref[1]), corr_pitch=_a16(corr[0]),
+                   corr_roll=_a16(corr[1]), feet_queued=queued, support=support, tick_load=31,
                    rx_err=(self.rx_crc_err + self.rx_overflow) & 0xFF, epoch=self.epoch)
 
     def joint_angles(self) -> list[float | None]:
         """The fake output angles in degrees (canonical order; None = limp)."""
-        g = self.gait
+        g = self.feet
         if self.posture == "LIMP" and g is None and not self.trick.running:
             return [None] * P.JOINT_COUNT
         a = [float(v) for v in FAKE_ANGLES.get(self.posture, FAKE_STAND)]
-        if g is not None and g.state != "stance":
-            p = g.phase / 65536.0
-            stride = g.amp * g.msg.stride_mm
-            for leg, off in enumerate(LEG_OFFSETS.get(P.GaitPattern(g.pattern), LEG_OFFSETS[P.GaitPattern.TROT])):
-                s = math.sin(2 * math.pi * (p + off))
-                turn = g.amp * g.msg.turn_mm * (-1 if leg in (0, 3) else 1)  # S_left = S - turn
-                a[3 + leg] += 0.5 * (stride + turn) * s
-                a[7 + leg] += g.amp * g.msg.step_h_mm * max(0.0, -s)
-            if g.flags & P.GaitFlags.BOB:
-                a[1] += BOB_DEG * g.amp * math.sin(4 * math.pi * p)
-            if g.flags & P.GaitFlags.WAG:
-                a[2] += WAG_DEG * g.amp * math.sin(2 * math.pi * p)
+        if g is not None:  # the IK angles of the played feet (core/ik.h: before the per-joint dir)
+            for leg in range(4):
+                t1, t2 = self.model.ik(leg, g.x[leg], g.z[leg])
+                sigma = 1.0 if leg < 2 else -1.0
+                a[3 + leg] = -math.degrees(t1)
+                a[7 + leg] = -(math.degrees(t2) - sigma * 90.0)
         if self.head_until is not None:
             for i, v in enumerate(self.head):
                 if v != -32768:
@@ -756,6 +705,8 @@ class VirtualBody:
             return self._ack(item.seq, item.type, P.AckStatus.BAD_LEN)
         if cls.KIND is P.Kind.GOAL:
             self._goal(name, item.type, msg, item.payload, now)
+        elif cls.KIND is P.Kind.STREAM:
+            self._feet_msg(msg, now)
         elif cls.IS_QUERY:
             self._query(name, item, msg)
         else:
@@ -773,8 +724,6 @@ class VirtualBody:
             return
         if type == P.MsgId.SET_HEAD:
             return self._head_goal(msg, now)
-        if type == P.MsgId.SET_GAIT:
-            return self._gait_goal(msg, payload, now)
         if type == P.MsgId.SET_BODY_POSE:
             return self._pose_goal(msg, payload, now)
         if type == P.MsgId.SET_BALANCE:
@@ -806,8 +755,10 @@ class VirtualBody:
         self.balance_req = bool(msg.flags & P.PostureFlags.BALANCE)
         if msg.posture == P.Posture.LIMP:
             self._trick_end(TDR.STOPPED)  # LIMP is the emergency stop
-            self._gait_end("stopped (LIMP)")
         new = POSTURE_NAMES[msg.posture]
+        if self.feet is not None:  # a posture takes the legs from the stream
+            self.posture = new
+            self._gait_end(0, f"stopped (posture {new})")
         if new != self.posture:
             self._say(f"posture {new}")
         self.posture = new
@@ -835,54 +786,59 @@ class VirtualBody:
         self.head_until = now + HEAD_HOLD_S
         return None
 
-    def _gait_goal(self, msg: Any, payload: bytes, now: float) -> None:
-        """SET_GAIT (§3d): checks, then start / update / stop the gait."""
+    def _feet_msg(self, msg: Any, now: float) -> None:
+        """FEET (stream, never acked): gated like a motion goal, then queued;
+        the first one accepted enters GAIT."""
         R = P.GoalRefusedReason
-        t = P.MsgId.SET_GAIT
-        if (msg.pattern >= len(P.GaitPattern) or msg.flags & ~GAIT_FLAGS
-                or any(not lo <= getattr(msg, k) <= hi for k, (lo, hi) in GAIT_RANGES.items())):
-            return self._refuse(t, R.BAD_ARG, now)
-        g = self.gait
-        if not msg.run:  # a stop is never stale
-            self.goals["SET_GAIT"] = payload
-            if g is None:
-                return None
-            if g.state == "stance":
-                return self._gait_end("cancelled before the first step")
-            g.restart = None
-            if g.state != "stop":
-                g.start_stop()
-                self._say("gait stopping")
-            return None
-        if msg.epoch != self.epoch:
-            return self._refuse(t, R.STALE, now)
-        if self.fallen:
-            return self._refuse(t, R.FALLEN, now)
-        if self.batt_level >= P.BatteryLevel.LOW:
-            return self._refuse(t, R.LOW_BATT, now)
-        if self.config_state == P.ConfigState.DEFAULTED:
-            return self._refuse(t, R.UNCALIBRATED, now)
-        self.goals["SET_GAIT"] = payload
-        name = P.GaitPattern(msg.pattern).name.lower()
+        t = P.MsgId.FEET
+        reason = None
+        if not self.p2:
+            reason = R.UNKNOWN_TYPE
+        elif (any(not -60 <= v <= 60 for v in msg.x_mm) or any(not 30 <= v <= 95 for v in msg.z_mm)
+              or msg.support > 0xF):
+            reason = R.BAD_ARG
+        elif msg.epoch != self.epoch:
+            reason = R.STALE
+        elif self.fallen:
+            reason = R.FALLEN
+        elif self.batt_level >= P.BatteryLevel.LOW:
+            reason = R.LOW_BATT
+        elif self.config_state == P.ConfigState.DEFAULTED:
+            reason = R.UNCALIBRATED
+        if reason is not None:
+            self.feet_refused.append((msg.tick, int(reason)))
+            return self._refuse(t, reason, now)
+        g = self.feet
         if g is None:
-            ticks = 0
-            if self.posture != "STANCE":
-                ticks = self.params[P.ParamId.POSTURE_TICKS]
+            g = FeetPlayer(self.tick, self.model, lag_ms=self.lag_ms)
+        if not g.offer(msg, self.tick):
+            self.feet_late += 1
+            return None
+        if self.feet is None:  # GAIT (a playing trick keeps the legs it moves)
+            self.feet = g
+            if self.posture not in ("LIMP", "REST"):
                 self.posture = "STANCE"
-            self.gait = Gait(msg, ticks)
-            self._say(f"gait {name} stride {msg.stride_mm} turn {msg.turn_mm}"
-                      + (" (to STANCE first)" if ticks else ""))
-        elif msg.pattern != g.pattern and g.state != "stance":
-            g.restart = msg  # a pattern change: a stop followed by a start
-            g.start_stop()
-            self._say(f"gait -> {name}")
-        else:
-            g.restart = None
-            if g.state == "stop":
-                g.state = "run"
-                self._say("gait resumed")
-            g.update(msg)
+            self._say(f"gait: FEET from tick {msg.tick}")
         return None
+
+    def _walk_tick(self) -> None:
+        """GAIT: play this tick's FEET on the physics."""
+        g = self.feet
+        ph = g.physics
+        on = bool(self.balance_req or self.balance["enable"])
+        what, arg = g.tick(self.tick, (ph.pitch + self.imu_offset[0], ph.roll + self.imu_offset[1]), ph.rates,
+                           self.balance, on)
+        ph.step()
+        self.max_tilt = max(self.max_tilt, ph.max_tilt)
+        if what == "underrun":
+            self.feet_underruns += 1
+            self._event(EV.FEET_UNDERRUN, arg)
+            self._say(f"FEET underrun ({arg} ticks since the last)")
+        elif what == "settled":
+            self._gait_end(1, "settled after an underrun")
+            return
+        if ph.fallen:
+            self.trigger_fall(1 if ph.roll >= 0 else -1)
 
     def _pose_goal(self, msg: Any, payload: bytes, now: float) -> None:
         R = P.GoalRefusedReason
@@ -917,7 +873,8 @@ class VirtualBody:
         elif t == M.STATS_REQ:
             self._send("STATS", uptime_s=int(self.clock() - self.booted_at), overruns=0,
                        max_tick_us=3100, stack_free_min=420, rx_crc_err=self.rx_crc_err,
-                       rx_overflow=self.rx_overflow, i2c_err=0, imu_stale=0, dmp_rate_hz=100)
+                       rx_overflow=self.rx_overflow, i2c_err=0, imu_stale=0, dmp_rate_hz=100,
+                       feet_late=self.feet_late & 0xFFFF, feet_underruns=self.feet_underruns & 0xFFFF)
         elif t == M.PCA_READ:
             off = P.PCA_FULL_OFF_BIT
             self._send("PCA_COUNTS", counts=[off if self.posture == "LIMP" else 1500] * P.CHANNEL_COUNT)

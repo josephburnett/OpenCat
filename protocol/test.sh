@@ -63,7 +63,7 @@ if [ -n "$AVR_BIN" ] && [ -x "$AVR_BIN/avr-gcc" ]; then
     # The body sketch is C++: the headers must also build with avr-g++ (gnu++11).
     printf '%s\n' '#include "kilo_frame.h"' '#include "cobs.h"' '#include "crc16.h"' \
         'int kilo_probe(uint8_t t, const uint8_t *p, uint8_t l) {' \
-        '    kilo_set_gait_t g; (void)g;' \
+        '    kilo_feet_t g; (void)g;' \
         '    return kilo_payload_len_check(t, p, l) + kilo_msg_kind(t) + kilo_msg_has_epoch(t); }' \
         > "$BUILD/hdr_avr.cpp"
     "$AVR_BIN/avr-g++" -mmcu=atmega328p -Os -std=gnu++11 $WARN -I"$HERE/gen" -I"$HERE/c" \

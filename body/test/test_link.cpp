@@ -117,8 +117,8 @@ static const std::map<std::string, Expect> EXPECT = {
     {"stats_req", {REPLY, KILO_MSG_STATS}},
     {"pca_read", {REPLY, KILO_MSG_PCA_COUNTS}},
     {"set_posture_rest_epoch255", {NOTHING, 0}},  // REST is never stale
-    {"set_gait_trot", {REFUSED, KILO_GOAL_REFUSED_REASON_STALE}},  // epoch 3, body at 0
-    {"set_gait_stop", {NOTHING, 0}},                                // stopping is never stale
+    {"feet_walk", {REFUSED, KILO_GOAL_REFUSED_REASON_STALE}},  // epoch 3, body at 0; a stream: never acked
+    {"feet_zero", {NOTHING, 0}},  // tick 0 was the body's last: late, dropped and counted, no reply
     {"set_head_hold", {REFUSED, KILO_GOAL_REFUSED_REASON_STALE}},  // epoch 3, body at 0
     {"set_body_pose", {REFUSED, KILO_GOAL_REFUSED_REASON_STALE}},  // epoch 3, body at 0
     {"set_balance", {NOTHING, 0}},

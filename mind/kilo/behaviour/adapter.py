@@ -2,7 +2,7 @@
 
 BodyClient has postures and balance. ``look``, ``play``, ``beep``, ``walk``
 and ``stop_walk`` call the client's method when it has one (BodyClient has
-all but ``beep`` since P2) and otherwise record the call in ``unsupported``
+all but ``beep``) and otherwise record the call in ``unsupported``
 (``play`` then resolves at once). No behaviour walks yet: the owner decides
 when autonomous walking is allowed.
 
@@ -66,14 +66,14 @@ class BodyAdapter:
             self._self_motion(LOOK_MOVE_S)
         self._maybe("look", pan, tilt)
 
-    def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str = "trot", **gait: Any) -> Any:
-        """BodyClient.walk (P2). NOTE: no behaviour calls this yet, on
-        purpose: the owner decides when Kilo may walk autonomously (explore
-        stays the stand-and-look-around stub until then). Walking is on the
-        floor only, never on a desk."""
+    def walk(self, direction: str = "forward", pattern: str = "trot", speed_mm_s: float | None = None) -> Any:
+        """BodyClient.walk (the planner's stream; blocks ~0.6 s on a start).
+        NOTE: no behaviour calls this yet, on purpose: the owner decides when
+        Kilo may walk autonomously (explore stays the stand-and-look-around
+        stub until then). Walking is on the floor only, never on a desk."""
         if getattr(self.client, "walk", None) is not None:
             self._self_motion(WALK_MOVE_S)
-        return self._maybe("walk", stride_mm=stride_mm, turn_mm=turn_mm, pattern=pattern, **gait)
+        return self._maybe("walk", direction, pattern, speed_mm_s)
 
     def stop_walk(self) -> Any:
         return self._maybe("stop_walk")

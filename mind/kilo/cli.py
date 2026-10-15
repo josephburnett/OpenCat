@@ -338,6 +338,8 @@ def cmd_status(args: argparse.Namespace, client: BodyClient) -> int:
     print(f"attitude    pitch {_fmt(snap['pitch_deg'])}°  roll {_fmt(snap['roll_deg'])}°  "
           f"upright={snap['upright']}")
     print(f"balance     {'ACTIVE' if snap['balance'] else 'off'}")
+    for line in walk_lines(client):
+        print(line)
     print(f"battery     {snap['batt_mv']} mV  ({_fmt(snap['battery_pct'], '{:.0f}')}%)")
     print(f"distance    {_fmt(snap['dist_mm'], '{:.0f}')} mm")
     bs = snap["body_stats"]
@@ -351,6 +353,26 @@ def cmd_status(args: argparse.Namespace, client: BodyClient) -> int:
     ls = snap["stats"]
     print("link stats  " + " ".join(f"{k}={v}" for k, v in ls.items() if v))
     return EXIT_OK
+
+
+def walk_lines(client: Any) -> list[str]:
+    """`kilo status`: the walk of this process or of the daemon (pattern,
+    speed, how the stream went) and the model's error estimates; while the
+    body walks for someone else, the estimate from the telemetry seen here."""
+    from kilo.cli_walk import error_text
+
+    st = client.walk_status()
+    if st:
+        state = "walking" if st["active"] else f"last walk ended: {st['ended']}"
+        return [f"walk        {state}  {st['pattern']} {st['direction']} {st['speed_mm_s']} mm/s  sent "
+                f"{st['sent']}  late {st['skipped']}  underruns {st['underruns']}  margin {st['min_margin_mm']} mm",
+                f"            {error_text(st.get('error'))}"]
+    if client.state.mode == "GAIT" and hasattr(client.state, "history"):
+        from kilo.planner.errors import from_history
+
+        return ["walk        the body walks (another process streams)",
+                f"            {error_text(from_history(list(client.state.history), int(P.Mode.GAIT)))}"]
+    return []
 
 
 def _fresh_telemetry(client: BodyClient, timeout: float = 0.3) -> None:
@@ -389,8 +411,7 @@ def render_monitor(snap: dict[str, Any]) -> str:
         ("mode", f"{snap['mode']}  owners {snap['owners']}  epoch {snap['epoch']}"),
         ("flags", ",".join(snap["flags"]) or "-"),
         ("balance", "ACTIVE" if snap["balance"] else "off"),
-        ("gait", f"phase {snap['gait_phase'] / 256:.2f}" if snap.get("gait_phase") is not None
-                 and (snap["mode"] == "GAIT" or "gait" in snap["flags"]) else "-"),
+        ("walk", _walk_row(snap)),
         ("pitch/roll", f"{_fmt(snap['pitch_deg'])}° {_fmt(snap['roll_deg'])}°  "
                        f"upright={snap['upright']} fallen={snap['fallen']} moving={snap['moving']}"),
         ("rates", " ".join(_fmt(r) for r in rates) + " °/s"),
@@ -407,6 +428,20 @@ def render_monitor(snap: dict[str, Any]) -> str:
                f"decode_err {sum(st['decode_errors'].values())} retries {st['retries']} "
                f"timeouts {st['timeouts']} reconnects {st['reconnects']}")
     return "\n".join(out)
+
+
+def _walk_row(snap: dict[str, Any]) -> str:
+    """The error columns while the body plays the plan (mode GAIT): the
+    reference it balances toward (the plan's predicted attitude), the error
+    (measured - reference) and the correction it applies, pitch/roll."""
+    err = snap.get("err_deg")
+    if err is None:
+        return "-"
+    ref, corr = snap["ref_deg"], snap["corr_deg"]
+    feet = snap.get("support") or 0
+    down = "".join(n for i, n in enumerate(("LF", "RF", "RB", "LB")) if feet >> i & 1) or "-"
+    return (f"ref {ref[0]:+.1f}° {ref[1]:+.1f}°  error {err[0]:+.1f}° {err[1]:+.1f}°  "
+            f"corr {corr[0]:+.1f}° {corr[1]:+.1f}°  down {down}  queued {snap.get('feet_queued')}")
 
 
 def _wall(t: float) -> str:
@@ -468,7 +503,8 @@ def cmd_monitor(args: argparse.Namespace, client: BodyClient) -> int:
     return EXIT_OK
 
 
-MONITOR_JSON_KEYS = ("tick", "mode", "epoch", "pitch_deg", "roll_deg", "balance", "batt_mv", "alive")
+MONITOR_JSON_KEYS = ("tick", "mode", "epoch", "pitch_deg", "roll_deg", "balance", "batt_mv", "alive", "ref_deg",
+                     "err_deg", "corr_deg", "support", "feet_queued")
 
 
 def monitor_record(snap: dict[str, Any]) -> dict[str, Any]:
@@ -794,14 +830,14 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     for line in daemon_link_lines(info):
         print(line)
     print(f"holds       {', '.join(info['held_goals']) or '-'}  idle {info['idle'] or '-'}")
-    g = info.get("gait")
-    if g:
-        phase = "-" if g.get("phase") is None else f"{g['phase']:.2f}"
-        if "pattern" in g:
-            print(f"gait        {'walking' if g['run'] else 'stopping'} {g['pattern']}  stride {g['stride_mm']} mm  "
-                  f"turn {g['turn_mm']} mm  phase {phase}  mode {g['mode']}")
-        else:
-            print(f"gait        body walking (no gait goal here)  phase {phase}  mode {g['mode']}")
+    w = info.get("walk")
+    if w:
+        from kilo.cli_walk import error_text
+
+        print(f"walk        {'walking' if w['active'] else 'last walk ended: ' + str(w['ended'])}  {w['pattern']} "
+              f"{w['direction']} {w['speed_mm_s']} mm/s  sent {w['sent']}  late {w['skipped']}  "
+              f"underruns {w['underruns']}")
+        print(f"            {error_text(w.get('error'))}")
     print(f"behaviour   {info['behaviour']}")
     if "remote" in info:
         print(f"remote      {info['remote']}")

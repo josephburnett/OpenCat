@@ -40,7 +40,7 @@ further byte is written (a write in progress finishes first and is the
 Goals and the epoch rule (§3c, §4, §5):
 
 - ``set_goal(name, **fields)`` latches a goal. Epoch-bearing goals (SET_POSTURE,
-  SET_GAIT, SET_HEAD, SET_BODY_POSE) are stamped with the epoch current when
+  SET_HEAD, SET_BODY_POSE) are stamped with the epoch current when
   the mind set them, not re-stamped later, so a goal can never outlive an
   epoch bump it did not see.
 - On any epoch change seen in TELEMETRY, EVENT (every EVENT carries the
@@ -50,8 +50,8 @@ Goals and the epoch rule (§3c, §4, §5):
 - EVENT GOAL_REFUSED with reason STALE drops the refused goal and logs it.
 - Contact (a body that may just have rebooted): after every (re)connect, and
   after the body was lost (no TELEMETRY for 300 ms), no motion goal
-  (SET_POSTURE other than REST/LIMP, a SET_BALANCE enable, SET_GAIT other
-  than a stop, the other epoch goals) is sent or refreshed, and TRICK_PLAY is refused, until the body has
+  (SET_POSTURE other than REST/LIMP, a SET_BALANCE enable, the other epoch
+  goals) is sent or refreshed, and TRICK_PLAY and the FEET stream are refused, until the body has
   been heard on this connection: a HELLO that proves a reboot (motion goals
   are cleared first, under the same lock the writer packs goals under), or a
   TELEMETRY (its tick is checked for a restart first). After a reconnect or a
@@ -62,6 +62,13 @@ Goals and the epoch rule (§3c, §4, §5):
   latched and go out once contact is back. (A body that reboots without the
   mind noticing within 300 ms still sees the refreshes sent meanwhile; it
   boots at a new epoch, so they are STALE: docs §3c "Boot epoch".)
+
+Streams (FEET, the walking plan; kilo.planner.walker): ``send_stream()``
+writes the frame at once on the caller's thread, under the same transmit
+lock as the writer: no queue, no ack, no refresh, no retry, and not part of
+the goals and their epoch machinery (the frame carries the epoch its
+streamer stamped; a stale one is the body's to refuse). It is dropped
+(returns False) while silent, disconnected or out of contact.
 
 Commands: ``request()`` assigns a seq, waits 50 ms for the matching ACK (or
 the data reply, for queries), and retries up to 3 times. Non-query commands
@@ -440,6 +447,15 @@ class SerialLink:
         """Fire-and-forget (queued). For goals prefer ``set_goal``."""
         payload = self.messages.pack(name, **fields)
         self._txq.put((self.messages.type_of(name), None, payload, name))
+
+    def send_stream(self, name: str, payload: bytes) -> bool:
+        """Write one Pi->body stream frame (FEET) now. ``payload`` is packed
+        by the caller (the streamer packs its own, allocation-light). False
+        when it was not written: silent, not connected, the body not heard on
+        this connection yet, or a write error."""
+        if self._silent or not self._contact or name not in consts.STREAMS_OUT:
+            return False
+        return self._send_frame(self.messages.type_of(name), self._next_seq(), payload, name)
 
     def request(self, name: str, fields: dict[str, Any] | None = None, *,
                 reply: Any = _DEFAULT, timeout: float | None = None,
@@ -852,6 +868,7 @@ class SerialLink:
         ev = consts.EVENTS.get(code, str(code))
         with self._lock:
             self.state.events.append((now, msg))
+            self.state.event_count += 1
         if code == consts.EV["IR_KEY"]:
             from kilo import ir
 
@@ -940,14 +957,11 @@ _SAFE_POSTURES = frozenset({consts.POSTURES["rest"], consts.POSTURES["limp"]})
 
 def _is_motion(g: Goal) -> bool:
     """A goal that moves the body: SET_POSTURE but REST/LIMP, a SET_BALANCE
-    enable, SET_GAIT with run=1, any other epoch goal. Held back while out of
-    contact (a gait stop, run=0, is not: stopping is always safe to send)."""
+    enable, any other epoch goal. Held back while out of contact."""
     if g.name == "SET_POSTURE":
         return g.fields.get("posture") not in _SAFE_POSTURES
     if g.name == "SET_BALANCE":
         return bool(g.fields.get("enable"))
-    if g.name == "SET_GAIT":
-        return bool(g.fields.get("run"))
     return g.name in consts.MOTION_GOALS
 
 

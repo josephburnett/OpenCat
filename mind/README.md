@@ -127,7 +127,7 @@ kilo posture balance --for 30   # STAND with the balance flag (docs/architecture
 kilo balance on --kp 0.6 --kd 0.05 --for 30   # SET_BALANCE gains (live, not persisted) + hold STAND; prints pitch/roll each second
 kilo walk --for 5            # trot forward 5 s, then stop (ON THE FLOOR ONLY; see Walking)
 kilo walk left --pattern crawl   # turn left in place until Ctrl-C; `kilo walk stop` stops any walk
-kilo pose --pitch 5 --posture stance --for 10   # body pose over STANCE and the gait
+kilo pose --pitch 5 --posture stance --for 10   # body pose over STANCE
 kilo cal [show] | cal set JOINT DEG | cal save | cal revert
 kilo param list | param get ID | param set ID VALUE [--persist]   # ID = number or name
 kilo pca                     # read back the 16 PCA9685 OFF counts
@@ -167,78 +167,139 @@ rule: Kilo fell off a desk once). `kilo walk` prints that reminder before
 every walk.
 
 ```sh
-kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--speed MM_S] [--stride MM]
-          [--turn MM] [--period MS] [--duty N] [--step-h MM] [--body-h MM] [--no-bob] [--no-wag] [--no-balance]
-          [--no-sway] [--no-catch] [--place]
-          [--for S] [--wait S]
+kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl] [--speed MM_S]
+          [--no-balance] [--for S] [--wait S]
 kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM] [--posture stance] [--for S]
-kilo posture stance          # the IK standing posture the gait starts from and hands over to
+kilo posture stance          # the standing posture a walk starts from and ends in
 ```
 
-`kilo walk` latches SET_GAIT (run=1, refreshed at 5 Hz with its epoch) and
-walks until Ctrl-C, SIGTERM or `--for S`; then it latches the stop (run=0)
-and waits for EVENT GAIT_STOPPED (`--wait`, default one period + 1.5 s): the
-body ramps the stride down over one period and hands over to STANCE.
-`forward` (the default) and `back` use the pattern's stride (`--stride`
-sets the magnitude) and `--turn` (+ = left) bends the path; `left` /
-`right` turn in place (`--turn` magnitude, default 20 mm; `--stride` makes
-it an arc); `march` steps in place.
+**Who does what.** The mind plans every step (`kilo/planner/`): where each
+foot is, which feet are on the ground, and how the body leans, 50 times a
+second. It sends one tick of that plan at a time (a FEET message: four foot
+positions, the attitude the plan predicts, the feet that are down), about
+five ticks (100 ms) before the body needs it. The body plays each tick at
+its time, never faster than its servos may move, and corrects only what the
+plan did not predict (its balance loop compares the attitude it measures
+with the predicted one). The steps used to be generated in the firmware
+(SET_GAIT); the floor tests of 2026-10-14 showed why that stopped working
+(docs/walking-and-balance.md §8, §9).
 
-`--speed MM_S` is the speed knob (docs/walking-and-balance.md §2, §3): each
-pattern keeps a fixed swing time, its default's (1 − duty) × period (trot
-150 ms, walk 500, crawl 297), and the speed sets the stride and the stance
-time: stance = stride / speed, period = swing + stance, duty = stance /
-period (`kilo.body.client.gait_timing`). Slower than the longest stance
-allows (duty 230/256, period 2000 ms) the stride shrinks, down to 8 mm;
-faster than the default stride at the shortest stance allows (duty 0.65 for
-the trot, which keeps four-foot phases; 0.75 for walk and crawl, three feet
-down) the speed is capped. Ranges: trot 6..90 mm/s (default 56), walk
-5..20 (default 20: the walk is at its period and duty limits already, so it
-only gets slower, by a shorter stride), crawl 5..28 (default 15). `--stride`,
-`--period` and `--duty` override the speed's values field by field; the
-default speed gives the defaults below. `left` / `right` / `march` take the
-speed's cadence with their own strides.
+`kilo walk` walks until Ctrl-C, SIGTERM or `--for S`, then stops the
+planned way: each leg takes one more step to under its shoulder, the body
+levels at the standing height, and Kilo stands in STANCE (`--wait`,
+default two cycles + 1.5 s). Directions: `forward` (the default), `back`,
+`left` / `right` (turn in place), `march` (step in place). `--speed` in
+mm/s, `--pattern` trot (the default), walk or crawl. `--no-balance`
+switches the body's balance off for this walk (SET_BALANCE enable 0) and
+puts back what was set before when it ends. Once a second it prints the
+attitude and the error the body reports (measured minus predicted); at the
+end, what the stream did (ticks sent, too late, underruns, the smallest
+margin) and the model's error estimates (below). It exits with status 1
+when the body ends the walk: a fall, a refusal (printed with a hint:
+UNKNOWN_TYPE means a firmware that does not play FEET), the stream too late
+(an underrun the body settled from), a reboot. `kilo walk stop` stops
+whoever walks: the daemon's walk (also the remote's), or, without a daemon,
+another `kilo` process's walk (the STANCE posture ends it on the body).
 
-Fields left out take the docs/architecture.md §3d defaults of the pattern (walk 2000 ms / duty 192 /
-30 mm / step 15 mm, trot 600 / 192 / 25 / 8, crawl 2000 / 218 / 25 / 18);
-the body height defaults to 0.8 (crawl 0.7) × (LEG_L1_MM + LEG_L2_MM), read
-from the body's params (Kilo's measured legs are the defaults: 45 + 50 mm,
-so 76 mm; heights are shoulder axle to the centres of the 6 mm-radius foot
-discs, 6 mm less than above the floor). Head bob, tail wag and balance are on unless
-`--no-...`; so is sway (the body leans away from the lifting leg, toward the
-three feet that stay down) for walk and crawl (the trot has none), and
-catch for every pattern (early touchdown: a swinging leg lands at once when
-the body tips toward it faster than 90°/s; `--no-catch`) and place
-for every pattern (forward placement: a lifting leg lands up to 3 mm ahead
-or behind, 7 mm per rad/s of pitch rate; off by default, `--place` turns it on). Out-of-range values are refused before anything is sent (the
-ranges are the spec's). The body moves to STANCE first from any other
-posture; a walk replaces the posture goal (like a trick). The command exits
-with status 1 if the body refuses SET_GAIT (printed with a hint: UNKNOWN_TYPE
-means a firmware without the gait generator) or an epoch bump (fall,
-watchdog, low battery) clears the goal. `kilo walk stop` stops whoever walks
-(through the daemon also the IR remote's walk) and waits for GAIT_STOPPED.
+A body on protocol 1 (the SET_GAIT firmware) is refused at the start of
+every command: `the body speaks protocol 1, this mind needs 2 ...: flash
+the body with this checkout's firmware (kilo flash)`.
+
+**The patterns.** A pattern is the order in which legs lift. Each lift gets
+a slot: first a *shift* (all four feet down while the body moves over the
+feet that will stay down), then the *swing* (the leg or pair in the air).
+So one cycle is `slots x (shift + swing)` and each foot is on the ground
+for the cycle less its swing. These tables live here now (they left
+protocol/spec.toml with SET_GAIT; the code is `kilo/planner/patterns.py`):
+
+| pattern | lifts (in order) | swing | stride | step height | body height | cycle at the default speed | default speed | speed range |
+|---|---|---|---|---|---|---|---|---|
+| trot | LF+RB, RF+LB (diagonal pairs) | 150 ms | 25 mm | 8 mm | 205/256 of (L1 + L2) = 76 mm | 600 ms (shift 150) | 56 mm/s | 6..93 mm/s |
+| walk | LB, LF, RB, RF (one leg at a time) | 500 ms | 30 mm | 15 mm | 205/256 = 76 mm | 3200 ms (shift 300) | 11 mm/s | 2..12 mm/s |
+| crawl | LB, LF, RB, RF | 297 ms | 25 mm | 18 mm | 179/256 = 66 mm | 2800 ms (shift 403) | 10 mm/s | 2..13 mm/s |
+
+(Legs: LF left front, RF right front, RB right back, LB left back. L1 + L2
+= 45 + 50 mm, Kilo's measured legs; heights are from the shoulder axle to
+the centre of the foot disc, the floor is 6 mm lower.)
+
+**Speed** (docs/walking-and-balance.md §2, §3): the swing time is fixed per
+pattern (short enough that the body does not tip far while a leg is up,
+long enough for the servos' 10° per tick at the pattern's stride and step);
+the speed sets the stride and the time a foot is on the ground: ground time
+= stride / speed, and the shift takes up the rest of the slot. Slower than
+the longest ground time allows (trot 1327 ms, walk and crawl 4000 ms) the
+stride shrinks, down to 8 mm; faster than the default stride at the
+shortest shift allows, the speed is capped. The shortest shift: the trot's
+60 ms (three ticks on four feet, so the body's balance can correct at all);
+the walk's and crawl's 250 ms (the servo lag, 150 ms, plus a 100 ms move of
+the body). The speed can change at any tick while walking (the stride moves
+at most 0.5 mm per tick toward the new one, so nothing jumps); a direction
+change does the same; a pattern change waits for the next four-foot phase.
+A turn in place uses 20 mm per side at the default stride (less at a lower
+speed).
+
+**The lean** (walk and crawl). On three feet the body stands on a triangle
+whose long edge runs right under its middle, so a leg that lifts leaves
+the centre of mass on that edge: the body tips toward the lifted leg (the
+floor run without the balance rocked 15° per step). So before every lift
+the planner moves the body over the three feet that stay down, at least
+10 mm inside their triangle for the whole swing, using the smallest move
+of three kinds: shifting the body forward or back over its feet (the one
+direction the two-servo legs move in), rolling it (one side's legs longer
+than the other's) and, a little, pitching it. The move is finished one
+servo lag (150 ms) before the foot lifts and held until it is down again;
+a side the body drops is lowered no faster than gravity can follow. The
+trot does not lean: on a diagonal pair there is no triangle to lean into,
+so its two-foot phase stays short (150 ms).
+
+**From what the body reports.** Every tick the planner gets the body's
+error (measured minus predicted attitude, less the steady offset). A leg
+does not lift while the body is more than 5° off the plan (the shift is
+held, up to 0.5 s); a swinging leg comes down at once where it is when the
+body tips toward it by more than 7°.
+
+**The model's error.** While Kilo walks the body reports, every tick, the
+attitude it measured, the reference (the plan's prediction) and the
+correction it applied (TELEMETRY at 50 Hz during a walk). From the last 4 s
+the mind estimates (`kilo/planner/errors.py`): the **steady offset** (mean
+of measured minus predicted: a mass or the IMU placed differently from the
+model), the **servo lag** beyond the model's 150 ms (the shift that best
+lines the predicted roll up with the measured one; it drifts with the
+battery), and the **largest error** (a bump, a slipped foot). They are
+printed by `kilo walk`, `kilo status` and `kilo daemon`, and `kilo log
+summary` gives them for a recorded walk. Nothing in the model is adjusted
+from them yet.
+
+**The body model** (`kilo/planner/model.py`, one place for every mass and
+length): the lengths are measured; the masses are estimates until the
+owner weighs Kilo per foot (with and without the battery) and runs a servo
+step test: body 700 g (frame, NyBoard, shoulder, head and tail servos; its
+centre 5 mm ahead of the middle, the head), battery 150 g under the belly,
+upper leg 20 g (the knee servo), lower leg 8 g, the Pi not carried (0 g):
+962 g in all; servo lag 150 ms (never measured).
+
+**Monitoring.** `kilo monitor` has a `walk` row while the body plays the
+plan: the reference, the error and the correction (pitch then roll), the
+feet down and the ticks queued; `kilo monitor --json` carries `ref_deg`,
+`err_deg`, `corr_deg`, `support`, `feet_queued`. The frame log has every
+FEET sent and every TELEMETRY (with the reference and the correction), plus
+a `plan` record per tick (feet, prediction, margin). `kilo log summary`
+shows the time walking, GAIT_STOPPED (and how many after an underrun),
+FEET_UNDERRUN, FEET refusals and the model's error.
 
 `kilo pose` latches SET_BODY_POSE (pitch + = nose down, roll + = right side
-up, height delta, forward shift) on top of STANCE and the gait until Ctrl-C
-or `--for`, then latches the neutral pose; `kilo pose release` does that at
-once. Other postures ignore the pose: `--posture stance` takes STANCE first.
+up, height delta, forward shift) on top of STANCE until Ctrl-C or `--for`,
+then latches the neutral pose; `kilo pose release` does that at once. Other
+postures ignore the pose: `--posture stance` takes STANCE first.
 
-`kilo monitor` shows the gait phase while walking, `kilo daemon` the gait
-(pattern, stride, turn, phase, mode), the passive timeline the phase in its
-once-a-second line, and `kilo log summary` the time walking, the gait cycles,
-GAIT_STOPPED and SET_GAIT refusals.
-
-In Python: `BodyClient.walk(stride_mm=None, turn_mm=0, pattern="trot",
-period_ms=None, duty=None, step_h_mm=None, body_h_mm=None, bob=True,
-wag=True, balance=True, sway=None, catch=True, place=True)` (sway None: on for walk and crawl; returns the wire
-fields; `gait_timing(pattern, speed_mm_s)` gives period, duty and stride for a speed,
-`walk_args(direction, pattern, speed_mm_s=...)` the walk() arguments), `stop_walk(wait_s=None)`
-(returns the GAIT_STOPPED count for `wait_gait_stopped(n, timeout)` or, with
-`wait_s`, whether it stopped), `await walk_until_stopped(n, timeout)`,
-`gait_state()`, `load_geometry()`, `pose(...)`, `release_pose()`. SET_GAIT
-run=1 and SET_BODY_POSE are motion goals: stamped with the epoch, cleared on
-any epoch change, not sent before contact; a stop (run=0) is never held
-back, and GAIT_STOPPED clears it. No behaviour walks yet
+In Python: `BodyClient.walk(direction="forward", pattern="trot",
+speed_mm_s=None, balance=True)` starts a walk (blocking about 0.6 s for the
+STANCE posture) or changes the one in progress, `stop_walk(wait_s=None)`
+(the planned stop; with `wait_s`, whether the walk ended in time),
+`walk_status()` (pattern, direction, speed, what the stream did, the error
+estimates; how the last walk ended), `client.walker` (the
+`kilo.planner.walker.Walker`: `abort()` ends the stream without the planned
+stop), `pose(...)`, `release_pose()`. No behaviour walks yet
 (`BodyAdapter.walk` exists): the owner decides when autonomous walking is
 allowed.
 
@@ -394,18 +455,18 @@ keys through the daemon's own BodyClient:
 | 9 | 0x52 | last skill | faster (one speed step up) |
 
 **The direction keys make Kilo walk: use the remote with Kilo on the floor
-only, never on a desk.** A direction key walks (SET_GAIT) with the selected
-pattern and keeps walking until another key, like the legacy firmware; a
-pattern key while walking re-sends the walk with the new pattern (the body
-stops and restarts), otherwise it only selects. EQ / 9 step the speed down /
-up through 0.5, 0.7, 1, 1.4 and 2 × the pattern's default speed (start: 1,
-the defaults; the step is kept across patterns and walks, and stops at the
-ends), as `kilo walk --speed` does it: a fixed swing, the stride and stance
-from the speed, clamped (the trot's 2× is its 90 mm/s cap, the walk does
-not go faster than its default); while walking the walk is re-sent at once. A posture or trick key
-stops the gait first (the stop is latched; the trick takes the legs at
-once, a posture is what the body takes after the stop's hand-over to
-STANCE); `-` (limp) stops everything at once.
+only, never on a desk.** A direction key (B7 forward, B5 back, A6 / C6
+turn left / right, A4 march) walks with the selected pattern (A3 trot, C4
+walk, B4 crawl) and keeps walking until another key, like the legacy
+firmware; a pattern key while walking changes the walk (at its next
+four-foot phase), otherwise it only selects. C5 / C1 (EQ / 9) step the
+speed down / up through 0.5, 0.7, 1, 1.4 and 2 × the pattern's default
+speed (start: 1; the step is kept across patterns and walks, and stops at
+the ends), clamped like `kilo walk --speed` (the trot's 2× is its 93 mm/s
+cap, the walk's is 12 mm/s); while walking the speed changes at once. A
+posture or trick key first stops the walk the planned way and waits for it
+(each leg steps home, STANCE), then takes the posture or the trick; A5
+(`-`, limp) does that too, then goes limp.
 Repeats (a held key) are ignored. A trick key uploads the trick if the body
 does not hold it (cached, as `kilo trick play`), stops a playing trick
 first, and takes STAND first from LIMP; a posture key also stops a playing
@@ -421,8 +482,8 @@ SET_BALANCE on with the given Kp (default 0.5, the firmware's; 0.99 levels
 the whole slope and passed H13 on Kilo) at start, again after a port release
 for flashing, and whenever a client's balance hold ends (instead of switching
 balance off). Nobody owns it, like the idle latch: Kilo wakes up balancing
-whenever it stands or sits, and walks with the gait's balance flag using the
-same gains. The body switches balance off on every epoch bump (a fall, the
+whenever it stands or sits, and walks with the same gains (correcting what
+the plan did not predict). The body switches balance off on every epoch bump (a fall, the
 watchdog, LOW battery, a reboot; P1 finding B1) and the link's 5 Hz refresh
 switches it back on within about 200 ms. The remote's CH+ toggles it off and on again with that
 Kp; a client's `kilo balance off` holds it off until the client goes away.
@@ -606,17 +667,24 @@ It implements the P0 body's message-level contract (the same dispatch rules as
 the C link layer: ACKs and de-dup, query replies, GOAL_REFUSED reasons,
 calibration/params/EEPROM with EEPROM_BUSY, REBOOT, the two-stage watchdog
 driven by the WD_* params) plus 25 Hz telemetry with a swaying pitch/roll and
-simulated falls, the P1 tricks, balance and head hold, and (P2) the gait's
-state machine: SET_GAIT with the body's refusals (BAD_ARG from the spec
-ranges; a stop is never stale; STALE, FALLEN, LOW_BATT, UNCALIBRATED), STANCE
-first, mode/flag/owner GAIT, `gait_phase` advancing 65536·20/period_ms per
-tick, a one-period ramp-down to STANCE with one EVENT GAIT_STOPPED, an epoch
-bump or LIMP ending it at once, a trick taking the legs while the gait
-continues underneath, SET_BODY_POSE tilting the reported attitude, and a
-JOINTS stream of fake angles that swing with the phase. The full contract is
-the docstring of `kilo/vbody/sim.py`; `VirtualBody(p2=False)` plays the P1
-body (SET_GAIT/SET_BODY_POSE UNKNOWN_TYPE, STANCE BAD_ARG), which the
-cross-check uses against a firmware without the gait. `VirtualBody.process(data, now)` drives it synchronously
+simulated falls, the P1 tricks, balance and head hold, and (protocol 2)
+GAIT as the firmware plays the mind's FEET stream (`kilo/vbody/feet.py`:
+the queue, ticks matched to the body's, late and too-early FEET dropped and
+counted, every joint at most 10° per tick toward the target, the hold and
+the settle on an underrun with FEET_UNDERRUN and GAIT_STOPPED 1, a posture
+or an epoch bump ending GAIT with GAIT_STOPPED 0, the balance loop through
+the support feet, TELEMETRY's reference, correction, queue and support
+fields), on walking physics (`kilo/vbody/physics.py`): the masses of the
+body model on four point feet that follow their commands one servo lag late
+(`lag_ms`), standing on the plane of the feet that are down while the
+centre of mass is inside them, and tipping over the nearest edge as an
+inverted pendulum when it is not, until a foot catches it (`imu_offset` adds
+an IMU mounting error). SET_BODY_POSE tilts the reported attitude in
+STANCE; JOINTS gives fake angles (in GAIT the IK of the played feet). The
+full contract is the docstring of `kilo/vbody/sim.py`; `VirtualBody(p2=False)`
+plays a body without GAIT (FEET and SET_BODY_POSE UNKNOWN_TYPE, STANCE
+BAD_ARG), which the
+cross-check uses against a firmware without GAIT. `VirtualBody.process(data, now)` drives it synchronously
 (replies are appended to `sent` and written to the transport, if any); a
 cross-check test compares it frame by frame with the body's C dispatch. It is
 a stand-in for the real firmware core, which `kilo/vbody/core.py` runs as a
@@ -1032,16 +1100,23 @@ buffers what it hears while it boots), a busy port and a failed verify in
 the control threads, a cancelled `play()`, the port lease, split-owner idle
 latching, the LinkStats race, log pruning. `test_daemon_call.py` pins the `call`
 op's allow-list; `test_req_lock.py` measures the link's one request in flight
-(printed with `-s`) and the `request` op's timeout cap. `test_gait.py` covers walking:
-the spec ranges, the §3d defaults, the vbody's gait state machine
-(deterministic: STANCE first, the phase step, the one-period ramp-down,
-GAIT_STOPPED once, every refusal, epoch bumps, LIMP, a trick over the gait,
-the pose, JOINTS), BodyClient against the vbody (goal bytes, epoch stamp,
-refresh, clearing on a fall), the daemon ops and holds, `kilo walk` /
-`kilo pose` end to end (also SIGTERM and a P1 body's refusal) and the
-renderings; `test_ir.py` the remote's walking. The cross-check's gait case
-runs against the firmware's real gait generator (a harness without
-SET_GAIT fails it rather than skipping it). The suite takes about
+(printed with `-s`) and the `request` op's timeout cap. Walking:
+`test_planner.py` (the body model's geometry and sign conventions, the
+speed mapping, the planned steps: margins, slew, lead, prediction, speed /
+direction / pattern changes, the stop, the gate and the catch; the error
+estimates), `test_walk_sim.py` (the planner's stream on the virtual body's
+physics, tick by tick through `tests/walksim.py`: the planned walk and
+crawl stay on their plan, the same steps without the lean tip over the
+edge every swing and the balance loop makes that worse, the trot stays up,
+changes mid-walk, a 60 ms stall caught up, a long one underrunning and
+settling, the planned stop, the attitude's signs, a slower servo and a
+tilted IMU found by the estimates), `test_feet.py` (the virtual body's FEET
+contract), `test_walker.py` (the body clock, the stream's ends, FEET past
+the goal machinery, BodyClient and the daemon walking the threaded virtual
+body, `kilo walk` end to end, the renderings); `test_ir.py` the remote's
+walking. The cross-check's and test_corebody's FEET cases run against the
+firmware's core (a harness that refuses FEET fails them rather than
+skipping). The suite takes about
 three minutes.
 
 ## Layout
@@ -1055,7 +1130,8 @@ kilo/link/transport.py      pyserial, raw-fd (pty) and loopback transports
 kilo/link/ports.py          port auto-detection
 kilo/link/serial_link.py    SerialLink: reader/writer threads, goals, commands
 kilo/body/state.py          BodyState
-kilo/body/client.py         BodyClient: postures, balance, head, gait, pose, tricks, calibration, params, stats
+kilo/body/client.py         BodyClient: postures, balance, head, walking, pose, tricks, calibration, params, stats
+kilo/planner/               walking: body model, patterns and speed, the step planner, error estimates, the FEET stream
 kilo/log.py                 JSON-lines logger thread
 kilo/perception/            ultrasonic + IMU detectors, Percepts aggregator, SharedPercepts, ring buffer
 kilo/logs/                  log reader (JSONL, .kilolog), summary/replay/plot (kilo log, python -m kilo.logs)
@@ -1069,7 +1145,7 @@ kilo/cli_tools.py           `kilo log`, `--kilolog`, `monitor --percepts`, `kilo
 kilo/daemon/                `kilo run`: owns the port, serves the socket, holds, port release (map in __init__.py)
 kilo/remote.py              socket path resolver, JSON-lines client, RemoteBody (BodyClient over the socket)
 kilo/tools/flash.py         build + flash; kilo/tools/gpio.py GPIO4 reset
-kilo/vbody/                 virtual body
+kilo/vbody/                 virtual body (sim.py; feet.py plays FEET, physics.py walks)
 firmware/                   stored hex images (legacy firmware)
 systemd/                    kilo-system.service (the system unit), kilo.service (fallback user unit), env.example, install.sh, trim-boot.sh
 ```

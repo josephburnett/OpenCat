@@ -91,14 +91,12 @@ class Peer:
     def telemetry(self, tick: int = 1, epoch: int = 0, mode: int = 2, **kw: Any) -> None:
         f = dict(tick=tick, pitch=0, roll=0, rate_pitch=0, rate_roll=0, rate_yaw=0, dist_mm=0,
                  batt_mv=8000, mode=mode, owners=0, flags=1 << 7, last_rx_seq=0, trick_frame=255,
-                 gait_phase=0, tick_load=0, rx_err=0, epoch=epoch)
+                 tick_load=0, rx_err=0, epoch=epoch)
         f.update(kw)
         self.send("TELEMETRY", **f)
 
-    def hello(self, epoch: int = 0, reset_cause: int = 0, proto_major: int = 1,
-              proto_minor: int | None = None) -> None:
-        if proto_minor is None:
-            proto_minor = P.PROTO_MINOR  # the body of today; older minors lose the newer SET_GAIT flag bits
+    def hello(self, epoch: int = 0, reset_cause: int = 0, proto_major: int = P.PROTO_MAJOR,
+              proto_minor: int = P.PROTO_MINOR) -> None:
         self.send("HELLO", proto_major=proto_major, proto_minor=proto_minor, fw_build=0xABCD, reset_cause=reset_cause,
                   last_alive_tick=0, caps=0, max_payload=60, trick_capacity=32, joint_count=11,
                   config_state=0, epoch=epoch)

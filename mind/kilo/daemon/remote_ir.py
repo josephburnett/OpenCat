@@ -2,7 +2,7 @@
 
 The body relays the Petoi remote as EVENT IR_KEY; the daemon maps keys to
 actions on its own BodyClient (``kilo.ir.ACTIONS``: postures, tricks, the
-CH+ balance toggle, walking in a direction and the gait pattern keys;
+CH+ balance toggle, walking in a direction, the gait pattern and speed keys;
 held-key repeats, EQ, 9 and unknown keys are ignored). The key table and
 what each action does are in kilo.ir and mind/README.md "IR remote".
 
@@ -13,7 +13,7 @@ posture, trick or walk set by the remote is held like the idle latch: nobody
 owns it and the idle REST/LIMP timeline is stopped, so it stays until the
 next key or a client goal. Keys are logged and ignored while the behaviour
 runner is active, while the port is released, and while a client holds the
-posture, a trick or the gait (the balance key: while a client holds
+posture, a trick or a walk (the balance key: while a client holds
 SET_BALANCE). ``daemon`` reports ``remote`` (on/off and the last key).
 """
 
@@ -59,7 +59,7 @@ class RemoteIRMixin:
             return
         if action.kind in ("posture", "trick", "walk"):
             # held like the idle latch: no owner, and no idle timeline over it
-            self.goal_owner["SET_GAIT" if action.kind == "walk" else "SET_POSTURE"] = None
+            self.goal_owner["WALK" if action.kind == "walk" else "SET_POSTURE"] = None
             self.idle_since = self.idle_stage = None
         self.remote_last = text
         self.pool.submit(self._remote_perform, action, text)

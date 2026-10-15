@@ -1,7 +1,7 @@
 """The real body core as a virtual body (docs/architecture.md §6 "Virtual body").
 
 ``body/test/core_harness.cpp`` links the firmware's ``core/`` (the exact
-dispatch, reflexes, gait, keyframe player and arbiter that run on Kilo) with
+dispatch, reflexes, FEET player, keyframe player and arbiter that run on Kilo) with
 the host fakes of its hardware seams and drives it from stdin, one command
 per line (see that file). This module runs it as a subprocess and presents it
 to the mind as a transport, so ``SerialLink``/``BodyClient`` talk to the real

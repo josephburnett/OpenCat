@@ -85,14 +85,19 @@ class FakeClient:
         goals = {} if balance is None else {"SET_BALANCE": SimpleNamespace(fields={"enable": balance})}
         self.goals = goals
         self.link = SimpleNamespace(goals=lambda: goals)
+        self.status = None
 
-    def walk(self, **kw):
-        self.calls.append(("walk", kw))
-        self.goals["SET_GAIT"] = SimpleNamespace(fields={"run": 1})
+    def walk(self, direction, pattern, speed_mm_s):
+        self.calls.append(("walk", direction, pattern, round(speed_mm_s, 1)))
+        self.status = {"active": True, "period_ms": 600}
 
-    def stop_walk(self):
+    def stop_walk(self, wait_s=None):
         self.calls.append(("stop_walk",))
-        self.goals["SET_GAIT"] = SimpleNamespace(fields={"run": 0})
+        self.status = {"active": False, "period_ms": 600}
+        return True
+
+    def walk_status(self):
+        return self.status
 
     def posture(self, name):
         self.calls.append(("posture", name))
@@ -133,56 +138,51 @@ def test_remote_trick(mode, expected):
 def test_remote_walking():
     c = FakeClient()
     rc = ir.RemoteControl(c)
-    key = lambda label: rc.perform(ir.action_for(ir.BY_LABEL[label].command))
-    assert key("200+") == "pattern walk" and c.calls == []  # not walking: only stored
-    assert key("CH") == "walk forward (walk)"
-    assert c.calls[-1] == ("walk", {"pattern": "walk", "stride_mm": 30, "turn_mm": 0, "period_ms": 2000,
-                                    "duty": 192})  # the default speed: the spec defaults
-    assert key("1") == "walk forward (trot)"  # walking: re-sent with the new pattern
-    assert c.calls[-1] == ("walk", {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 600,
-                                    "duty": 192})
-    key("+")
-    assert c.calls[-1][1]["stride_mm"] == -25
-    key("|<<")
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 20, "period_ms": 600, "duty": 192}
-    key(">||")
-    assert c.calls[-1][1]["turn_mm"] == -20
-    key("0")
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 0, "turn_mm": 0, "period_ms": 600, "duty": 192}
-    key("100+")
-    assert c.calls[-1][1]["pattern"] == "crawl"
+    key = lambda grid: rc.perform(ir.action_for(ir.BY_GRID[grid].command))
+    assert key("C4") == "pattern walk" and c.calls == []  # not walking: only stored
+    assert key("B7") == "walk forward (walk)"
+    assert c.calls[-1] == ("walk", "forward", "walk", 11.1)  # the pattern's default speed
+    assert key("A3") == "walk forward (trot)"  # walking: changed to the new pattern
+    assert c.calls[-1] == ("walk", "forward", "trot", 55.6)
+    key("B5")
+    assert c.calls[-1][1] == "backward"
+    key("A6")
+    assert c.calls[-1][1] == "left"
+    key("C6")
+    assert c.calls[-1][1] == "right"
+    key("A4")
+    assert c.calls[-1][1] == "march"
+    key("B4")
+    assert c.calls[-1][2] == "crawl"
     n = len(c.calls)
-    assert key("2") == "posture sit"  # a posture key stops the gait first
+    assert key("B3") == "posture sit"  # a posture key stops the walk first (the planned stop, waited for)
     assert c.calls[n:] == [("stop_walk",), ("posture", "sit")]
-    assert key("1") == "pattern trot" and len(c.calls) == n + 2  # stopped: only stored
-    key("CH")
+    assert key("A3") == "pattern trot" and len(c.calls) == n + 2  # stopped: only stored
+    key("B7")
     n = len(c.calls)
-    key("4")  # a trick key stops it too
+    key("A2")  # a trick key stops it too
     assert c.calls[n:] == [("stop_walk",), ("start_trick", "hi")]
 
 
 def test_remote_speed_keys():
     c = FakeClient()
     rc = ir.RemoteControl(c)
-    key = lambda label: rc.perform(ir.action_for(ir.BY_LABEL[label].command))
-    assert key("9") == "speed 1.4x (trot 78 mm/s)" and c.calls == []  # not walking: only stored
-    assert key("CH") == "walk forward (trot)"
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 471, "duty": 175}
-    assert key("9") == "walk forward speed 2x (trot 90 mm/s)"  # walking: re-sent at the new speed
-    assert c.calls[-1][1] == {"pattern": "trot", "stride_mm": 25, "turn_mm": 0, "period_ms": 427, "duty": 166}
-    assert key("9") == "walk forward speed 2x (trot 90 mm/s)"  # the top step
+    key = lambda grid: rc.perform(ir.action_for(ir.BY_GRID[grid].command))
+    assert key("C1") == "speed 1.4x (trot 78 mm/s)" and c.calls == []  # not walking: only stored
+    assert key("B7") == "walk forward (trot)"
+    assert c.calls[-1] == ("walk", "forward", "trot", 77.8)
+    assert key("C1") == "walk forward speed 2x (trot 93 mm/s)"  # walking: changed to the new speed (capped)
+    assert c.calls[-1] == ("walk", "forward", "trot", 111.1)
+    assert key("C1") == "walk forward speed 2x (trot 93 mm/s)"  # the top step
     for _ in range(5):
-        key("EQ")
+        key("C5")
     assert rc.speed_step == 0
-    f = c.calls[-1][1]  # half the default speed: the same 150 ms swing, a longer stance
-    assert (f["stride_mm"], f["period_ms"], f["duty"]) == (25, 1050, 219)
-    assert key("200+") == "walk forward (walk)"  # the walk is at its longest stance: a shorter stride
-    assert c.calls[-1][1] == {"pattern": "walk", "stride_mm": 15, "turn_mm": 0, "period_ms": 2000, "duty": 192}
-    key("0")  # march: stride 0 at the speed's cadence
-    assert c.calls[-1][1] == {"pattern": "walk", "stride_mm": 0, "turn_mm": 0, "period_ms": 2000, "duty": 192}
+    assert c.calls[-1] == ("walk", "forward", "trot", 27.8)
+    assert key("C4") == "walk forward (walk)"
+    assert c.calls[-1] == ("walk", "forward", "walk", 5.6)
     n = len(c.calls)
-    key("2")
-    assert key("EQ") == "speed 0.5x (walk 10 mm/s)" and len(c.calls) == n + 2  # stopped: only stored
+    key("B3")
+    assert key("C5") == "speed 0.5x (walk 6 mm/s)" and len(c.calls) == n + 2  # stopped: only stored
 
 
 @pytest.mark.parametrize("balance,on", [(None, True), (0, True), (1, False)])
@@ -260,37 +260,36 @@ def test_daemon_without_remote_ignores_keys(start_daemon):  # noqa: F811
 
 
 def test_daemon_remote_walks(start_daemon):  # noqa: F811
-    from kilo.protocol import kilo_protocol as P
-
     d, vb, path, sock = start_daemon(remote=True)
     body = remote(sock)
     try:
         body.wait_ready(3)
-        vb.ir_key(0xB0)  # 200+: walk pattern
-        vb.ir_key(0x62)  # CH: forward, from LIMP (the body moves to STANCE first)
-        assert wait_for(lambda: vb.gait is not None and vb.gait.state == "run", 3)
-        assert vb.gait.pattern == P.GaitPattern.WALK and vb.gait.msg.stride_mm == 30
-        time.sleep(1.5)  # past idle_limp_s: no idle timeline over the remote's walk
-        assert vb.gait is not None and vb.wd_stage == 0
+        vb.ir_key(0xB0)  # C4: walk pattern
+        vb.ir_key(0x62)  # B7: forward, from LIMP (the walker takes STANCE first)
+        assert wait_for(lambda: vb.feet is not None, 4)
         info = body.conn.call("daemon")
-        assert info["gait"]["pattern"] == "walk" and info["gait"]["run"] == 1 and info["gait"]["mode"] == "GAIT"
-        vb.ir_key(0x30)  # 1: trot, re-sent while walking (a stop then a start on the body)
-        assert wait_for(lambda: vb.gait is not None and vb.gait.pattern == P.GaitPattern.TROT, 3)
-        assert vb.gait_stops == 0
+        assert wait_for(lambda: (body.conn.call("daemon")["walk"] or {}).get("pattern") == "walk", 2)
+        time.sleep(1.5)  # past idle_limp_s: no idle timeline over the remote's walk
+        assert vb.feet is not None and vb.wd_stage == 0
+        info = body.conn.call("daemon")
+        assert info["walk"]["active"] and info["walk"]["direction"] == "forward" and "WALK" not in info["held_goals"]
+        vb.ir_key(0x30)  # A3: trot, changed while walking (at the next four-foot phase)
+        assert wait_for(lambda: body.conn.call("daemon")["walk"]["pattern"] == "trot", 2)
+        assert vb.gait_stops == []
         vb.ir_key(0x30, repeat=True)  # a held key: nothing
         # a client's walk hold wins: keys are ignored
-        body.walk(stride_mm=20)
-        assert wait_for(lambda: vb.gait.msg.stride_mm == 20, 1)
+        body.walk("march")
+        assert body.conn.call("daemon")["walk"]["direction"] == "march"
         vb.ir_key(0x18)
         body.spin(0.4)
-        assert vb.gait is not None and vb.gait.msg.stride_mm == 20
-        body.release()  # the hold ends: the daemon latches the stop, then idle REST
-        assert wait_for(lambda: vb.gait is None and vb.gait_stops == 1, 3)
-        assert wait_for(lambda: vb.posture == "REST", 2)
-        vb.ir_key(0x22)  # |<<: turn left in place
-        assert wait_for(lambda: vb.gait is not None and vb.gait.msg.turn_mm == 20 and vb.gait.msg.stride_mm == 0, 3)
-        vb.ir_key(0x02)  # >>|: stand stops the gait first
-        assert wait_for(lambda: vb.gait is None and vb.posture == "STAND", 4)
-        assert "SET_GAIT" not in d.link.goals()  # GAIT_STOPPED cleared the stop goal
+        assert vb.feet is not None and body.conn.call("daemon")["walk"]["direction"] == "march"
+        body.release()  # the hold ends: the planned stop, then idle REST
+        assert wait_for(lambda: vb.feet is None and vb.gait_stops == [0], 6)
+        assert wait_for(lambda: vb.posture == "REST", 3)
+        vb.ir_key(0x22)  # A6: turn left in place
+        assert wait_for(lambda: vb.feet is not None, 4)
+        assert body.conn.call("daemon")["walk"]["direction"] == "left"
+        vb.ir_key(0x02)  # B6: stand stops the walk first
+        assert wait_for(lambda: vb.feet is None and vb.posture == "STAND", 6)
     finally:
         body.close()

@@ -51,7 +51,12 @@ class TelemetrySample:
     epoch: int | None = None
     tick_load_ms: float | None = None
     rx_err: int | None = None
-    gait_phase: int | None = None
+    ref_pitch_deg: float | None = None   # the balance reference (in GAIT: the plan's prediction)
+    ref_roll_deg: float | None = None
+    corr_pitch_deg: float | None = None  # the balance correction applied
+    corr_roll_deg: float | None = None
+    feet_queued: int | None = None
+    support: int | None = None
     trick_frame: int | None = None
     balance: bool | None = None
 
@@ -94,6 +99,10 @@ def _flag_names(v: int) -> set[str]:
     return {n for n, m in _FLAG_MASKS.items() if v & m}
 
 
+def _deg(v: Any) -> float | None:
+    return None if v is None else v / A16
+
+
 def sample_from_fields(t: float, f: dict[str, Any] | Any) -> TelemetrySample:
     """Raw TELEMETRY fields (dict or decoded dataclass) -> TelemetrySample."""
     g = f.get if isinstance(f, dict) else (lambda k, d=None: getattr(f, k, d))
@@ -111,7 +120,10 @@ def sample_from_fields(t: float, f: dict[str, Any] | Any) -> TelemetrySample:
         mode=None if g("mode") is None else consts.MODES.get(int(g("mode")), f"?{g('mode')}"),
         flags=names, owners=g("owners"), epoch=g("epoch"),
         tick_load_ms=None if g("tick_load") is None else g("tick_load") / 10.0,
-        rx_err=g("rx_err"), gait_phase=g("gait_phase"), trick_frame=g("trick_frame"),
+        rx_err=g("rx_err"), trick_frame=g("trick_frame"),
+        ref_pitch_deg=_deg(g("ref_pitch")), ref_roll_deg=_deg(g("ref_roll")),
+        corr_pitch_deg=_deg(g("corr_pitch")), corr_roll_deg=_deg(g("corr_roll")),
+        feet_queued=g("feet_queued"), support=g("support"),
         balance=None if names is None else "balance_active" in names,
     )
 

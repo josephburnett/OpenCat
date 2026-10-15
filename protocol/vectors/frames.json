@@ -167,51 +167,65 @@
    "note": "epoch byte first"
   },
   {
-   "name": "set_gait_trot",
-   "msg": "SET_GAIT",
+   "name": "feet_walk",
+   "msg": "FEET",
    "type": 17,
    "dir": "pi_to_body",
-   "kind": "goal",
+   "kind": "stream",
    "seq": 9,
    "fields": {
     "epoch": 3,
-    "run": 1,
-    "pattern": 1,
-    "period_ms": 500,
-    "duty": 140,
-    "stride_mm": 35,
-    "turn_mm": -10,
-    "step_h_mm": 12,
-    "body_h_mm": 80,
-    "flags": 7
+    "tick": 51239,
+    "x_mm": [
+     12,
+     -8,
+     15,
+     -20
+    ],
+    "z_mm": [
+     76,
+     76,
+     61,
+     76
+    ],
+    "pitch": -32,
+    "roll": 128,
+    "support": 11
    },
-   "payload": "030101f4018c23f60c5007",
-   "decoded": "1109030101f4018c23f60c500753ef",
-   "wire": "101109030101f4018c23f60c500753ef00",
-   "note": "epoch byte first"
+   "payload": "0327c80cf80fec4c4c3d4ce0ff80000b",
+   "decoded": "11090327c80cf80fec4c4c3d4ce0ff80000b9797",
+   "wire": "1111090327c80cf80fec4c4c3d4ce0ff80040b979700",
+   "note": "epoch byte first; LB lifting, the body planned to roll right"
   },
   {
-   "name": "set_gait_stop",
-   "msg": "SET_GAIT",
+   "name": "feet_zero",
+   "msg": "FEET",
    "type": 17,
    "dir": "pi_to_body",
-   "kind": "goal",
+   "kind": "stream",
    "seq": 10,
    "fields": {
     "epoch": 0,
-    "run": 0,
-    "pattern": 0,
-    "period_ms": 800,
-    "duty": 192,
-    "stride_mm": 0,
-    "turn_mm": 0,
-    "step_h_mm": 0,
-    "body_h_mm": 0,
-    "flags": 0
+    "tick": 0,
+    "x_mm": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "z_mm": [
+     30,
+     30,
+     30,
+     30
+    ],
+    "pitch": 0,
+    "roll": 0,
+    "support": 0
    },
-   "payload": "0000002003c00000000000",
-   "decoded": "110a0000002003c00000000000437b",
-   "wire": "03110a0101042003c00101010103437b00",
+   "payload": "000000000000001e1e1e1e0000000000",
+   "decoded": "110a000000000000001e1e1e1e000000000049fd",
+   "wire": "03110a010101010101051e1e1e1e010101010349fd00",
    "note": "many zero bytes"
   },
   {
@@ -702,7 +716,7 @@
    "kind": "event",
    "seq": 0,
    "fields": {
-    "proto_major": 1,
+    "proto_major": 2,
     "proto_minor": 0,
     "fw_build": 3735928559,
     "reset_cause": 1,
@@ -714,9 +728,9 @@
     "config_state": 0,
     "epoch": 0
    },
-   "payload": "0100efbeadde0100001d003c200b0000",
-   "decoded": "80000100efbeadde0100001d003c200b0000c092",
-   "wire": "0280020106efbeadde0101021d043c200b0103c09200",
+   "payload": "0200efbeadde0100001d003c200b0000",
+   "decoded": "80000200efbeadde0100001d003c200b00008d7a",
+   "wire": "0280020206efbeadde0101021d043c200b01038d7a00",
    "note": "unsolicited on boot"
   },
   {
@@ -740,14 +754,19 @@
     "flags": 2221,
     "last_rx_seq": 22,
     "trick_frame": 255,
-    "gait_phase": 128,
+    "ref_pitch": -32,
+    "ref_roll": 128,
+    "corr_pitch": 4,
+    "corr_roll": -16,
+    "feet_queued": 5,
+    "support": 11,
     "tick_load": 47,
     "rx_err": 0,
     "epoch": 3
    },
-   "payload": "22c8ddff0c00a000f0ff000038018c1e0311ad0816ff802f0003",
-   "decoded": "810122c8ddff0c00a000f0ff000038018c1e0311ad0816ff802f0003e150",
-   "wire": "08810122c8ddff0c02a003f0ff010d38018c1e0311ad0816ff802f0403e15000",
+   "payload": "22c8ddff0c00a000f0ff000038018c1e0311ad0816ffe0ff80000400f0ff050b2f0003",
+   "decoded": "810122c8ddff0c00a000f0ff000038018c1e0311ad0816ffe0ff80000400f0ff050b2f0003b574",
+   "wire": "08810122c8ddff0c02a003f0ff010e38018c1e0311ad0816ffe0ff80020406f0ff050b2f0403b57400",
    "note": ""
   },
   {
@@ -1069,11 +1088,13 @@
     "rx_overflow": 0,
     "i2c_err": 2,
     "imu_stale": 0,
-    "dmp_rate_hz": 100
+    "dmp_rate_hz": 100,
+    "feet_late": 3,
+    "feet_underruns": 1
    },
-   "payload": "8051010000009426d400010000000200000064",
-   "decoded": "8a0e8051010000009426d4000100000002000000644787",
-   "wire": "068a0e8051010101049426d402010101020201010464478700",
+   "payload": "8051010000009426d40001000000020000006403000100",
+   "decoded": "8a0e8051010000009426d40001000000020000006403000100c5bc",
+   "wire": "068a0e8051010101049426d40201010102020101036403020103c5bc00",
    "note": ""
   },
   {
@@ -1237,7 +1258,7 @@
  "streams": [
   {
    "name": "back_to_back_with_resync_zeros",
-   "bytes": "00000201033e2e00060303efbed501000008810122c8ddff0c02a003f0ff010d38018c1e0311ad0816ff802f0403e15000",
+   "bytes": "00000201033e2e00060303efbed501000008810122c8ddff0c02a003f0ff010e38018c1e0311ad0816ffe0ff80020406f0ff050b2f0403b57400",
    "expect": [
     {
      "ok": 1,

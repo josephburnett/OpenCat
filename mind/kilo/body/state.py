@@ -119,7 +119,8 @@ class BodyState:
         self.telemetry_at: float | None = None
         self.tick: int | None = None  # unwrapped
         self._tick_raw: int | None = None
-        self.history: deque[tuple[float, Any]] = deque(maxlen=250)  # 10 s at 25 Hz
+        self.history: deque[tuple[float, Any]] = deque(maxlen=500)  # 10 s at 50 Hz (walking), 20 s at 25 Hz
+        self.telemetry_count = 0  # TELEMETRY received so far: history's newest is number telemetry_count
         self._dist: deque[int] = deque(maxlen=3)
         self._dist_hist: deque[tuple[float, float]] = deque(maxlen=8)
         self.epoch: int | None = None
@@ -130,6 +131,7 @@ class BodyState:
         self.proto_ok: bool | None = None
         # events and replies
         self.events: deque[tuple[float, Any]] = deque(maxlen=64)
+        self.event_count = 0  # EVENTs received so far (events' newest is number event_count)
         self.last_stats: Any = None
 
     # ---- updates (called by the link with the lock held) -------------------
@@ -150,6 +152,7 @@ class BodyState:
         self.telemetry = msg
         self.telemetry_at = now
         self.history.append((now, msg))
+        self.telemetry_count += 1
         if msg.dist_mm:
             self._dist.append(msg.dist_mm)
             self._dist_hist.append((now, float(statistics.median(self._dist))))
@@ -277,7 +280,12 @@ class BodyState:
                 "fallen": self.fallen,
                 "moving": self.moving,
                 "tick_load_ms": None if tel is None else tel.tick_load / 10.0,
-                "gait_phase": None if tel is None else tel.gait_phase,
+                "ref_deg": None if tel is None else (tel.ref_pitch / A16, tel.ref_roll / A16),
+                "corr_deg": None if tel is None else (tel.corr_pitch / A16, tel.corr_roll / A16),
+                "err_deg": None if tel is None or self.mode != "GAIT" else (
+                    (tel.pitch - tel.ref_pitch) / A16, (tel.roll - tel.ref_roll) / A16),
+                "feet_queued": None if tel is None else tel.feet_queued,
+                "support": None if tel is None else tel.support,
                 "rx_err": None if tel is None else tel.rx_err,
                 "last_rx_seq": None if tel is None else tel.last_rx_seq,
                 "hello": None if self.hello is None else _fields(self.hello),

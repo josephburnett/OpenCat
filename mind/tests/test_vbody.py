@@ -377,9 +377,10 @@ def test_contract_d_goals():
     assert s.vb.posture == "REST"
     cls = P.MESSAGES[M.SET_EYES]
     assert events(s.raw(cls.ID, cls().pack())) == [refused(cls.ID, R.UNKNOWN_TYPE)]
-    # P2: SET_GAIT checks its ranges (period 0 is BAD_ARG); SET_BODY_POSE is accepted
-    assert events(s.raw(M.SET_GAIT, P.SetGait().pack())) == [refused(M.SET_GAIT, R.BAD_ARG)]
+    # SET_BODY_POSE is accepted; FEET (a stream: never acked) is refused STALE for another epoch
     assert events(s.raw(M.SET_BODY_POSE, P.SetBodyPose().pack())) == []
+    assert events(s.raw(M.FEET, P.Feet(epoch=9, tick=s.vb.tick + 2, z_mm=[76] * 4).pack())) == [
+        refused(M.FEET, R.STALE)]
     assert s.send("BEEP", notes=[P.Note(note=12, dur_10ms=10)]) == []
     # SET_BALANCE (P1): accepted silently, BAD_ARG out of range, never stale.
     assert s.send("SET_BALANCE", enable=1, kp_q8=128, kd_ms=30, deadband_deg=2, max_corr_deg=15) == []

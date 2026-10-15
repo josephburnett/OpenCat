@@ -145,6 +145,18 @@ ground" if it also watches pitch.
 
 ## 5. What this means in practice, in order
 
+*Since 2026-10-14 (protocol 2.0) the steps are planned in the mind and the
+firmware's gait generator is gone (sections 9 and 10). Items 2 to 6 below
+were built into that generator and left with it; what became of each in
+the mind: the speed mapping (2) is `kilo.planner.patterns`; the sway (3)
+became the planner's lean, a move of the whole body over the three feet
+that stay down, finished a servo lag before each lift; the stance-aware
+balance (4) is the body's loop with the plan's prediction as its reference,
+holding while any foot is up; the early touchdown (5) is the planner's
+catch from the error the body reports; forward placement (6) was not
+carried over (the plant showed no benefit). The mind's tests of all this
+are tests/test_planner.py and tests/test_walk_sim.py (section 10).*
+
 1. **Parameters only, next drive** (no code): a trot with a fixed short
    swing. Period 600 ms, duty 192 (0.75): swing 150 ms, four-foot phases of
    150 ms, stride 20–25 mm. Expect much less wobble than 1000/0.70. This is
@@ -217,11 +229,15 @@ number that must go down.
 ## 6. What stays as it is
 
 The leveller itself (controller, gains, sign conventions, the geometric
-pose terms) is correct and measured; it becomes the four-foot-phase and
-standing part of the model. The gait's phase machinery, foot paths, IK and
-start/stop handling carry over unchanged; sway and the support state are
-additions, not a rewrite. The legacy firmware never had any of this either:
-it stayed up by being fast.
+pose terms) is correct and measured; it is the four-foot and standing part
+of the model, and in a walk it trims what the plan did not predict. The
+IK and the leg-length pose terms stay in the body. The gait's phase
+machinery and foot paths moved to the mind (kilo.planner.plan) as slots of
+a shift and a swing with the same cosine foot paths. The legacy firmware
+never had any of this: it stayed up by being fast. The mind's test of the
+whole loop is the virtual body's physics (tests/test_walk_sim.py): the
+planned walk follows its plan within 2.5°, the same steps without the lean
+tip over the edge every swing.
 
 ## 7. Measured on the floor, 2026-10-13 16:50 PDT (step 1 of section 5)
 
@@ -303,7 +319,89 @@ body covers garbage-collector pauses and SD stalls; if Python itself
 becomes the limit the planner can be rewritten in Rust (owner).
 
 Not started: the owner asked to discuss before any balance work, and did.
+
+**Body side, 2026-10-14 (protocol 2.0, branch fw/stream).** The gait
+generator left the firmware; the body plays the mind's `FEET` stream
+(docs/architecture.md §3d) and its balance takes the predicted attitude as
+the reference and corrects through the feet on the ground (§3f). The host
+plant now tips: a point mass on the four legs, standing on the feet whose
+triangle holds it and turning about the nearest edge as an inverted
+pendulum when they do not (2 to 30° in 180 ms, the floor's ~0.2 s). In it a
+walk that rolls the body 10° away from each lifting side stays up with
+corrections of 1.4°; the same steps without the roll sink 8° toward every
+lifting foot. One finding changed the body: a three-foot stance shoved
+onto its lifted foot leaned 19.2° with the loop updating on three feet and
+12.9° with it off, because the corrections act through the two feet the
+body pivots on. The body now holds its corrections whenever a foot is up;
+the loop trims on four feet only, and the plan's lean has to hold the mass
+on three. The mass model, the servo step test and the planner are still
+the mind's to do.
 Next concrete steps, in order: weigh Kilo per foot; servo step test; put
 both into the host plant (which today treats three feet as safe, which is
 why the sway passed there); then the protocol change (streamed poses,
 error telemetry) and the planner.
+
+## 10. The planner, as built (the mind, 2026-10-14)
+
+Code: `mind/kilo/planner/` (model.py, patterns.py, plan.py, errors.py,
+walker.py); the virtual body it is tested on: `mind/kilo/vbody/feet.py`
+and `physics.py`; how to use it: mind/README.md "Walking".
+
+**What it computes, every 20 ms tick.** Where each foot is (fore-aft x and
+depth z under its shoulder), which feet are on the ground, and the
+attitude the body will have. The pattern's legs take turns in slots: a
+*shift* with all four feet down, then a *swing*. Feet on the ground slide
+back at the stride speed; a swinging foot lifts on a cosine arc to half a
+stride ahead of its shoulder. For the walk and the crawl, before every lift
+the planner solves for the smallest move of the body (a fore-aft shift of
+every foot, a roll and a little pitch by making legs longer or shorter)
+that puts the centre of mass at least 10 mm inside the triangle of the
+three feet that stay down, at lift-off and at touchdown, and moves the body
+there during the shift: done a servo lag before the lift, held until the
+foot is down, dropping a side no faster than gravity can follow. The trot
+stands on diagonal pairs for 150 ms and does not lean. The predicted
+attitude for a tick is the plane through the support feet the plan
+commanded a servo lag earlier; it goes to the body as the balance
+reference. From the body's reports: no lift while the body is more than 5°
+off the plan (the shift waits, up to 0.5 s); a swinging leg lands at once
+where it is when the body tips toward it by 7°. A stop takes every leg home
+in one more step, levels the body and hands over to the STANCE posture.
+
+**The parameters, and which are estimates.** Measured: leg 45 + 50 mm,
+foot disc radius 6 mm, shoulders 123 mm apart, track 65 mm. Estimates
+(BodyModel, one place): body 700 g with its centre 5 mm ahead of the
+middle and 5 mm above the shoulder axles, battery 150 g 15 mm below,
+upper leg 20 g (its centre at 0.8 of the link: the knee servo), lower leg
+8 g, the Pi not carried; 962 g in all; servo lag 150 ms. Chosen: margin
+10 mm, shift at most 18 mm, roll 14°, pitch 6°, lift gate 5°, catch 7°,
+patterns and swing times as in mind/README.md. Replace the masses with the
+per-foot scale readings and the lag with the servo step test.
+
+**The stream's timing.** A thread in the process that walks (the daemon or
+`kilo walk`) wakes every 20 ms. The body's clock is estimated from the
+TELEMETRY arrival times (50 Hz while walking): body time = local time + the
+largest (tick x 20 ms - arrival) of the last 2 s, i.e. the least delayed
+frame. Each wake sends every planned tick from the last one sent up to the
+body's tick + 5 (100 ms ahead), so a late wake (a garbage-collector pause,
+an SD stall) catches up in one go; a tick already played is planned but not
+sent. The body queues 8 ticks and holds the last pose on an underrun, then
+settles. The thread never writes to disk (its records go to the frame
+log's queue), freezes the existing objects for the garbage collector and
+raises its young-generation threshold while it runs, and sends nothing
+while the mind's main loop looks dead. FEET goes out at once on the
+caller's thread (SerialLink.send_stream): no ack, refresh or retry, outside
+the goals' epoch machinery; no SET_POSTURE goal is latched while it
+streams (a refresh would end GAIT on the body).
+
+**What the virtual body showed.** In its physics (a rigid body on point
+feet, servo lag, tipping over an edge as an inverted pendulum) the planned
+walk and crawl follow their plan within 2.5° with the body leaning 6-9°
+on purpose; the same steps without the lean put the mass up to 4 mm past
+the edge and the body tips 9-11° onto the swinging foot every swing (the
+rigid catch stops it short of a fall; on the floor the balance loop of the
+old firmware took it over); the trot stays within 2°; speed, direction and
+pattern changes mid-walk stay within 4°; a 60 ms stall of the producer is
+caught up with no underrun; a slower servo (200 ms) and a tilted IMU show
+in the error estimates (lag +40..60 ms, the offset). The real body is the
+next test.
+

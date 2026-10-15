@@ -36,9 +36,9 @@
 #define BAL_MAX_DEG KILO_BALANCE_MAX_CORR_DEG
 #define BAL_MAX_DEG_LIMIT KILO_BALANCE_LIMIT_DEG  // SET_BALANCE max_corr_deg / deadband_deg above this: BAD_ARG
 #define BAL_SLEW_A16 16       // 1 deg per tick
-// The geometric balance under the gait holds its corrections while fewer
-// than three feet are down and for this many ticks after (body.cpp; the
-// hold-over measured with the plant in test_gait.cpp "two-foot hold").
+// The geometric balance under a FEET stream holds its corrections while a
+// foot is off the ground (a support bit clear) and for this many ticks
+// after (body.cpp; doc §3f "Held off four feet").
 #define BAL_HOLD_TICKS 2
 
 // Sign of the deviation fed to the legacy gains (balance_map), relative to
@@ -73,6 +73,7 @@ struct Balance {
   uint8_t active;  // the controller ran with active = true this tick (TELEMETRY flag bit 0)
   uint8_t hold;    // geometric balance: ticks it still holds (BAL_HOLD_TICKS; TELEMETRY BALANCE_HELD)
   BalAxis ax[2];   // [BAL_ROLL], [BAL_PITCH]
+  int16_t ref[2];  // the reference while the controller runs this tick, else 0, a16 (TELEMETRY ref_*; body_tick)
 };
 
 // Defaults, controller at rest.

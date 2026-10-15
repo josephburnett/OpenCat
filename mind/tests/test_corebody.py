@@ -48,11 +48,6 @@ CORE_VS_SIM = """
   up to 3 tries, else RECOVERY_FAILED, REST, LIMP 2 s later. The sim's
   trigger_fall() is a fixed 1 s FALLEN + 1 s RECOVERING whatever the
   attitude, never re-tries or fails, and has no detector.
-- gait stop: after the one-period ramp-down the core waits for every foot to
-  land (GS_LAND: 13 more ticks for the default walk) before STANCE and
-  GAIT_STOPPED; the sim ends right after the ramp (50 vs 64 ticks).
-- gait start: the core's IDLE move to STANCE takes POSTURE_TICKS (25) and the
-  gait starts on the tick after it settles (26); the sim starts on the 25th.
 - REBOOT: the PCA9685 keeps driving through the AVR's reset, so the core
   boots warm: the warm-boot hold keeps the pose, then IDLE holds it (posture
   HOLD, mode IDLE, servos powered). The sim's reboot() is a cold power-on
@@ -275,41 +270,37 @@ def test_trick_upload_play_and_preemption(rig):
 
 # ---- the gait -------------------------------------------------------------------------------------
 
-def test_gait_start_ramp_stop(rig):
+def test_feet_stream(rig):
+    """Protocol 2.0 at the link: FEET a few ticks ahead puts the core in GAIT
+    with the reference and the support feet in TELEMETRY; a stale epoch is
+    refused; when the stream stops the core underruns, holds, settles and
+    ends GAIT with GAIT_STOPPED arg 1 (kilo.vbody.feet is the Python stand-in)."""
     core, link, client = rig()
-    stand(core, client)
-    f = client.walk(pattern="walk")
-    period = f["period_ms"] // P.TICK_MS
-    core.step(1)
-    d = core.dump()
-    # Accepted: mode GAIT at once, IDLE moves to STANCE first.
-    assert d["gait_run"] == 1 and d["gait_state"] == 0 and d["posture"] == STANCE and d["mode"] == P.Mode.GAIT
-    core.step(1)
-    assert link.state.mode == "GAIT" and "gait" in link.state.flags
-    assert link.state.owners[0] == "GAIT"
-    # The gait starts once STANCE has settled (POSTURE_TICKS = 25).
-    t = core.run_until(lambda: core.dump()["gait_state"] == 1, 2)
-    assert t is not None and 23 <= t <= 26
-    d = core.dump()
-    assert d["gait_phase"] == 0 and set(d["owner"][3:]) == {OWN_GAIT}
-    # The stride ramps up over one period.
-    amps = []
-    for _ in range(period + 2):
+    client.set_balance(True)  # the reference reads 0 while the balance is off
+    client.posture("stance")
+    assert core.run_until(lambda: (d := core.dump())["posture"] == STANCE and not d["idle_moving"], 2) is not None
+    link.clear_goal("SET_POSTURE")  # a posture refresh would end GAIT
+    epoch = link.state.epoch
+
+    def send(ahead, epoch=epoch, roll=0, support=0xF):
+        t = (link.state.telemetry.tick + ahead) & 0xFFFF
+        return link.send_stream("FEET", P.Feet(epoch=epoch, tick=t, x_mm=[0] * 4, z_mm=[76] * 4, pitch=0,
+                                               roll=roll, support=support).pack())
+
+    assert send(3, epoch=(epoch + 5) & 0xFF)
+    assert core.run_until(lambda: refused(link, "FEET", "STALE"), 1) is not None
+    for _ in range(20):
+        for ahead in range(2, 6):
+            send(ahead, roll=-3 * 16)
         core.step(1)
-        amps.append(core.dump()["gait_amp"])
-    assert amps == sorted(amps) and amps[-1] == 65535 and amps[period - 2] < 65535
-    assert any(m.gait_phase for _, m in list(link.state.history)[-10:])
-    # Stop: ramp down over a period, land, STANCE, GAIT_STOPPED once.
-    n = client.stop_walk()
-    core.step(1)
-    assert core.dump()["gait_state"] == 2  # GS_STOP
-    t = core.run_until(lambda: client.gait_stopped_since(n) is not None, 4)
-    assert t is not None and t > period + 1  # the ramp, then the landing (the sim stops at the ramp's end)
-    core.step(60)  # the run=0 goal keeps being refreshed until GAIT_STOPPED clears it: no second event
-    assert len(core.events("GAIT_STOPPED")) == 1 and len(client._gait_stopped) == 1
-    d = core.dump()
-    assert (d["gait_state"], d["gait_run"], d["posture"], d["mode"]) == (0, 0, STANCE, P.Mode.IDLE)
-    assert set(d["owner"][3:]) == {OWN_IDLE} and "SET_GAIT" not in link.goals()
+    assert link.state.mode == "GAIT" and "gait" in link.state.flags and link.state.owners[0] == "GAIT"
+    tel = link.state.telemetry
+    assert tel.ref_roll == -3 * 16 and tel.support == 0xF and tel.feet_queued >= 1
+    assert core.run_until(lambda: events(link, "FEET_UNDERRUN"), 1) is not None
+    assert events(link, "FEET_UNDERRUN")[0].arg >= 1
+    assert core.run_until(lambda: events(link, "GAIT_STOPPED"), 2) is not None
+    assert events(link, "GAIT_STOPPED")[0].arg == 1
+    core.step(5)
     assert link.state.mode == "IDLE"
 
 
