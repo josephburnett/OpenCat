@@ -140,8 +140,8 @@ class RemoteControl:
     (SPEED_FACTORS[speed_step] x the pattern's default speed, clamped by the
     planner) until another key; the pattern keys select trot / walk / crawl
     and the speed keys step the speed down / up (stopping at the ends): both
-    change a walk in progress at once (a pattern at its next four-foot
-    phase). A posture or trick key first stops the walk the planned way
+    change a walk in progress at once (a pattern after every leg has
+    stepped home). A posture or trick key first stops the walk the planned way
     (each leg steps home, Kilo stands in STANCE) and waits for it.
     """
 

@@ -273,8 +273,9 @@ def test_daemon_remote_walks(start_daemon):  # noqa: F811
         assert vb.feet is not None and vb.wd_stage == 0
         info = body.conn.call("daemon")
         assert info["walk"]["active"] and info["walk"]["direction"] == "forward" and "WALK" not in info["held_goals"]
-        vb.ir_key(0x30)  # A3: trot, changed while walking (at the next four-foot phase)
-        assert wait_for(lambda: body.conn.call("daemon")["walk"]["pattern"] == "trot", 2)
+        vb.ir_key(0x30)  # A3: trot, changed while walking (the legs go home first: up to ~5.5 s from the walk)
+        assert wait_for(lambda: body.conn.call("daemon")["walk"]["changing_to"] == "trot", 1)
+        assert wait_for(lambda: body.conn.call("daemon")["walk"]["pattern"] == "trot", 8)
         assert vb.gait_stops == []
         vb.ir_key(0x30, repeat=True)  # a held key: nothing
         # a client's walk hold wins: keys are ignored

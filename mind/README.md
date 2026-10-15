@@ -466,8 +466,8 @@ keys through the daemon's own BodyClient:
 only, never on a desk.** A direction key (B7 forward, B5 back, A6 / C6
 turn left / right, A4 march) walks with the selected pattern (A3 trot, C4
 walk, B4 crawl) and keeps walking until another key, like the legacy
-firmware; a pattern key while walking changes the walk (at its next
-four-foot phase), otherwise it only selects. C5 / C1 (EQ / 9) step the
+firmware; a pattern key while walking changes the walk (after every leg
+has stepped home, up to ~5.5 s out of the walk), otherwise it only selects. C5 / C1 (EQ / 9) step the
 speed down / up through 0.5, 0.7, 1, 1.4 and 2 × the pattern's default
 speed (start: 1; the step is kept across patterns and walks, and stops at
 the ends), clamped like `kilo walk --speed` (the trot's 2× is its 93 mm/s

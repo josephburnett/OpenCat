@@ -284,8 +284,8 @@ class BodyClient:
         """Walk ``direction`` (forward, back, left, right: turn in place,
         march: in place) with ``pattern`` (walk, trot, crawl) at
         ``speed_mm_s`` (default: the pattern's; kilo.planner.patterns). While
-        walking, changes the walk at once (a pattern at the next four-foot
-        phase). ``balance=False`` turns the body's balance off for this walk
+        walking, changes the walk at once (a pattern after every leg has
+        stepped home). ``balance=False`` turns the body's balance off for this walk
         (restored after). Blocks about 0.6 s on a start (the STANCE
         posture). Returns the walk's status (Walker.status()). ValueError for
         an unknown pattern or direction; WalkError if the body cannot walk."""
