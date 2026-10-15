@@ -88,20 +88,22 @@ Then, with the remote or the CLI:
 
 1. Trot forward and back (the gait that already held within ±3.5° of roll
    on 2026-10-13): expect the same or better.
-2. Crawl marching in place (`0` key after `100+`, or
+2. Crawl marching in place (A4 after B4 on the remote, or
    `kilo walk march --pattern crawl --for 8`): this fell to the left within
    2 s twice without the sway. Expected now: stays up; roll trace within
    about ±10° (the sway itself is 8°).
 3. Walk forward (`kilo walk forward --pattern walk --for 8`): expected to
    stay up; note the body's lean and whether the feet scuff.
-4. Speed keys (9 faster, EQ slower) during a trot: two presses each way;
+4. Speed keys (C1 faster, C5 slower) during a trot: two presses each way;
    the swing stays at 150 ms, the stride and the cadence change.
 5. One gentle push sideways during a trot, from the side: expected a leg
    lands early and he stays up or at least falls less; `FELL` /
    `RECOVERED` in the daemon log if not.
 
-Stop between runs with the remote's stand-posture key (>>|); `kilo walk stop`
-from the CLI.
+Stop between runs with B6 (stand) on the remote; `kilo walk stop` from the
+CLI. Remote keys are named by position: columns A B C left to right, rows
+1 to 7 bottom to top (B7 forward, B5 backward, A6/C6 left/right, B6 stand,
+A7 rest, A4 march, A3 trot, B4 crawl, C4 walk, C5 slower, C1 faster).
 
 ## 4. What to read off the telemetry
 

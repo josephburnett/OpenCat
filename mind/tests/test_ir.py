@@ -34,13 +34,13 @@ def test_key_table_matches_the_legacy_firmware():
 
 
 def test_describe():
-    assert ir.describe(0x18) == "2 (0x18, sit)"
-    assert ir.describe(0x118) == "2 (0x18, sit) repeat"
-    assert ir.describe(0xA2) == "CH- (0xA2, rest)"
+    assert ir.describe(0x18) == "B3 (2 0x18, sit)"
+    assert ir.describe(0x118) == "B3 (2 0x18, sit) repeat"
+    assert ir.describe(0xA2) == "A7 (CH- 0xA2, rest)"
     assert ir.describe(0x45) == "? (0x45)"
     assert ir.split(0x1A2) == (0xA2, True)
     ev = consts.EV["IR_KEY"]
-    assert ev == 18 and _event_text(ev, 0x118) == "IR_KEY 2 (0x18, sit) repeat"
+    assert ev == 18 and _event_text(ev, 0x118) == "IR_KEY B3 (2 0x18, sit) repeat"
     assert _event_text(consts.EV["FELL"], -1) == "FELL(-1)"
 
 
@@ -49,7 +49,7 @@ def test_timeline_renders_ir_key():
     tl = Timeline.__new__(Timeline)
     tl.say = lambda text, now=None: lines.append(text)
     tl._on_event(SimpleNamespace(code=consts.EV["IR_KEY"], arg=0x10, tick=5, epoch=2))
-    assert lines == ["EVENT IR_KEY 4 (0x10, hi) tick=5 epoch=2"]
+    assert lines == ["EVENT IR_KEY A2 (4 0x10, hi) tick=5 epoch=2"]
 
 
 EXPECTED = {
@@ -206,7 +206,7 @@ def test_daemon_remote_keys(start_daemon):  # noqa: F811
         assert wait_for(lambda: vb.posture == "SIT")
         time.sleep(1.5)  # past idle_limp_s (1 s): the remote's posture is held, no idle LIMP
         assert vb.posture == "SIT" and vb.wd_stage == 0
-        assert body.conn.call("daemon")["remote"] == "on, last key 2 (0x18, sit)"
+        assert body.conn.call("daemon")["remote"] == "on, last key B3 (2 0x18, sit)"
         vb.ir_key(0x02, repeat=True)  # a repeat does nothing
         vb.ir_key(0x30)  # 1: selects trot, nothing walks
         time.sleep(0.3)

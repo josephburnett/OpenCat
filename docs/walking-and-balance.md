@@ -154,7 +154,7 @@ ground" if it also watches pitch.
    `kilo walk` set stride and stance time with a fixed swing, instead of a
    period. Continuous speed, two-foot time constant.
    **Done (2026-10-13)**: `kilo.body.client.gait_timing(pattern, speed)`,
-   `kilo walk --speed MM_S`, and the remote's EQ / 9 (slower / faster, 0.5x
+   `kilo walk --speed MM_S`, and the remote's C5 / C1 (slower / faster, 0.5x
    to 2x of the default speed). Each pattern keeps its default's swing time
    (trot 150 ms; walk 500 and crawl 297 ms, which their higher steps need
    under the slew limit), stance = stride / speed, period = swing + stance.

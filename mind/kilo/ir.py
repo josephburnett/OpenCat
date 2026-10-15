@@ -25,9 +25,12 @@ class Key:
     command: int   # NEC command byte
     label: str     # what is printed on the key
     legacy: str    # what the legacy firmware did with it
+    grid: str = ""  # where the key is: column A B C left to right, row 1-7 bottom to top (B7 = top middle)
 
 
-# The remote's 21 keys, row by row as on the remote (and in src/infrared.h).
+# The remote's 21 keys, row by row from the top as on the remote (and in
+# src/infrared.h). The owner refers to keys by grid position (the icons on
+# the keys are not legible), so every message names a key as e.g. "B7".
 KEYS: tuple[Key, ...] = (
     Key(0xA2, "CH-", "rest"),
     Key(0x62, "CH", "forward"),
@@ -51,8 +54,10 @@ KEYS: tuple[Key, ...] = (
     Key(0x4A, "8", "butt-up"),
     Key(0x52, "9", "last skill"),
 )
+KEYS = tuple(Key(k.command, k.label, k.legacy, f"{'ABC'[i % 3]}{7 - i // 3}") for i, k in enumerate(KEYS))
 BY_COMMAND: dict[int, Key] = {k.command: k for k in KEYS}
 BY_LABEL: dict[str, Key] = {k.label: k for k in KEYS}
+BY_GRID: dict[str, Key] = {k.grid: k for k in KEYS}
 
 
 def split(arg: int) -> tuple[int, bool]:
@@ -62,10 +67,10 @@ def split(arg: int) -> tuple[int, bool]:
 
 
 def describe(arg: int) -> str:
-    """``2 (0x18, sit)``, ``2 (0x18, sit) repeat``; ``? (0x45)`` for another remote's key."""
+    """``B3 (2 0x18, sit)``, ``B3 (2 0x18, sit) repeat``; ``? (0x45)`` for another remote's key."""
     cmd, rep = split(arg)
     k = BY_COMMAND.get(cmd)
-    s = f"{k.label} (0x{cmd:02X}, {k.legacy})" if k else f"? (0x{cmd:02X})"
+    s = f"{k.grid} ({k.label} 0x{cmd:02X}, {k.legacy})" if k else f"? (0x{cmd:02X})"
     return s + (" repeat" if rep else "")
 
 
