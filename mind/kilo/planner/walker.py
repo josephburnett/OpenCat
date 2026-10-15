@@ -4,12 +4,16 @@
 a walk; ``Stream`` is one walk's producer, which the walker's thread wakes
 every 20 ms (``Stream.wake``).
 
-Start (``Walker.start``, blocking for about 0.6 s): TELEMETRY at 50 Hz
-(SET_STREAM telem_div 1), the balance off for this walk if asked
-(SET_BALANCE enable 0, the previous goal restored after), the STANCE
-posture and its transition, then the posture goal is dropped (a SET_POSTURE
-refresh would end GAIT on the body) and the stream starts. The first FEET
-the body accepts puts it in GAIT.
+Start (``Walker.start``, blocking for about 0.6 s): a planned stop still
+under way is waited for (START_WAIT_S), then aborted; TELEMETRY at 50 Hz
+(SET_STREAM telem_div 1, the JOINTS and IMU_RAW divisors kept, the previous
+rate put back after), the balance off for this walk if asked (SET_BALANCE
+enable 0, the previous goal restored after), the STANCE posture (always:
+it also ends a GAIT the body still holds from a stream that ended without
+the planned stop; it carries the posture's balance flag, as does the STANCE
+at the end) and its transition, then the posture goal is dropped (a
+SET_POSTURE refresh would end GAIT on the body) and the stream starts. The
+first FEET the body accepts puts it in GAIT.
 
 Every wake (docs/walking-and-balance.md §10 "Stream timing"):
 
@@ -17,7 +21,8 @@ Every wake (docs/walking-and-balance.md §10 "Stream timing"):
    estimate: body time = local time + the largest (tick x 20 ms - arrival
    time) of the last two seconds (the least delayed frame is the best
    estimate; the window follows the drift between the body's crystal and
-   the Pi's clock). In GAIT each one also gives the model's error to the
+   the Pi's clock), restarted when five frames in a row are more than a
+   tick below it (the body's tick fell back after a stall: BodyClock). In GAIT each one also gives the model's error to the
    ErrorTracker (offset, lag, spike) and to the planner (``observe``).
 2. New EVENTs: GAIT_STOPPED (arg 0: a posture or an epoch bump took the
    legs; arg 1: the body settled after an underrun), FEET_UNDERRUN
@@ -65,6 +70,9 @@ log = logging.getLogger("kilo.walk")
 TICK_S = P.TICK_MS / 1000.0
 LOOKAHEAD = P.FEET_LOOKAHEAD_TICKS
 CLOCK_WINDOW = 100            # telemetry frames in the body-clock estimate (2 s at 50 Hz)
+CLOCK_RESET_FRAMES = 5        # ...restarted after this many frames in a row a tick below its maximum
+START_WAIT_S = 5.0            # a start during a planned stop waits this long for it, then aborts it
+ABORT_WAIT_S = 3.0            # ...and this long for the aborted stream's thread to finish
 ENTER_TIMEOUT_S = 0.6         # the body must be in GAIT this soon after the first FEET
 HANDOVER_TIMEOUT_S = 1.0      # ...and out of it this soon after the STANCE posture
 MIND_STALL_S = 0.5
@@ -72,6 +80,7 @@ STANCE_WAIT_S = 0.6           # POSTURE_TICKS (25 ticks, 0.5 s) and a margin
 GC_THRESHOLD0 = 20000
 _FEET = P.Feet._FMT           # the FEET payload layout (generated)
 _A16 = 16.0
+_ATT_RANGE = (-480, 480)      # FEET pitch / roll, 1/16 deg (protocol/spec.toml: +-30 deg)
 
 
 class WalkError(LinkError):
@@ -87,12 +96,26 @@ def stop_timeout(period_ms: float | None = None) -> float:
 
 
 class BodyClock:
-    """The body's tick, estimated from TELEMETRY arrival times."""
+    """The body's tick, estimated from TELEMETRY arrival times.
+
+    Body time = local time + the largest (tick x 20 ms - arrival) of the
+    window: the least delayed frame. The body's tick can also fall back
+    against real time: a stall of its loop over 40 ms makes the scheduler
+    resync (body/src/core/sched.cpp), so every later frame's offset is
+    smaller by the stall. The window's old maximum would then put the
+    estimate ahead of the body for the window's length (FEET sent more than
+    the queue's depth ahead are dropped), so once ``CLOCK_RESET_FRAMES``
+    frames in a row are all more than a tick below the maximum, the window
+    restarts from them. (A burst of late frames after a pause of the mind's
+    reader can do the same; the next prompt frame puts the maximum back.)"""
 
     def __init__(self, window: int = CLOCK_WINDOW):
         self._offs: deque = deque(maxlen=window)
         self._raw: int | None = None
+        self._max = -math.inf
+        self._below = 0
         self.tick: int | None = None   # unwrapped tick of the newest TELEMETRY
+        self.resets = 0
 
     def add(self, raw_tick: int, rx_time: float) -> int:
         if self._raw is None:
@@ -101,24 +124,47 @@ class BodyClock:
             d = (raw_tick - self._raw) & 0xFFFF
             if d >= 0x8000:  # backwards: a restart (the stream ends on the reboot anyway)
                 self._offs.clear()
+                self._below = 0
                 self.tick = raw_tick
             else:
                 self.tick += d
         self._raw = raw_tick
-        self._offs.append(self.tick * TICK_S - rx_time)
+        off = self.tick * TICK_S - rx_time
+        full = len(self._offs) == self._offs.maxlen
+        dropped = self._offs[0] if full else None
+        self._offs.append(off)
+        if dropped is not None and dropped >= self._max:
+            self._max = max(self._offs)
+        elif off > self._max or len(self._offs) == 1:
+            self._max = off
+        if off < self._max - TICK_S:
+            self._below += 1
+            if self._below >= CLOCK_RESET_FRAMES:  # the body's tick fell back: start again from these
+                recent = list(self._offs)[-CLOCK_RESET_FRAMES:]
+                self._offs.clear()
+                self._offs.extend(recent)
+                self._max = max(recent)
+                self._below = 0
+                self.resets += 1
+        else:
+            self._below = 0
         return self.tick
 
     def now(self, t: float) -> float | None:
         """The body's tick at local time t (fractional), None before any TELEMETRY."""
         if not self._offs:
             return None
-        return (t + max(self._offs)) / TICK_S
+        return (t + self._max) / TICK_S
 
 
 def pack_feet(epoch: int, tp: TickPlan) -> bytes:
+    """FEET for one planned tick; pitch and roll kept inside the field's
+    range (the body refuses a FEET beyond it, BAD_ARG, which ends the walk)."""
     x, z = tp.x, tp.z
+    lo, hi = _ATT_RANGE
     return _FEET.pack(epoch, tp.tick & 0xFFFF, x[0], x[1], x[2], x[3], z[0], z[1], z[2], z[3],
-                      int(round(tp.pitch * _A16)), int(round(tp.roll * _A16)), tp.support)
+                      min(hi, max(lo, int(round(tp.pitch * _A16)))), min(hi, max(lo, int(round(tp.roll * _A16)))),
+                      tp.support)
 
 
 class Stream:
@@ -287,6 +333,11 @@ class Walker:
         self.tracker = ErrorTracker()
         self._restore_balance: dict | None = None
         self._balance_changed = False
+        self._telem_div = P.TELEMETRY_DEFAULT_DIV  # the telemetry rate before the walk (put back after)
+        # SET_POSTURE's balance flag before the walk (the latched goal's, else
+        # the last walk's): the STANCE postures at the start and the end carry
+        # it, so a balance that came from the posture is not dropped
+        self._posture_balance = False
         self.last_result: dict[str, Any] | None = None
         self._done = threading.Event()
         self._done.set()
@@ -307,7 +358,8 @@ class Walker:
                 "speed_mm_s": round(tm.speed_mm_s, 1), "stride_mm": round(tm.stride_mm, 1),
                 "period_ms": round(tm.period_ms), "stopping": p.stopping, "ended": s.ended, "ok": s.ok,
                 "sent": s.sent, "skipped": s.skipped, "underruns": s.underruns, "max_behind": s.max_behind,
-                "holds": p.stats["holds"], "catches": p.stats["catches"],
+                "changing_to": p._pending_pattern.name if p.changing else None,
+                "holds": p.stats["holds"], "catches": p.stats["catches"], "waits": p.stats["waits"],
                 "min_margin_mm": None if p.stats["min_margin"] == math.inf else round(p.stats["min_margin"], 1),
                 "error": self.tracker.estimate()}
 
@@ -320,13 +372,17 @@ class Walker:
         with self._lock:
             if self.active and self.planner is not None and not self.planner.stopping:
                 return self.update(pattern, direction, speed_mm_s)
-            if self.active:  # a stop in progress: let it finish first
-                self.wait(5.0)
+            if self.active and not self.wait(START_WAIT_S):
+                # a planned stop still under way (a walk's can take ~10 s): cut
+                # it short, so two streams never send FEET for the same ticks
+                self.abort()
+                if not self.wait(ABORT_WAIT_S):
+                    raise WalkError("the previous walk's stream did not end")
             self._setup(balance)
             try:
                 self._begin(pattern, direction, speed_mm_s)
             except BaseException:
-                self._teardown()
+                self._teardown(None)
                 raise
         return self.status() or {}
 
@@ -387,15 +443,22 @@ class Walker:
         if st.mode in ("FALLEN", "RECOVERING"):
             raise WalkError("Kilo is down: the fall reflex holds the joints")
         self._balance_changed = False
-        c.set_stream(telem_div=1)
+        self._telem_div = c.stream_divs[0]
+        _, joints_div, imu_raw_div = c.stream_divs
+        c.set_stream(telem_div=1, joints_div=joints_div, imu_raw_div=imu_raw_div)
+        g = self.link.goals().get("SET_POSTURE")
+        if g is not None:  # the posture's balance flag, carried through the walk and its end
+            self._posture_balance = bool(g.fields.get("flags", 0) & consts.POSTURE_BALANCE_FLAG)
         if not balance:
             g = self.link.goals().get("SET_BALANCE")
             self._restore_balance = dict(g.fields) if g is not None else None
             c.set_balance(False)
             self._balance_changed = True
-        if st.mode != "GAIT":
-            c.posture("stance")
-            self._sleep(self.stance_wait_s)
+        # STANCE, also when the body is still in GAIT (a stream that ended
+        # without the planned stop: the body holds or settles its last pose):
+        # the posture ends that, and the new stream starts from STANCE's feet.
+        c.posture("stance", balance=balance and self._posture_balance)
+        self._sleep(self.stance_wait_s)
         self.link.clear_goal("SET_POSTURE")
 
     def _begin(self, pattern: str, direction: str, speed_mm_s: float | None) -> None:
@@ -422,7 +485,7 @@ class Walker:
 
     def _handover(self) -> None:
         try:
-            self.client.posture("stance")
+            self.client.posture("stance", balance=self._posture_balance)
         except (LinkError, ValueError) as e:
             log.warning("walk: STANCE at the end: %s", e)
 
@@ -446,15 +509,20 @@ class Walker:
         finally:
             gc.set_threshold(*old)
             gc.unfreeze()
-            self._teardown()
-            self.last_result = self.status()
-            self._done.set()
+            try:
+                self._teardown(s)
+            except Exception:  # whatever it was, wait() and stop_walk must not hang on it
+                log.exception("walk teardown failed")
+            finally:
+                self.last_result = self.status()
+                self._done.set()
 
-    def _teardown(self) -> None:
-        if self.stream is not None and self.stream.handover_at is not None:
+    def _teardown(self, s: Stream | None) -> None:
+        if s is not None and s.handover_at is not None:
             self.link.clear_goal("SET_POSTURE", only_if=lambda g: g.fields.get("posture") == consts.POSTURES["stance"])
         try:
-            self.client.set_stream(telem_div=P.TELEMETRY_DEFAULT_DIV)
+            _, joints_div, imu_raw_div = self.client.stream_divs  # a monitor's JOINTS / IMU_RAW go on
+            self.client.set_stream(telem_div=self._telem_div, joints_div=joints_div, imu_raw_div=imu_raw_div)
         except LinkError as e:
             log.warning("walk: telemetry rate not restored: %s", e)
         if self._balance_changed:

@@ -24,7 +24,8 @@ from kilo.logs.analysis import format_summary, gait_summary
 from kilo.logs.reader import LogEvent, TelemetrySample
 from kilo.planner.model import BodyModel
 from kilo.planner.plan import Planner
-from kilo.planner.walker import BodyClock, Stream, WalkError
+from kilo.planner import walker as walker_mod
+from kilo.planner.walker import CLOCK_RESET_FRAMES, BodyClock, Stream, WalkError
 from kilo.protocol import kilo_protocol as P
 from kilo.vbody.sim import VirtualBody, open_pty
 
@@ -49,6 +50,27 @@ def test_body_clock_takes_the_least_delayed_frame():
     assert bc.now(10.031) == pytest.approx(101.5)
     bc.add(0xFFFF, 0.0)
     assert bc.tick == 0xFFFF and bc.add(2, 0.06) == 0x10002  # unwrapped across the u16 wrap
+
+
+def test_body_clock_follows_a_body_stall():
+    """The body's tick falls back 80 ms (a stall over 40 ms makes its
+    scheduler resync): within CLOCK_RESET_FRAMES frames the estimate follows,
+    instead of staying ahead for the window's 2 s (FEET more than the
+    queue's depth ahead are dropped)."""
+    bc = BodyClock()
+    t = 10.0
+    for i in range(100):
+        bc.add(i, t + i * 0.02 + 0.001 + (i % 3) * 0.002)  # a little jitter
+    assert bc.now(10.0 + 99 * 0.02 + 0.001) == pytest.approx(99.0)
+    stall = 0.08
+    for i in range(100, 100 + CLOCK_RESET_FRAMES):
+        bc.add(i, t + i * 0.02 + stall + 0.001)
+    rx = t + (100 + CLOCK_RESET_FRAMES - 1) * 0.02 + stall + 0.001
+    assert bc.now(rx) == pytest.approx(100 + CLOCK_RESET_FRAMES - 1, abs=0.15) and bc.resets == 1
+    # a late frame or two (the reader paused) does not restart it
+    bc.add(105, rx + 0.02 + 0.05)
+    bc.add(106, rx + 0.04 + 0.001)
+    assert bc.resets == 1 and bc.now(rx + 0.04 + 0.001) == pytest.approx(106, abs=0.15)
 
 
 class _Link:
@@ -238,6 +260,70 @@ def test_client_walk_refusals(rig):
     assert client.link.wait_until(lambda: client.state.mode == "FALLEN", 1)
     with pytest.raises(WalkError, match="down"):
         client.walk()
+
+
+def test_a_start_during_a_long_stop_aborts_the_old_stream(rig, monkeypatch):
+    """A walk's planned stop can take ~10 s; a start that waited
+    START_WAIT_S for it aborts the old stream first, so two streams never
+    send FEET for the same ticks and the old one's teardown leaves the new
+    walk alone."""
+    client, vb = rig
+    client.wait_ready(2)
+    monkeypatch.setattr(walker_mod, "START_WAIT_S", 0.2)
+    client.walk("forward", "walk")
+    assert wait_for(lambda: vb.feet is not None, 2)
+    _keep(client, 0.4)
+    w = client.walker
+    old_thread, old_stream = w._thread, w.stream
+    client.stop_walk()
+    st = client.walk("forward", "trot")
+    assert not old_thread.is_alive() and old_stream.ended == "aborted"
+    assert st["active"] and st["pattern"] == "trot" and w.stream is not old_stream
+    _keep(client, 0.6)
+    assert w.active and w.stream.ended is None and vb.telem_div == 1
+    assert client.stop_walk(wait_s=3.0) is True and client.walk_status()["ok"]
+
+
+def test_the_posture_balance_flag_is_carried_through_a_walk(rig):
+    client, vb = rig
+    client.wait_ready(2)
+    client.posture("balance")  # STAND with the balance flag: the only balance source
+    assert wait_for(lambda: vb.balance_req, 1) and vb.balance["enable"] == 0
+    client.walk("march", "trot")
+    assert wait_for(lambda: vb.feet is not None, 2)
+    assert vb.balance_req  # the STANCE at the start carried it
+    _keep(client, 0.3)
+    assert client.stop_walk(wait_s=3.0) is True
+    assert vb.balance_req and vb.posture == "STANCE"  # ...and the STANCE at the end
+    # without the balance for this walk: off while walking, back after
+    client.walk("march", "trot", balance=False)
+    assert wait_for(lambda: vb.feet is not None, 2) and not vb.balance_req
+    assert client.stop_walk(wait_s=3.0) is True and vb.balance_req
+
+
+def test_a_walk_keeps_the_monitors_streams(rig):
+    client, vb = rig
+    client.wait_ready(2)
+    client.set_stream(telem_div=2, joints_div=5, imu_raw_div=10)
+    client.walk("march", "trot")
+    assert wait_for(lambda: vb.feet is not None, 2)
+    assert (vb.telem_div, vb.joints_div, vb.imu_raw_div) == (1, 5, 10)
+    assert client.stop_walk(wait_s=3.0) is True
+    assert (vb.telem_div, vb.joints_div, vb.imu_raw_div) == (2, 5, 10)
+
+
+def test_a_failing_teardown_still_ends_the_wait(rig):
+    client, vb = rig
+    client.wait_ready(2)
+    client.walk("march", "trot")
+    w = client.walker
+
+    def boom(s):
+        raise RuntimeError("teardown")
+    w._teardown = boom
+    t0 = time.monotonic()
+    w.stream._end("test")
+    assert w.wait(3.0) is True and time.monotonic() - t0 < 1.0
 
 
 @pytest.mark.slow

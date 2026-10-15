@@ -216,12 +216,108 @@ def test_direction_and_pattern_changes():
         p.next()
     assert p.s_cur == [-20, 20]
     p.set_pattern("walk")
-    assert p.pattern.name == "trot"  # at the next four-foot phase
+    assert p.pattern.name == "trot" and p.changing  # the legs go home first
     seen = []
-    for _ in range(60):
+    for _ in range(300):
         t = p.next()
         seen.append((p.pattern.name, t.lifting))
     assert ("walk", (LB,)) in seen and all(not (n == "walk" and len(lf) == 2) for n, lf in seen)
+    first = next(i for i, (n, _) in enumerate(seen) if n == "walk")
+    assert first * 20 < 1500  # out of the trot: the strides ramp down (50 ticks) and each pair steps home
+    assert p.s_cur == [-20, 20]  # the direction carried over (turning left)
+
+
+def check_ticks(ticks, what=""):
+    """Every tick inside FEET's ranges and the legs' reach, every joint at
+    most 9.5 deg from the tick before (the body's slew is 10)."""
+    for t in ticks:
+        assert all(-60 <= x <= 60 for x in t.x) and all(30 <= z <= 95 for z in t.z), (what, t)
+        assert all(M.reachable(t.x[i], t.z[i]) for i in LEGS), (what, t)
+        assert abs(t.pitch) <= 30 and abs(t.roll) <= 30
+    worst = max(joint_step_deg(a, b) for a, b in zip(ticks, ticks[1:]))
+    assert worst <= 9.5, (what, worst)
+
+
+@pytest.mark.parametrize("seq", [("walk", "trot", "crawl"), ("trot", "walk", "trot"), ("crawl", "walk", "trot"),
+                                 ("walk", "crawl", "walk")])
+def test_pattern_changes_one_after_another_stay_in_reach(seq):
+    """Two pattern changes in a row (the remote's A3 / C4 / B4 pressed one
+    after the other), at several points of the cycle and gaps between them."""
+    a, b, c = seq
+    for t0 in (100, 157, 211):
+        for gap in (10, 60, 140):
+            p = Planner(M, a, tick=0)
+            ticks = [p.next() for _ in range(t0)]
+            p.set_pattern(b)
+            ticks += [p.next() for _ in range(gap)]
+            p.set_pattern(c)
+            ticks += [p.next() for _ in range(500)]
+            check_ticks(ticks, (seq, t0, gap))
+            assert p.pattern.name == c
+
+
+def test_the_gate_pauses_the_feet():
+    """While the gate holds the lift the plan waits: no foot slides toward the
+    end of its range, so the next swing stays inside the slew and the reach
+    (the trot at twice its speed slides 2.2 mm a tick)."""
+    p = Planner(M, "trot", speed_mm_s=2 * pat.default_speed("trot"), tick=0)
+    ticks = [p.next() for _ in range(40)]
+    p.observe(6.0, 0.0)
+    while p.stats["holds"] == 0:
+        ticks.append(p.next())
+    held = [ticks[-1]] + [p.next() for _ in range(24)]
+    assert p.stats["holds"] == 25 and all(t.x == held[0].x and t.z == held[0].z and not t.lifting for t in held)
+    ticks += held[1:]
+    ticks.append(p.next())
+    assert p.last.lifting  # hold_max: then it lifts anyway
+    p.observe(0.0, 0.0)
+    ticks += [p.next() for _ in range(100)]
+    check_ticks(ticks)
+
+
+def test_the_stance_time_is_slewed():
+    """A speed change moves the feet's slide speed gradually (the stance time
+    2 % a tick), not at once."""
+    p = Planner(M, "trot", tick=0)
+    for _ in range(100):
+        p.next()
+    before = p.stance_ticks
+    p.set_speed(90)
+    p.next()
+    assert p.stance_ticks == pytest.approx(before / 1.02)
+    for _ in range(100):
+        p.next()
+    assert p.stance_ticks == pytest.approx(p.stance_tgt)
+
+
+def test_the_predicted_attitude_stays_inside_feet_range():
+    """Pitch and roll go out inside FEET's +-30 deg whatever the plan
+    predicts (a bad model, a pose offset): the body refuses a FEET beyond it
+    (BAD_ARG), which would end the walk."""
+    from kilo.planner.walker import pack_feet
+    p = Planner(M, "walk", tick=0)
+    p._lagged = lambda: (45.0, -31.0)
+    t = p.next()
+    assert (t.pitch, t.roll) == (30.0, -30.0)
+    f = P.Feet.unpack(pack_feet(1, replace(t, pitch=45.0, roll=-45.0)))
+    assert (f.pitch, f.roll) == (480, -480)
+
+
+def test_the_lean_is_solved_during_the_swing_before():
+    """The walk's lean for each slot is solved a few units a tick during the
+    swing before it, so no tick carries a whole solve, and in a steady walk
+    no slot waits for it; a change mid-swing is solved again in time."""
+    for name in ("walk", "crawl"):
+        p = Planner(M, name, tick=0)
+        for _ in range(1500):
+            p.next()
+        assert p.stats["waits"] == 0, name
+    p = Planner(M, "walk", tick=0)
+    for i in range(1500):
+        if i % 97 == 0:
+            p.set_speed(5 + (i % 7))
+        p.next()
+    assert p.stats["waits"] < 40
 
 
 def test_the_stop_comes_home_level():

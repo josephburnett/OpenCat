@@ -101,6 +101,10 @@ class BodyClient:
         self._trick_done: list[tuple[float, Any]] = []
         self._upload_lock = threading.RLock()  # one upload sequence on the wire at a time
         self._walker: Any = None
+        # The SET_STREAM divisors (telem, joints, imu_raw) this client last
+        # set (the body's boot defaults until then): a walk changes only the
+        # telemetry rate and puts it back.
+        self.stream_divs: tuple[int, int, int] = (P.TELEMETRY_DEFAULT_DIV, 0, 0)
         link.subscribe("event", self._on_event)
 
     @property
@@ -436,6 +440,7 @@ class BodyClient:
         """SET_STREAM: divisors of the 50 Hz tick (0 = off)."""
         self.link.request("SET_STREAM", {"telem_div": telem_div, "joints_div": joints_div,
                                          "imu_raw_div": imu_raw_div})
+        self.stream_divs = (telem_div, joints_div, imu_raw_div)
 
     def reboot(self) -> None:
         """REBOOT (watchdog restart of the application)."""
