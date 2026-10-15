@@ -72,3 +72,23 @@ Not exercised (C5 slower / C1 faster were not pressed; log shows no
 ## 5. Tuning
 
 None. No spec value changed.
+
+## 6. Can the Pi keep up with a 50 Hz plan stream (2026-10-14 20:57-21:07 PDT)
+
+Kilo unplugged. A 50 Hz Python loop on the Pi 2 B doing four legs of
+IK-style float math per tick, with a thread writing a 200-byte line to the
+SD card 25 times a second (fsync every 10 s), a 20 MB scp to the Pi over the
+Wi-Fi dongle every 30 s, and the daemon running (`~/kilo-logs/tick_load.py`):
+
+| | |
+|---|---|
+| ticks | 30000 over 600 s |
+| lateness, median / 99 % / 99.9 % / max | 0.01 / 0.01 / 3.07 / 9.59 ms |
+| ticks later than 5 ms / 20 ms / 100 ms | 4 / 0 / 0 |
+| work per tick, median / max | 0.18 / 3.45 ms |
+| garbage collections | 5 |
+
+The worst tick was a tenth of the 100 ms lookahead the FEET stream gives
+the body (link.feet_lookahead_ticks). Not covered: real serial traffic on
+the same USB controller as the dongle (Kilo was unplugged), and a longer
+soak.

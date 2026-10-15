@@ -295,8 +295,8 @@ flash and RAM the plan buffer needs; the firmware has 4 bytes of globals
 free today). The firmware becomes a pose player with reflexes and the
 residual loop. Can the Pi keep up: a 50 Hz Python loop on the Pi 2 with
 the daemon running fired 1500 ticks with the latest 0.44 ms late (20:49);
-a 10-minute run under SD-write and Wi-Fi load is in
-docs/p3-hardware-test-results.md. The per-tick work (4 legs of IK plus the
+a 10-minute run under SD-write and Wi-Fi load had its worst tick 9.6 ms
+late, none later than 20 ms (docs/p3-hardware-test-results.md section 6). The per-tick work (4 legs of IK plus the
 mass model) is well under 1 ms; a frame of foot positions plus predicted
 attitude is ~35 bytes, ~1.5 ms on the wire. The 100 ms lookahead in the
 body covers garbage-collector pauses and SD stalls; if Python itself
