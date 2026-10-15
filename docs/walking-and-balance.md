@@ -246,3 +246,64 @@ swing (period 2000, duty 0.85) with the body low and the step 18 mm high
 tips it. That is what the sway (section 4, item 1; merged 405d139, not yet
 flashed) is for. Until it is flashed, crawl and walk are expected to tip;
 the trot is the gait to drive with.
+
+## 8. Measured on the floor, 2026-10-14 (the sway, flashed as 56768228)
+
+Full table in docs/p3-hardware-test-results.md. The short version: the walk
+pattern fell within 2-3 s with the balance on, sway on or off, every time
+(four runs), always with the same growing 3 Hz side-to-side swing; with the
+balance **off** it rocked ±15° and stayed up for the whole 6 s. The trot
+held in every run. So the balance loop is unstable on three feet (the body
+tips about the far diagonal in under 0.1 s, the loop answers 0.25 s later,
+after the body has turned round), and section 4's item 1 as built, a roll
+reference for that loop, cannot work: it asks the unstable loop for more.
+
+## 9. Direction agreed 2026-10-14: the mind plans, the body plays and corrects the residual
+
+Discussed with the owner on the evidence above. Four parts:
+
+1. **A model of the body in the mind.** Masses and where they are (body,
+   battery, leg segments, later the Pi): the centre of mass for any leg
+   configuration. Servo speed under load and lag (assumed 150 ms, never
+   measured). From these, how fast a tip grows (today's traces: 30° in
+   0.2 s) and the lead the servos need. To measure: weight per foot on a
+   kitchen scale, with and without the battery; a servo step test with the
+   IMU recording.
+2. **The mind plans every step through the whole body.** Not "lift a leg
+   and hope": the plan is a path for the centre of mass that stays inside
+   the support that remains, with the body already moving before the lift
+   (the way a person walks: the fall is planned and the next foot is on its
+   way). The mind streams foot positions and the predicted attitude for
+   each 20 ms tick, about five ticks (100 ms) ahead. It replans from the
+   body's reported actual position, never from what it last asked for.
+3. **The body keeps a self-contained correction loop.** Its reference is
+   the predicted attitude for this tick, so it sees only model error. It
+   always moves from where it is toward the next point at a limited rate
+   (no snap). It keeps its own limits that no plan can override: servo
+   slew, fall reflex, the link watchdog (a gap of ~100 ms slows to a stand
+   on the current feet; 500 ms stops the gait as now).
+4. **Error telemetry every tick**: predicted attitude, measured attitude,
+   the correction applied. A steady offset = mass or IMU placement to
+   learn once; a lag between predicted and measured = servo lag, which
+   drifts with battery voltage (track it against batt_mv and adjust the
+   lead); a spike = a bump, a slope, a slipped foot: the body has handled
+   the first 0.1 s, the mind decides whether to carry on, slow down, widen
+   or stop.
+
+Consequence: the gait generator leaves the firmware (which also frees the
+flash and RAM the plan buffer needs; the firmware has 4 bytes of globals
+free today). The firmware becomes a pose player with reflexes and the
+residual loop. Can the Pi keep up: a 50 Hz Python loop on the Pi 2 with
+the daemon running fired 1500 ticks with the latest 0.44 ms late (20:49);
+a 10-minute run under SD-write and Wi-Fi load is in
+docs/p3-hardware-test-results.md. The per-tick work (4 legs of IK plus the
+mass model) is well under 1 ms; a frame of foot positions plus predicted
+attitude is ~35 bytes, ~1.5 ms on the wire. The 100 ms lookahead in the
+body covers garbage-collector pauses and SD stalls; if Python itself
+becomes the limit the planner can be rewritten in Rust (owner).
+
+Not started: the owner asked to discuss before any balance work, and did.
+Next concrete steps, in order: weigh Kilo per foot; servo step test; put
+both into the host plant (which today treats three feet as safe, which is
+why the sway passed there); then the protocol change (streamed poses,
+error telemetry) and the planner.
