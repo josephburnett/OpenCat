@@ -15,7 +15,7 @@ void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok, ui
   b.imu_fault = imu_ok ? 0 : 1;
   balance_init(b.bal);
   kf_init(b.kf);
-  gait_init(b.gait);
+  feet_init(b.feet);
   // Warm boot: the PCA9685 kept driving the servos through our reset; keep
   // exactly that pose until we know which way is up. Cold boot: the servo
   // pose is unknown, so stay limp until the Pi asks.
@@ -25,24 +25,14 @@ void body_init(Body& b, Config* cfg, const int16_t* warm_angles, bool imu_ok, ui
 
 KILO_NOINLINE static void event(Body& b, uint8_t code, int16_t arg) { events_push(b.ev, code, arg, b.tick, b.epoch); }
 
-// The gait ends at once (a reflex took the legs, LIMP, or a stop before it
-// started): no ramp, the new owner starts from the current output. One
-// GAIT_STOPPED per gait.
-static void gait_end(Body& b) {
-  Gait& g = b.gait;
-  if (!g.state && !g.run) return;
-  g.state = GS_OFF;
-  g.run = 0;
-  event(b, EV_GAIT_STOPPED, 0);
-}
-
-// Stop the gait goal: through the ramp if it runs, at once if it has not
-// started yet.
-static void gait_stop(Body& b) {
-  if (b.gait.state)
-    b.gait.run = 0;
-  else
-    gait_end(b);
+// The FEET stream ends (a posture, an epoch bump, a reflex: arg 0; the
+// settle after an underrun: arg 1). IDLE takes the legs in its posture
+// (STANCE unless a posture was set) from the current output (the arbiter's
+// crossfade). One GAIT_STOPPED per stream.
+static void gait_end(Body& b, int16_t arg) {
+  if (!b.feet.state) return;
+  feet_stop(b.feet);
+  event(b, EV_GAIT_STOPPED, arg);
 }
 
 // The trick has stopped playing (or is stopped now): hand back to IDLE.
@@ -65,16 +55,16 @@ void body_trick_end(Body& b, uint8_t reason, uint8_t ticks) {
 void body_epoch_bump(Body& b, uint8_t trick_reason) {
   // A new epoch makes every goal the Pi sent before this moment stale, so
   // a goal re-sent from before a fall or a link loss cannot restart motion.
-  // Latched motion goals stop here: the head hold, the trick, the gait
-  // (it ramps down and lands; a reflex taking the legs cuts it short) and
-  // the body pose (it slews back to neutral). The IDLE posture is not a
+  // Latched motion goals stop here: the head hold, the trick, the FEET
+  // stream and the body pose (it slews back to neutral). The IDLE posture is not a
   // motion goal, but its balance flag is: the Pi re-asserts it with the new
-  // epoch. The trick's TRICK_DONE carries the new epoch.
+  // epoch. The trick's TRICK_DONE and the stream's GAIT_STOPPED carry the
+  // new epoch.
   b.epoch++;
-  Gait& g = b.gait;
-  gait_stop(b);  // (doc §3g: the watchdog's REST waits for the ramp-down)
-  g.pose_g[0] = g.pose_g[1] = 0;
-  g.dh_g = g.xs_g = 0;
+  Feet& f = b.feet;
+  gait_end(b, 0);  // the FEET stream: IDLE (STANCE) takes the legs where they are
+  f.pose_g[0] = f.pose_g[1] = 0;
+  f.dh_g = f.xs_g = 0;
   b.balance_req = 0;
   // SET_BALANCE's enable is a goal too (spec: goals go stale at a bump); a
   // `kilo balance on` client that died must not leave every later STAND
@@ -237,12 +227,12 @@ static void watchdog_step(Body& b) {
   if (w.since < 0xFFFF) w.since++;
   if (w.stage == 0 && w.since >= WD_STOP_TICKS) {
     w.stage = 1;
-    body_epoch_bump(b);  // also stops gait/trick/head from P1 on
+    body_epoch_bump(b);  // also stops the FEET stream, a trick, the head hold
     event(b, EV_WATCHDOG, 0);
   }
-  // Stage 2 also waits for the gait's ramp-down and landing (stage 1's
-  // epoch bump stopped it), so Kilo does not lie down mid-stride.
-  if (w.stage == 1 && w.since >= WD_REST_TICKS && !body_gait_running(b)) {
+  // (Stage 1's epoch bump ended a FEET stream; the queue had run dry and
+  // settled long before: link.feet_hold_ticks.)
+  if (w.stage == 1 && w.since >= WD_REST_TICKS) {
     w.stage = 2;
     rest_then_limp(b, RH_WATCHDOG, &w.limp_timer, WD_LIMP_TICKS);
   }
@@ -339,31 +329,20 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   // joints preempts it.
   if (b.kf.run && b.arb.reflex_active) body_trick_end(b, KF_END_PREEMPTED, 0);
   if (kf_step(b.kf)) trick_finish(b, KF_END_DONE, 0);
-  // The gait (doc §3d). A reflex ends it at once. A trick that owns a leg
-  // pauses it (see below). A run goal waits for IDLE STANCE (moving there
-  // first) to settle, then starts at phi = 0. When the stop has landed,
-  // IDLE takes the legs in STANCE at the same height (whatever posture was
-  // set underneath meanwhile), then GAIT_STOPPED; a pattern change starts
-  // again from there.
-  Gait& g = b.gait;
-  bool trick_legs = b.kf.run && (b.kf.mask & 0xFF00u);
-  bool legs_taken = b.arb.reflex_active || trick_legs;
-  if (b.arb.reflex_active) gait_end(b);
-  if (gait_step(g)) {
-    arbiter_set_idle(b.arb, POSTURE_STANCE, 0);
-    if (!g.run) event(b, EV_GAIT_STOPPED, 0);
+  // The FEET player (doc §3d, core/feet.h). A reflex ends the stream at
+  // once. The pose for this tick (or the held one), the underrun's event,
+  // and the hand-over to IDLE STANCE when the settle has every foot down.
+  Feet& f = b.feet;
+  if (b.arb.reflex_active) gait_end(b, 0);
+  feet_pose_step(f);
+  uint8_t fev = feet_step(f, b.tick);
+  if (fev & FEET_EV_UNDERRUN) event(b, EV_FEET_UNDERRUN, (int16_t)(uint16_t)(b.tick - f.rx_tick));
+  if (fev & FEET_EV_SETTLED) {
+    feet_stance_default(f);
+    gait_end(b, 1);
   }
   uint8_t p = arbiter_idle_posture(b.arb);
-  if (!g.state && g.run && !legs_taken) {
-    if (p != POSTURE_STANCE) {
-      arbiter_set_idle(b.arb, POSTURE_STANCE, 0);
-      gait_stance_default(g);
-      p = POSTURE_STANCE;
-    } else if (!arbiter_idle_moving(b.arb)) {
-      gait_start(g);
-    }
-  }
-  bool gait_on = g.state != GS_OFF;
+  bool gait_on = feet_playing(f);
   // The balance (doc §3c layer 2, §3f). Joint-space for IDLE SIT and STAND
   // once their move has settled; never under REFLEX (which also covers the
   // warm-boot hold) and never in LIMP, CALIB, ZERO or REST (lying on the
@@ -376,69 +355,67 @@ void body_tick(Body& b, const TickIn& in, uint16_t counts[JOINT_COUNT]) {
   // against the trick's expected attitude (doc §3e); between balanced
   // frames the corrections decay through the filter and slew.
   //
-  // The gait and IDLE STANCE balance geometrically (§3f): the corrections
-  // tilt the body through the IK's pose terms instead of being added to
-  // joints. The controller sees the ground slope rather than the body's
-  // tilt: what the body would read with no correction and no commanded
-  // pose (measured - corr - pose). That removes the correction's own effect
-  // from the loop, so corr = -Kp * slope: at Kp ~1 the body ends level to
-  // within the dead band whatever the slope (H13), with no integrator to
-  // wind up (corr is bounded by the clamp), and the loop stays stable for
-  // any leg response between 0 and 2x the model's. Leaving it for a
-  // joint-space owner zeroes the corrections (they mean something else
-  // there).
+  // The FEET stream and IDLE STANCE balance geometrically (§3f): the
+  // corrections tilt the body through the IK's leg lengths instead of being
+  // added to joints. The controller sees the residual: what the body reads
+  // less the correction's own effect and the attitude the legs are told to
+  // give it (measured - corr - ref, ref = feet_ref: the pose, plus the FEET
+  // prediction for this tick while the stream plays). So corr = -Kp *
+  // residual: on a slope at Kp ~1 the body ends at the reference to within
+  // the dead band, with no integrator to wind up (corr is bounded by the
+  // clamp), and the loop stays stable for any leg response between 0 and
+  // 2x the model's. Leaving it for a joint-space owner zeroes the
+  // corrections (they mean something else there).
   //
-  // Stance-aware under the gait (docs/walking-and-balance.md §4, §5 items
-  // 4-5). The reference is the plan: the gait's planned sway is subtracted
-  // too (slope = measured - corr - pose - plan), so the body ends at pose +
-  // plan + slope (1 - Kp) and the sway is the target, not a disturbance.
-  // (g.plan_* and g.down are the last gait_legs()'s: the tick whose
-  // commands the measured attitude answers.) On fewer than three feet the
+  // On fewer than three support feet (this tick's FEET support bits) the
   // body pivots on a diagonal and what it reads is the fall (90 ms time
   // constant), not the slope; the loop acts 250 ms later and would push the
   // wrong way. So the corrections are held there, neither updated nor
   // decayed, and for BAL_HOLD_TICKS after the third foot lands (the body
   // still settles from the rock). bal.hold counts that down.
   bool geo = !b.kf.run && !b.arb.reflex_active && (gait_on || (p == POSTURE_STANCE && !arbiter_idle_moving(b.arb)));
-  if (g.geo && !geo) balance_reset(b.bal);
-  g.geo = geo;
+  if (f.geo && !geo) balance_reset(b.bal);
+  f.geo = geo;
+  int16_t ref_r = 0, ref_p = 0;
   if (b.kf.run && !b.arb.reflex_active) {
-    balance_step(b.bal, kf_balance(b.kf) && !b.imu_fault, b.att, kf_ref_roll(b.kf), kf_ref_pitch(b.kf));
+    ref_r = kf_ref_roll(b.kf);
+    ref_p = kf_ref_pitch(b.kf);
+    balance_step(b.bal, kf_balance(b.kf) && !b.imu_fault, b.att, ref_r, ref_p);
   } else if (geo) {
-    bool want = (gait_on ? (g.flags & KILO_GAIT_FLAGS_BALANCE) : (b.balance_req || b.bal.enable)) && !b.imu_fault;
-    if (gait_feet_down(g) < 3)
+    bool want = (b.balance_req || b.bal.enable) && !b.imu_fault;
+    uint8_t sup = gait_on ? feet_support(f) : 0xF;
+    uint8_t n = (uint8_t)((sup & 1) + ((sup >> 1) & 1) + ((sup >> 2) & 1) + ((sup >> 3) & 1));
+    if (n < 3)
       b.bal.hold = BAL_HOLD_TICKS + 1;
     else if (b.bal.hold)
       b.bal.hold--;
+    ref_p = feet_ref(f, 0);
+    ref_r = feet_ref(f, 1);
     if (want && b.bal.hold) {
       b.bal.active = 1;
     } else {
-      Attitude slope = b.att;
-      slope.pitch = (int16_t)(slope.pitch - b.bal.ax[BAL_PITCH].corr - g.pose[0] - g.plan_pitch);
-      slope.roll = (int16_t)(slope.roll - b.bal.ax[BAL_ROLL].corr - g.pose[1] - g.plan_roll);
-      balance_step(b.bal, want, slope, 0, 0);
+      Attitude res = b.att;
+      res.pitch = (int16_t)(res.pitch - b.bal.ax[BAL_PITCH].corr - ref_p);
+      res.roll = (int16_t)(res.roll - b.bal.ax[BAL_ROLL].corr - ref_r);
+      balance_step(b.bal, want, res, 0, 0);
     }
   } else if (b.arb.reflex_active || arbiter_idle_moving(b.arb) || !(p == POSTURE_SIT || p == POSTURE_STAND)) {
     balance_reset(b.bal);
   } else {
     bool want = (b.balance_req || b.bal.enable) && !b.imu_fault;
-    balance_step(b.bal, want, b.att, posture_roll(p), posture_pitch(p));
+    ref_r = posture_roll(p);
+    ref_p = posture_pitch(p);
+    balance_step(b.bal, want, b.att, ref_r, ref_p);
   }
-  // The legs' IK angles for this tick (the gait's feet, or STANCE's).
-  // The early-touchdown reflex (flag CATCH) reads the body rates; not with
-  // a faulty IMU.
-  if (gait_on || p == POSTURE_STANCE)
-    gait_legs(g, b.bal.ax[BAL_ROLL].corr, b.bal.ax[BAL_PITCH].corr, b.imu_fault ? nullptr : &b.att);
-  // Paused under a trick: the phase runs on, but the stride starts again
-  // from 0 and no foot lifts until it has been in stance, so when the trick
-  // hands the legs back (crossfading) every foot is down under its shoulder,
-  // STANCE's pose, and the stride ramps in again.
-  if (trick_legs) {
-    g.amp = 0;
-    g.armed = 0;
-  }
+  // TELEMETRY ref_*: the reference while the controller runs, else 0.
+  b.bal.ref[BAL_ROLL] = b.bal.active ? ref_r : 0;
+  b.bal.ref[BAL_PITCH] = b.bal.active ? ref_p : 0;
+  // The legs' IK angles for this tick (the FEET pose, or STANCE's).
+  int16_t legs[8];
+  bool ik = gait_on || p == POSTURE_STANCE;
+  if (ik) feet_legs(f, b.bal.ax[BAL_ROLL].corr, b.bal.ax[BAL_PITCH].corr, legs);
   // Steps 5-6: owners, crossfade, layers, limits, slew, counts.
-  arbiter_run(b.arb, b.cfg->img.cal, counts, geo ? 0 : &b.bal, &b.kf, &g);
+  arbiter_run(b.arb, b.cfg->img.cal, counts, geo ? 0 : &b.bal, &b.kf, ik ? legs : 0, gait_on);
 }
 
 GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ticks, uint8_t flags) {
@@ -456,13 +433,11 @@ GoalResult body_goal_posture(Body& b, uint8_t epoch, uint8_t posture, uint8_t ti
   if (!safe && b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
   if ((posture == POSTURE_STAND || posture == POSTURE_STANCE) && b.cfg->state == CFG_DEFAULTED)
     return GOAL_UNCALIBRATED;
-  // While the gait runs a posture only changes IDLE underneath (the stop
-  // hands the legs to STANCE, then a refreshed posture goal moves on); LIMP
-  // ends it at once. STANCE from elsewhere starts at the default height
-  // (not under a running gait, which owns the height).
-  if (posture == POSTURE_LIMP) gait_end(b);
-  if (posture == POSTURE_STANCE && arbiter_idle_posture(b.arb) != POSTURE_STANCE && !body_gait_running(b))
-    gait_stance_default(b.gait);
+  // A posture ends a FEET stream (the mind gave the legs back): IDLE takes
+  // them from where they are. STANCE from elsewhere starts at the default
+  // height.
+  gait_end(b, 0);
+  if (posture == POSTURE_STANCE && arbiter_idle_posture(b.arb) != POSTURE_STANCE) feet_stance_default(b.feet);
   b.balance_req = flags & 1;
   if (b.holder == RH_WARM_HOLD) release_reflex(b, RH_WARM_HOLD);  // the Pi takes over
   // LIMP is the Pi's emergency stop: it ends a trick at once. Any other
@@ -526,18 +501,20 @@ GoalResult body_goal_head(Body& b, const uint8_t* p) {
   return GOAL_OK;
 }
 
-GoalResult body_goal_gait(Body& b, const uint8_t* p) {
-  if (gait_check(p) != GOAL_OK) return GOAL_BAD_ARG;
-  if (!p[1]) {  // stopping is never stale
-    gait_stop(b);
-    return GOAL_OK;
-  }
+GoalResult body_feet(Body& b, const uint8_t* p) {
+  if (feet_check(p) != GOAL_OK) return GOAL_BAD_ARG;
   if (p[0] != b.epoch) return GOAL_STALE;
   if (body_fallen(b)) return GOAL_FALLEN;
   if (b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
   if (b.cfg->state == CFG_DEFAULTED) return GOAL_UNCALIBRATED;
   if (b.holder == RH_WARM_HOLD) release_reflex(b, RH_WARM_HOLD);  // the Pi takes over
-  gait_goal(b.gait, p);
+  if (!b.feet.state && arbiter_idle_posture(b.arb) != POSTURE_STANCE) {
+    // The stream's IDLE posture: STAND's head and tail now, STANCE's legs
+    // when the stream ends.
+    arbiter_set_idle(b.arb, POSTURE_STANCE, 0);
+    feet_stance_default(b.feet);
+  }
+  feet_push(b.feet, p, b.tick);  // (late or too far ahead: dropped and counted)
   return GOAL_OK;
 }
 
@@ -545,11 +522,18 @@ GoalResult body_goal_pose(Body& b, const uint8_t* p) {
   if (p[0] != b.epoch) return GOAL_STALE;
   if (body_fallen(b)) return GOAL_FALLEN;
   if (b.batt.level >= BATT_LOW) return GOAL_LOW_BATT;
-  gait_pose_goal(b.gait, p + 1);
+  feet_pose_goal(b.feet, p + 1);
   return GOAL_OK;
 }
 
 void body_trick_stop(Body& b, uint8_t ticks) { body_trick_end(b, KF_END_STOPPED, ticks); }
+
+uint8_t body_support(const Body& b) {
+  if (feet_playing(b.feet)) return feet_support(b.feet);
+  uint8_t p = arbiter_idle_posture(b.arb);
+  if (b.arb.reflex_active || b.kf.run || !(p == POSTURE_SIT || p == POSTURE_STAND || p == POSTURE_STANCE)) return 0;
+  return 0xF;
+}
 
 uint8_t body_mode(const Body& b) {
   if (b.batt.level >= BATT_LOW) return KILO_MODE_LOW_BATT;

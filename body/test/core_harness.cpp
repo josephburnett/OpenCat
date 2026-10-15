@@ -200,9 +200,9 @@ static void dump(void) {
   std::printf(" head_ttl=%u", a.head_ttl);
   std::printf(" wd_armed=%u wd_stage=%u wd_since=%u wd_limp_timer=%u", b.wd.armed, b.wd.stage, b.wd.since,
               b.wd.limp_timer);
-  const Gait& g = b.gait;
-  std::printf(" gait_state=%u gait_run=%u gait_pattern=%u gait_phase=%u gait_amp=%u gait_flags=%u", g.state, g.run,
-              g.pat, g.phi, g.amp, g.flags);
+  const Feet& g = b.feet;
+  std::printf(" feet_state=%u feet_queued=%u feet_support=%u feet_late=%u feet_underruns=%u", g.state,
+              feet_queued(g), feet_support(g), g.late, g.underruns);
   int16_t pose[4] = {g.pose[0], g.pose[1], g.dh, g.xs};
   list("pose", pose, 4);
   const Fall& f = b.fall;
