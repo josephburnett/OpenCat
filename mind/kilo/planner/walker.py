@@ -78,6 +78,14 @@ class WalkError(LinkError):
     pass
 
 
+def stop_timeout(period_ms: float | None = None) -> float:
+    """How long a planned stop may take: the stride's ramp-down, a cycle to
+    step each leg home, the level-out and a margin (default: the slowest
+    pattern's cycle)."""
+    period = period_ms or max(x.period_ms for x in pat.PATTERNS.values())
+    return 2 * period / 1000.0 + 1.5
+
+
 class BodyClock:
     """The body's tick, estimated from TELEMETRY arrival times."""
 
@@ -354,11 +362,6 @@ class Walker:
     def wait(self, timeout: float | None = None) -> bool:
         return self._done.wait(timeout)
 
-    def stop_timeout(self) -> float:
-        """How long a planned stop may take: a cycle to step each leg home, the level-out and a margin."""
-        p = self.planner
-        period = (p.timing().period_ms if p is not None else max(x.period_ms for x in pat.PATTERNS.values()))
-        return 2 * period / 1000.0 + 1.5
 
     # ---- setup and teardown -------------------------------------------------------------------------
     def _setup(self, balance: bool) -> None:

@@ -10,11 +10,12 @@ Tricks (P1, §3e): ``upload_trick`` (cached by (trick_id, crc)),
 ``await play(name_or_trick, mirror, speed)`` which resolves on EVENT
 TRICK_DONE, and ``stop_trick``.
 
-Gait and body pose (P2, §3d): ``walk(...)`` (SET_GAIT run=1 with the
-per-pattern defaults), ``stop_walk()`` (run=0, cleared by EVENT
-GAIT_STOPPED), ``wait_gait_stopped`` / ``await walk_until_stopped``,
-``gait_state``, ``load_geometry`` (LEG_L1_MM/LEG_L2_MM for the default body
-height), ``pose(...)`` / ``release_pose()`` (SET_BODY_POSE).
+Walking (protocol 2.0, §3d): ``walk(direction, pattern, speed_mm_s,
+balance)`` starts or steers a walk, ``stop_walk(wait_s)`` stops it,
+``walk_status()`` reports it; the walk itself is the planner's
+(``client.walker``, kilo.planner.walker: the steps planned in the mind and
+streamed as FEET). Body pose: ``pose(...)`` / ``release_pose()``
+(SET_BODY_POSE).
 """
 
 from __future__ import annotations
@@ -54,156 +55,6 @@ BALANCE_MAX_DEG = P.BALANCE_LIMIT_DEG                  # dead band and clamp lim
 HEAD_NOT_HELD = P.HEAD_NOT_HELD
 HEAD_MAX_DEG = P.HEAD_MAX_DEG
 HEAD_SPEED_DPS = P.HEAD_SPEED_DPS  # default look() slew, °/s (0 = only the body's 500°/s safety slew)
-
-# SET_GAIT defaults per pattern (spec [gait_patterns.*], docs/architecture.md
-# §3d; estimates to be tuned on Kilo): period ms, duty /256, stride mm, step
-# height mm, and the body height as a fraction of L1 + L2 (params LEG_L1_MM +
-# LEG_L2_MM): the spec's body_h_256 / 256, the body's own default.
-GAIT_DEFAULTS: dict[str, dict[str, float]] = {
-    d.name.lower(): {"period_ms": d.period_ms, "duty": d.duty, "stride_mm": d.stride_mm,
-                     "step_h_mm": d.step_h_mm, "body_h_frac": d.body_h_256 / 256}
-    for d in P.GAIT_PATTERN_DEFAULTS.values()
-}
-GAIT_PATTERN_CHOICES = tuple(consts.GAIT_PATTERNS)  # walk, trot, crawl (spec enum gait_pattern)
-# SET_GAIT flag bits by the protocol minor that introduced them. A body
-# reporting an older minor in HELLO refuses unknown bits (BAD_ARG), so walk()
-# drops them for it: the mind can be updated before the body is flashed and
-# still walk, without the newer features (gait_flags_for()).
-GAIT_FLAG_SINCE_MINOR: dict[str, int] = {"SWAY": 5, "CATCH": 5, "PLACE": 5}
-
-
-def gait_flags_for(flags: int, proto_minor: int | None) -> int:
-    """``flags`` with the bits the body's protocol minor does not know cleared
-    (None: unknown body, all bits kept)."""
-    if proto_minor is None:
-        return flags
-    for name, since in GAIT_FLAG_SINCE_MINOR.items():
-        if proto_minor < since:
-            flags &= ~int(getattr(P.GaitFlags, name))
-    return flags
-DEFAULT_PATTERN = "trot"
-DEFAULT_TURN_MM = 20     # `kilo walk left|right` and the remote's turn keys (turn in place)
-GAIT_STOP_MARGIN_S = 1.5  # wait_gait_stopped(): one period of ramp-down, the hand-over, and this
-WALK_DIRECTIONS = ("forward", "back", "backward", "left", "right", "march")
-
-
-# Speed (docs/walking-and-balance.md §2, §3): the swing time is fixed and speed
-# comes from the stride and the stance time. On a diagonal pair the body tips
-# with a 90 ms time constant, so the trot's time on two feet must stay short
-# whatever the speed; a longer period with the same duty would lengthen it.
-#   swing_ms   per pattern, the spec default's (1 - duty) x period: trot 150 ms,
-#              walk 500, crawl 297. Walk and crawl keep three feet down, and
-#              their higher steps (15, 18 mm) need the longer swing to stay
-#              under the 10 deg/tick safety slew; the trot's 25 mm stride in
-#              150 ms is 9.6 deg/tick, so its swing must not get shorter.
-#   stance_ms  = stride_mm / speed, period = swing + stance, duty = stance / period.
-# Slower than the longest stance allows (duty 230/256, period 2000 ms), the
-# stride shrinks (down to GAIT_STRIDE_MIN_MM) instead; faster than the default
-# stride at the shortest stance allows, the speed is capped. The shortest
-# stance is set by GAIT_DUTY_MIN: the trot keeps four-foot phases (duty >= 0.65),
-# walk and crawl three feet down (duty >= 0.75). The spec defaults are each
-# pattern's default speed (trot 25 mm / 450 ms = 56 mm/s, walk 20, crawl 15).
-_GAIT_RANGES = consts.field_ranges("SET_GAIT")
-# trot 166 (0.65), not 154: the stance-aware balance only runs on 3-4 feet and
-# holds 2 ticks after a pair lands, so the trot's four-foot phase (stance -
-# swing)/2 must stay above 3 ticks (60 ms): at 166 it is 63 ms (period 426 ms,
-# top speed about 90 mm/s); at 154 it was 38 ms and the balance stayed frozen.
-GAIT_DUTY_MIN = {"walk": 192, "trot": 166, "crawl": 192}  # /256: 0.75, 0.65, 0.75
-GAIT_STRIDE_MIN_MM = 8
-
-
-def gait_swing_ms(pattern: str | int) -> float:
-    """The pattern's fixed swing time: its spec default (1 - duty) x period."""
-    d = GAIT_DEFAULTS[BodyClient.pattern_name(pattern)]
-    return d["period_ms"] * (256 - d["duty"]) / 256
-
-
-def gait_default_speed(pattern: str | int) -> float:
-    """The speed (mm/s) that reproduces the pattern's spec defaults."""
-    d = GAIT_DEFAULTS[BodyClient.pattern_name(pattern)]
-    return gait_speed(d["period_ms"], d["duty"], d["stride_mm"])
-
-
-def gait_speed(period_ms: float, duty: float, stride_mm: float) -> float:
-    """Ground speed (mm/s) of a gait: |stride| over the stance time."""
-    return abs(stride_mm) / (period_ms * duty / 256) * 1000
-
-
-def _stance_limits(name: str, swing_ms: float) -> tuple[float, float]:
-    """(shortest, longest) stance in ms for a swing: the duty and period ranges."""
-    p_lo, p_hi = _GAIT_RANGES["period_ms"]
-    d_lo, d_hi = max(GAIT_DUTY_MIN[name], _GAIT_RANGES["duty"][0]), _GAIT_RANGES["duty"][1]
-    if not 0 < swing_ms < p_hi:
-        raise ValueError(f"swing_ms must be between 0 and {p_hi} (got {swing_ms})")
-    lo = max(swing_ms * d_lo / (256 - d_lo), p_lo - swing_ms)
-    hi = min(swing_ms * d_hi / (256 - d_hi), p_hi - swing_ms)
-    if lo > hi:
-        raise ValueError(f"no stance time fits a {swing_ms:g} ms swing for {name}")
-    return lo, hi
-
-
-def gait_speed_range(pattern: str | int, swing_ms: float | None = None) -> tuple[float, float]:
-    """(slowest, fastest) speed in mm/s that gait_timing() gives."""
-    name = BodyClient.pattern_name(pattern)
-    lo, hi = _stance_limits(name, gait_swing_ms(name) if swing_ms is None else swing_ms)
-    return GAIT_STRIDE_MIN_MM / hi * 1000, GAIT_DEFAULTS[name]["stride_mm"] / lo * 1000
-
-
-def gait_timing(pattern: str | int, speed_mm_s: float | None = None,
-                swing_ms: float | None = None) -> dict[str, int]:
-    """SET_GAIT period_ms, duty and stride_mm (a magnitude) for walking at
-    ``speed_mm_s`` (default: the pattern's default speed) with a fixed swing
-    time (default: the pattern's, gait_swing_ms()). Outside
-    gait_speed_range() the speed is clamped; every output is within the
-    SET_GAIT ranges."""
-    name = BodyClient.pattern_name(pattern)
-    swing = gait_swing_ms(name) if swing_ms is None else float(swing_ms)
-    stance_lo, stance_hi = _stance_limits(name, swing)
-    stride_def = GAIT_DEFAULTS[name]["stride_mm"]
-    v = gait_default_speed(name) if speed_mm_s is None else abs(float(speed_mm_s))
-    stance = stride_def / v * 1000 if v > 0 else float("inf")
-    stride = float(stride_def)
-    if stance > stance_hi:  # slow: the longest stance, and a shorter stride
-        stance = stance_hi
-        stride = max(GAIT_STRIDE_MIN_MM, v * stance_hi / 1000)
-    stance = max(stance, stance_lo)  # fast: the shortest stance caps the speed
-    period = swing + stance
-    d_lo, d_hi = max(GAIT_DUTY_MIN[name], _GAIT_RANGES["duty"][0]), _GAIT_RANGES["duty"][1]
-    p_lo, p_hi = _GAIT_RANGES["period_ms"]
-    return {"period_ms": min(max(int(round(period)), p_lo), p_hi),
-            "duty": min(max(int(round(256 * stance / period)), d_lo), d_hi),
-            "stride_mm": int(round(stride))}
-
-
-def walk_args(direction: str, pattern: str = DEFAULT_PATTERN, stride_mm: float | None = None,
-              turn_mm: float | None = None, speed_mm_s: float | None = None) -> dict[str, Any]:
-    """walk() arguments for a direction (`kilo walk`, the IR remote).
-
-    forward / back(ward): the stride (default: the pattern's) forward or
-    backward, ``turn_mm`` as given (signed, + = left: an arc), default 0.
-    left / right: turn in place by ``turn_mm`` (magnitude, default
-    DEFAULT_TURN_MM) to that side; a ``stride_mm`` makes it an arc.
-    march: stride 0, turn 0 (stepping in place).
-
-    With ``speed_mm_s`` the result also has ``period_ms`` and ``duty`` from
-    gait_timing(), and forward / back take its stride unless ``stride_mm``
-    is given (turning and marching keep their strides, at that cadence)."""
-    d = direction.lower()
-    if d not in WALK_DIRECTIONS:
-        raise ValueError(f"unknown direction {direction!r} (known: {', '.join(WALK_DIRECTIONS)})")
-    pattern = BodyClient.pattern_name(pattern)
-    timing = None if speed_mm_s is None else gait_timing(pattern, speed_mm_s)
-    extra = {} if timing is None else {"period_ms": timing["period_ms"], "duty": timing["duty"]}
-    if d in ("forward", "back", "backward"):
-        if stride_mm is None:
-            stride_mm = GAIT_DEFAULTS[pattern]["stride_mm"] if timing is None else timing["stride_mm"]
-        s = abs(stride_mm)
-        return {"pattern": pattern, "stride_mm": s if d == "forward" else -s, "turn_mm": turn_mm or 0, **extra}
-    if d in ("left", "right"):
-        t = abs(DEFAULT_TURN_MM if turn_mm is None else turn_mm)
-        return {"pattern": pattern, "stride_mm": stride_mm or 0, "turn_mm": t if d == "left" else -t, **extra}
-    return {"pattern": pattern, "stride_mm": 0, "turn_mm": 0, **extra}
-
 
 # Tricks: TRICK_PLAY speed_q6 range (0.25x .. 3.98x) and the play() timeout margin.
 SPEED_MIN, SPEED_MAX = 16 / 64, 255 / 64
@@ -249,15 +100,7 @@ class BodyClient:
         self._trick_lock = threading.Lock()
         self._trick_done: list[tuple[float, Any]] = []
         self._upload_lock = threading.RLock()  # one upload sequence on the wire at a time
-        # Gait (P2): EVENT GAIT_STOPPED seen, the last walk's wire fields (a
-        # stop repeats them with run=0), and the leg lengths for the default
-        # body height: the spec defaults until load_geometry() read the body's
-        # params (None: not read on this boot of the body).
-        self._gait_stopped: list[tuple[float, Any]] = []
-        self._gait_fields: dict[str, int] | None = None
-        self.leg_mm: tuple[int, int] = (consts.PARAMS_BY_NAME["LEG_L1_MM"].default,
-                                        consts.PARAMS_BY_NAME["LEG_L2_MM"].default)
-        self._geometry_reboots: int | None = None
+        self._walker: Any = None
         link.subscribe("event", self._on_event)
 
     @property
@@ -308,8 +151,9 @@ class BodyClient:
                 raise LinkTimeout("HELLO received but no telemetry")
         if link.state.proto_ok is False:
             raise ProtocolMismatch(
-                f"body protocol {link.state.hello.proto_major}, mind expects "
-                f"{link.messages.PROTO_MAJOR}: flash the body (kilo flash)")
+                f"the body speaks protocol {link.state.hello.proto_major}, this mind needs "
+                f"{link.messages.PROTO_MAJOR} (the mind plans the steps and streams FEET): flash the body "
+                f"with this checkout's firmware (kilo flash)")
         return link.state.hello
 
     def _check_drivable(self) -> None:
@@ -416,7 +260,47 @@ class BodyClient:
         self.link.send("SET_HEAD", epoch=self.state.epoch or 0, mode=int(P.HeadMode.RELEASE), pan=0, tilt=0,
                        tail=0, max_speed_dps=0)
 
-    # ---- gait and body pose (goals; docs §3d, P2) -------------------------------------
+    # ---- walking (the planner's FEET stream; docs §3d) and the body pose ---------------------
+    @property
+    def walker(self) -> Any:
+        """The kilo.planner.walker.Walker of this client (made on first use)."""
+        if self._walker is None:
+            from kilo.planner.walker import Walker
+
+            self._walker = Walker(self)
+        return self._walker
+
+    def walk(self, direction: str = "forward", pattern: str = "trot", speed_mm_s: float | None = None,
+             balance: bool = True) -> dict[str, Any]:
+        """Walk ``direction`` (forward, back, left, right: turn in place,
+        march: in place) with ``pattern`` (walk, trot, crawl) at
+        ``speed_mm_s`` (default: the pattern's; kilo.planner.patterns). While
+        walking, changes the walk at once (a pattern at the next four-foot
+        phase). ``balance=False`` turns the body's balance off for this walk
+        (restored after). Blocks about 0.6 s on a start (the STANCE
+        posture). Returns the walk's status (Walker.status()). ValueError for
+        an unknown pattern or direction; WalkError if the body cannot walk."""
+        self._check_drivable()
+        return self.walker.start(pattern, direction, speed_mm_s, balance)
+
+    def stop_walk(self, wait_s: float | None = None) -> bool | None:
+        """The planned stop (each leg steps home, the body levels, then the
+        STANCE posture). Without ``wait_s`` returns None at once; with it,
+        whether the walk ended within ``wait_s``."""
+        if self._walker is None:
+            return True if wait_s is not None else None
+        return self._walker.stop(wait_s)
+
+    def walk_status(self) -> dict[str, Any] | None:
+        """The walk (pattern, direction, speed, what the stream did, the
+        model's error estimates), or how the last one ended; None if none."""
+        return None if self._walker is None else self._walker.status()
+
+    def walking(self) -> bool:
+        """The body reports GAIT (mode GAIT or the GAIT flag)."""
+        st = self.state
+        return st.mode == "GAIT" or "gait" in st.flags
+
     @staticmethod
     def _check_ranges(name: str, fields: dict[str, int]) -> None:
         """Client-side BAD_ARG: every field within the spec range (or its wire type's)."""
@@ -426,201 +310,13 @@ class BodyClient:
             if not lo <= v <= hi:
                 raise ValueError(f"{name} {k} must be {lo}..{hi} (got {v})")
 
-    def load_geometry(self) -> tuple[int, int]:
-        """Read LEG_L1_MM and LEG_L2_MM from the body (PARAM_GET), once per
-        boot of the body; walk() derives the default body height from them.
-        Keeps the spec defaults if the body cannot answer."""
-        reboots = self.state.reboots
-        if self._geometry_reboots != reboots:
-            try:
-                self.leg_mm = (int(self.param_get("LEG_L1_MM").value), int(self.param_get("LEG_L2_MM").value))
-                self._geometry_reboots = reboots
-            except LinkError:
-                pass
-        return self.leg_mm
-
-    @staticmethod
-    def pattern_name(pattern: str | int) -> str:
-        if isinstance(pattern, str):
-            name = pattern.lower()
-            if name not in consts.GAIT_PATTERNS:
-                raise ValueError(f"unknown gait pattern {pattern!r} (known: {', '.join(GAIT_PATTERN_CHOICES)})")
-            return name
-        try:
-            return P.GaitPattern(int(pattern)).name.lower()
-        except ValueError:
-            raise ValueError(f"unknown gait pattern {pattern!r}") from None
-
-    def gait_fields(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = DEFAULT_PATTERN,
-                    period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
-                    body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
-                    balance: bool = True, run: bool = True, sway: bool | None = None,
-                    catch: bool = True, place: bool = False) -> dict[str, int]:
-        """SET_GAIT's wire fields (no epoch) with the §3d defaults of ``pattern``
-        for every field left None. ``sway`` None: on for walk and crawl (one
-        leg at a time: the body leans toward the three feet that stay down),
-        off for the trot (its diagonal pairs cancel: no sway either way).
-        ``catch``: the early-touchdown reflex (a swinging leg lands at once
-        when the body tips toward it), on for every pattern. ``place``:
-        forward placement, off by default until a floor run shows it helps
-        (the host plant could not: three or four feet stop a shove before any
-        leg lifts; docs/walking-and-balance.md): a lifting leg lands ahead or behind by the pitch
-        rate, the capture point), on for every pattern.
-        ValueError outside the spec ranges."""
-        name = self.pattern_name(pattern)
-        d = GAIT_DEFAULTS[name]
-        if body_h_mm is None:
-            body_h_mm = d["body_h_frac"] * sum(self.leg_mm)
-        F = P.GaitFlags
-        if sway is None:
-            sway = name in ("walk", "crawl")
-        fields = {"run": 1 if run else 0, "pattern": consts.GAIT_PATTERNS[name],
-                  "period_ms": int(round(d["period_ms"] if period_ms is None else period_ms)),
-                  "duty": int(round(d["duty"] if duty is None else duty)),
-                  "stride_mm": int(round(d["stride_mm"] if stride_mm is None else stride_mm)),
-                  "turn_mm": int(round(turn_mm)),
-                  "step_h_mm": int(round(d["step_h_mm"] if step_h_mm is None else step_h_mm)),
-                  "body_h_mm": int(round(body_h_mm)),
-                  "flags": int((F.BOB if bob else 0) | (F.WAG if wag else 0) | (F.BALANCE if balance else 0)
-                               | (F.SWAY if sway else 0) | (F.CATCH if catch else 0) | (F.PLACE if place else 0))}
-        self._check_ranges("SET_GAIT", fields)
-        if fields["body_h_mm"] < 1:
-            raise ValueError("SET_GAIT body_h_mm must be at least 1 mm")
-        return fields
-
-    def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = DEFAULT_PATTERN,
-             period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
-             body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
-             balance: bool = True, sway: bool | None = None, catch: bool = True,
-             place: bool = False) -> dict[str, int]:
-        """Latch SET_GAIT run=1: walk with ``pattern`` (walk, trot, crawl),
-        ``stride_mm`` (signed, + = forward) and ``turn_mm`` (+ = left; with
-        stride 0 Kilo turns in place). Fields left None take the §3d defaults
-        of the pattern; the body height defaults to a fraction of L1 + L2
-        (``load_geometry()``). Flags: head bob, tail wag, balance, sway (None: on
-        for walk and crawl), catch (the early-touchdown reflex), place
-        (forward placement).
-
-        A motion goal like a posture: stamped with the current epoch,
-        refreshed at 5 Hz, cleared on any epoch change (watchdog, fall, low
-        battery, reboot) and not sent before contact. The body moves to
-        STANCE first when it stands in another posture, and ramps the stride
-        up over one period. Changing the pattern while walking is a stop
-        followed by a start on the body. Like play(), it releases the latched
-        posture goal: a posture refreshed under the gait would be what the
-        body takes after the stop's hand-over to STANCE. Returns the wire
-        fields; ValueError outside the spec ranges (the body would refuse
-        BAD_ARG).
-        """
-        fields = self.gait_fields(stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm, body_h_mm, bob, wag,
-                                  balance, sway=sway, catch=catch, place=place)
-        self._check_drivable()
-        hello = self.state.hello
-        if hello is not None and hello.proto_major == P.PROTO_MAJOR:
-            fields["flags"] = gait_flags_for(fields["flags"], hello.proto_minor)
-        self.link.clear_goal("SET_POSTURE")
-        self.link.set_goal("SET_GAIT", **fields)
-        self._gait_fields = dict(fields)
-        return fields
-
-    def stop_walk(self, wait_s: float | None = None) -> int | bool:
-        """Latch SET_GAIT run=0 (the last walk's parameters): the body ramps
-        the stride down over one period, hands over to STANCE and sends EVENT
-        GAIT_STOPPED, which clears this goal. Never held back (a stop is safe
-        to send at any time).
-
-        Without ``wait_s`` returns the GAIT_STOPPED count before the stop, for
-        ``wait_gait_stopped()``; with it, waits up to ``wait_s`` seconds and
-        returns whether the gait stopped."""
-        fields = dict(self._gait_fields or self.gait_fields(stride_mm=0))
-        hello = self.state.hello  # a stop built from the defaults carries the newer flag bits too
-        if hello is not None and hello.proto_major == P.PROTO_MAJOR:
-            fields["flags"] = gait_flags_for(fields["flags"], hello.proto_minor)
-        fields["run"] = 0
-        with self._trick_lock:
-            n = len(self._gait_stopped)
-        self.link.set_goal("SET_GAIT", **fields)
-        if wait_s is None:
-            return n
-        return self.wait_gait_stopped(n, wait_s)
-
-    def gait_stopped_since(self, n: int) -> Any:
-        """The first EVENT GAIT_STOPPED after the n-th one seen, or None."""
-        with self._trick_lock:
-            return self._gait_stopped[n][1] if len(self._gait_stopped) > n else None
-
-    def walking(self) -> bool:
-        """The body reports a gait (mode GAIT or the GAIT flag)."""
-        st = self.state
-        return st.mode == "GAIT" or "gait" in st.flags
-
-    def stop_timeout(self) -> float:
-        """How long a stop may take: one period of ramp-down plus a margin."""
-        period = (self._gait_fields or {}).get("period_ms") or max(d["period_ms"] for d in GAIT_DEFAULTS.values())
-        return period / 1000.0 + GAIT_STOP_MARGIN_S
-
-    def wait_gait_stopped(self, n: int, timeout: float | None = None) -> bool:
-        """Block until GAIT_STOPPED (after the n-th) or until the body has
-        shown no gait for 0.3 s (it was not walking). False on timeout."""
-        timeout = self.stop_timeout() if timeout is None else timeout
-        link = self.link
-        t0 = link.clock()
-        quiet_since = None
-        while True:
-            if self.stamp_liveness:
-                link.mark_alive()
-            if self.gait_stopped_since(n) is not None:
-                return True
-            now = link.clock()
-            if self.walking():
-                quiet_since = None
-            elif quiet_since is None:
-                quiet_since = now
-            elif now - quiet_since >= 0.3:
-                return True
-            if now - t0 >= timeout:
-                return False
-            time.sleep(0.02)
-
-    async def walk_until_stopped(self, n: int | None = None, timeout: float | None = None) -> bool:
-        """Await the end of the gait: EVENT GAIT_STOPPED after the n-th seen
-        (default: from now; pass ``stop_walk()``'s return to include one that
-        already came), or None-timeout forever. Returns False on timeout."""
-        if n is None:
-            with self._trick_lock:
-                n = len(self._gait_stopped)
-        t0 = self.link.clock()
-        while self.gait_stopped_since(n) is None:
-            if self.stamp_liveness:
-                self.link.mark_alive()
-            if timeout is not None and self.link.clock() - t0 > timeout:
-                return False
-            await asyncio.sleep(0.02)
-        return True
-
-    def gait_state(self) -> dict[str, Any] | None:
-        """The latched SET_GAIT (pattern name, stride, turn, run...) with the
-        body's mode and gait phase (0..1), or None when neither the mind nor
-        the body has a gait."""
-        g = self.link.goals().get("SET_GAIT")
-        tel = self.state.telemetry
-        if g is None and not self.walking():
-            return None
-        out: dict[str, Any] = {"mode": self.state.mode, "walking": self.walking()}
-        if g is not None:
-            f = g.fields
-            out.update({"run": f["run"], "pattern": self.pattern_name(f["pattern"]), "stride_mm": f["stride_mm"],
-                        "turn_mm": f["turn_mm"], "period_ms": f["period_ms"], "epoch": g.epoch})
-        out["phase"] = None if tel is None else round(tel.gait_phase / 256.0, 3)
-        return out
-
     def pose(self, pitch_deg: float = 0, roll_deg: float = 0, dheight_mm: float = 0,
              xshift_mm: float = 0) -> dict[str, int]:
         """Latch SET_BODY_POSE: body pitch (+ = nose down) and roll (+ = right
         side up) in degrees, height delta and forward shift in mm, applied on
-        top of the gait and of the STANCE posture (other postures ignore it).
-        An epoch goal like walk(). Returns the wire fields; ValueError outside
-        the wire ranges."""
+        top of the STANCE posture (other postures ignore it). An epoch goal
+        like a posture. Returns the wire fields; ValueError outside the wire
+        ranges."""
         fields = {"pitch": int(round(pitch_deg * 16)), "roll": int(round(roll_deg * 16)),
                   "dheight_mm": int(round(dheight_mm)), "xshift_mm": int(round(xshift_mm))}
         self._check_ranges("SET_BODY_POSE", fields)
@@ -745,12 +441,6 @@ class BodyClient:
         if msg.code == consts.EV["TRICK_DONE"]:
             with self._trick_lock:
                 self._trick_done.append((self.link.clock(), msg))
-        elif msg.code == consts.EV["GAIT_STOPPED"]:
-            with self._trick_lock:
-                self._gait_stopped.append((self.link.clock(), msg))  # indexed by count: never trimmed
-            # The stop goal (run=0) has done its job: stop refreshing it. A
-            # walk latched meanwhile (run=1) stays.
-            self.link.clear_goal("SET_GAIT", only_if=lambda g: not g.fields.get("run"))
 
     def upload_trick(self, trick: Any, force: bool = False) -> tuple[int, bool]:
         """Make the body hold ``trick``. Returns (trick_id, uploaded).

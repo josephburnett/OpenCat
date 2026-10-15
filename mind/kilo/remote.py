@@ -180,7 +180,7 @@ class DaemonError(Exception):
 
 def restore_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
     """Undo JSON's tuple -> list so a remote snapshot prints like a local one."""
-    for k in ("owners", "rates_dps"):
+    for k in ("owners", "rates_dps", "ref_deg", "corr_deg", "err_deg"):
         if isinstance(snap.get(k), list):
             snap[k] = tuple(snap[k])
     if isinstance(snap.get("events"), list):
@@ -451,35 +451,23 @@ class RemoteBody:
     def release(self) -> None:
         self.conn.call("release")
 
-    # gait and body pose (P2; held by this session like a posture)
-    def walk(self, stride_mm: float | None = None, turn_mm: float = 0, pattern: str | int = "trot",
-             period_ms: int | None = None, duty: int | None = None, step_h_mm: float | None = None,
-             body_h_mm: float | None = None, bob: bool = True, wag: bool = True,
-             balance: bool = True, sway: bool | None = None, catch: bool = True,
-             place: bool = False) -> dict[str, int]:
-        return self.conn.call("walk", stride_mm=stride_mm, turn_mm=turn_mm, pattern=pattern, period_ms=period_ms,
-                              duty=duty, step_h_mm=step_h_mm, body_h_mm=body_h_mm, bob=bob, wag=wag,
-                              balance=balance, sway=sway, catch=catch, place=place, override=self.override)
+    # walking (the daemon's walker; held by this session like a posture) and the body pose
+    def walk(self, direction: str = "forward", pattern: str = "trot", speed_mm_s: float | None = None,
+             balance: bool = True) -> dict[str, Any]:
+        return self.conn.call("walk", direction=direction, pattern=pattern, speed_mm_s=speed_mm_s, balance=balance,
+                              override=self.override)
 
     def stop_walk(self, wait_s: float | None = None) -> Any:
         """``stop_walk``: without ``wait_s`` returns None; with it, whether the
-        gait stopped (GAIT_STOPPED) within ``wait_s``."""
+        walk ended within ``wait_s``."""
         r = self.conn.call("stop_walk", timeout=(wait_s or 0) + 10.0, wait_s=wait_s)
         return None if wait_s is None else bool(r["stopped"])
 
-    def load_geometry(self) -> None:
-        """The daemon reads the leg geometry itself (``walk`` op)."""
-        return None
+    def walk_status(self) -> dict[str, Any] | None:
+        return self.conn.call("walk_status")
 
-    def gait_state(self) -> dict[str, Any] | None:
-        return self.conn.call("gait")
-
-    def stop_timeout(self) -> float:
-        from kilo.body.client import GAIT_DEFAULTS, GAIT_STOP_MARGIN_S
-
-        g = self.gait_state() or {}
-        period = g.get("period_ms") or max(d["period_ms"] for d in GAIT_DEFAULTS.values())
-        return period / 1000.0 + GAIT_STOP_MARGIN_S
+    def walking(self) -> bool:
+        return self.state.mode == "GAIT"
 
     def pose(self, pitch_deg: float = 0, roll_deg: float = 0, dheight_mm: float = 0,
              xshift_mm: float = 0) -> dict[str, int]:

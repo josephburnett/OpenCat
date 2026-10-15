@@ -253,8 +253,10 @@ class Daemon(OpsMixin, ClientsMixin, HoldsMixin, BehaviourMixin, RemoteIRMixin, 
             self._close_session(s)
         link = self.link
         if link is not None:
-            # Drop every goal and send nothing more: the body's watchdog takes over.
+            # Drop every goal and send nothing more: the body's watchdog takes over
+            # (a walk's stream ends too: the body holds, then settles).
             link.go_silent()
+            await self.loop.run_in_executor(self.pool, self._abort_walk)
             await self.loop.run_in_executor(self.pool, link.stop)
         if self.logger is not None:
             await self.loop.run_in_executor(self.pool, self.logger.close)

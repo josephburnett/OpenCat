@@ -49,9 +49,16 @@ class PortMixin:
         for n in list(self.link.goals()):
             self.link.clear_goal(n)
         self.idle_since = self.idle_stage = None
+        await self._blocking(self._abort_walk)
         await self._blocking(self.link.stop)
         log.info("port %s released for %.0f s (client %d)", self.port, lease, s.id)
         return {"port": self.port, "lease_s": lease}
+
+    def _abort_walk(self) -> None:
+        """Pool thread: end a walk's stream at once (shutdown, port release)."""
+        w = getattr(self.client, "_walker", None)
+        if w is not None and w.active:
+            w.abort()
 
     def _check_release_lease(self, now: float) -> None:
         """From the pump: reacquire once the release lease ran out."""

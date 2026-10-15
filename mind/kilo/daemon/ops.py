@@ -1,10 +1,10 @@
 """The daemon's ops: everything a client can ask (``op_<name>(session, **args)``).
 
 Info: ``daemon`` (pid, version, port and link state, clients, holds, idle
-stage, behaviour, remote, balance default, percepts, gait), ``ping``,
+stage, behaviour, remote, balance default, percepts, walk), ``ping``,
 ``alive``, ``snapshot``, ``percepts`` (flags, distance/approach, recent
-events), ``goals`` (the goals this session holds), ``gait``
-(BodyClient.gait_state()).
+events), ``goals`` (the goals this session holds), ``walk_status``
+(BodyClient.walk_status(): the walk, its stream and the model's error).
 
 Body queries and commands (each a request on the link, run in the pool):
 ``wait_ready {wait_s, require_telemetry}``, ``stats``,
@@ -20,12 +20,12 @@ with a pointer to their ops, anything else as unknown), ``verify_hello``
 Goals (held by the session; kilo.daemon.sessions): ``posture {name,
 transition_ticks, balance}``, ``set_balance {enable, kp, kd_s,
 deadband_deg, clamp_deg}``, ``release`` (end this session's hold), ``walk
-{stride_mm, turn_mm, pattern, period_ms, duty, step_h_mm, body_h_mm, bob,
-wag, balance}`` (BodyClient.walk; the session owns SET_GAIT like a posture
-and the posture goal is dropped: the gait replaces it; the leg geometry is
-read once per body boot), ``stop_walk {wait_s}`` (any client, also under
-the behaviour runner; with ``wait_s`` it replies once GAIT_STOPPED came, or
-the body has shown no gait for 0.3 s: ``{stopped, elapsed_s}``), ``pose
+{direction, pattern, speed_mm_s, balance}`` (BodyClient.walk: the daemon's
+walker plans and streams; the session owns the hold ``WALK`` like a posture
+and the posture goal is dropped: the walk replaces it; while walking it
+changes the walk), ``stop_walk {wait_s}`` (any client, also under the
+behaviour runner: the planned stop; with ``wait_s`` it replies once the walk
+ended, at most ``wait_s`` later: ``{stopped, elapsed_s}``), ``pose
 {pitch_deg, roll_deg, dheight_mm, xshift_mm}`` and ``release_pose``.
 ``posture``, ``set_balance``, ``walk``, ``pose``, ``trick_upload`` and
 ``trick_play`` take ``override`` (kilo.daemon.behaviour).
@@ -85,7 +85,7 @@ CALL_ALLOWED = frozenset({"look", "release_head", "ping"})
 # tricks have their own ops (session ownership, the runner check, the loop).
 CALL_REFUSED = frozenset({"posture", "limp", "rest", "stand", "sit", "balance", "set_balance", "release",
                           "upload_trick", "start_trick", "play", "stop_trick", "spin", "wait_ready",
-                          "walk", "stop_walk", "wait_gait_stopped", "pose", "release_pose"})
+                          "walk", "stop_walk", "walk_status", "walker", "pose", "release_pose"})
 # The `request` op's per-try timeout cap: a request holds the link's one
 # in-flight slot for up to (retries + 1) x timeout (4 x 0.5 s = 2 s).
 REQUEST_TIMEOUT_MAX_S = 0.5
@@ -116,7 +116,7 @@ class OpsMixin:
                 "kilolog": str(self.wire_logger.path) if self.wire_logger is not None else None,
                 "percepts": self.percepts.flags(),
                 "held_goals": sorted(n for n, o in self.goal_owner.items() if o is not None),
-                "idle": self.idle_stage, "gait": self.client.gait_state()}
+                "idle": self.idle_stage, "walk": self.client.walk_status()}
 
     async def op_percepts(self, s: Any) -> dict[str, Any]:
         """The daemon's percepts: flags, distance/approach, recent events."""
@@ -161,54 +161,39 @@ class OpsMixin:
     async def op_release(self, s: Any) -> None:
         self._end_hold(s)
 
-    async def op_walk(self, s: Any, override: bool = False, **gait: Any) -> dict[str, int]:
-        """BodyClient.walk(**gait), held by this session like a posture: when
-        the session ends the daemon latches the stop and runs the idle
-        timeline. Replaces a posture goal (the gait hands over to STANCE)."""
+    async def op_walk(self, s: Any, direction: str = "forward", pattern: str = "trot",
+                      speed_mm_s: float | None = None, balance: bool = True,
+                      override: bool = False) -> dict[str, Any]:
+        """BodyClient.walk (the daemon's walker), held by this session like a
+        posture (``WALK``): when the session ends the daemon stops the walk the
+        planned way, then runs the idle timeline. Replaces a posture goal."""
+        from kilo.planner import patterns as pat
+
         self._need_port()
-        self.client.gait_fields(**gait)  # range check before anything is sent or owned
+        pat.pattern(pattern), pat.direction(direction)  # ValueError before anything is sent or owned
         self._check_runner(s, override)
-        if self.client._geometry_reboots != self.client.state.reboots:
-            await self._blocking(self.client.load_geometry)
-        f = self.client.walk(**gait)
-        prev = self.goal_owner.pop("SET_POSTURE", None)  # walk() dropped the posture goal
+        st = await self._blocking(self.client.walk, direction, pattern, speed_mm_s, balance)
+        prev = self.goal_owner.pop("SET_POSTURE", None)  # the walk dropped the posture goal
         if prev is not None:
             prev.goals.discard("SET_POSTURE")
-        self._own(s, "SET_GAIT")
-        return f
+        self._own(s, "WALK")
+        return st
 
     async def op_stop_walk(self, s: Any, wait_s: float | None = None) -> dict[str, Any]:
-        """Latch the gait stop (any client, also while the behaviour runner is
-        active); with ``wait_s``, reply once GAIT_STOPPED came (or the body
-        shows no gait), at most ``wait_s`` later: ``{stopped, elapsed_s}``."""
+        """The planned stop of the daemon's walk (any client, also while the
+        behaviour runner is active); with ``wait_s``, reply once the walk
+        ended, at most ``wait_s`` later: ``{stopped, elapsed_s}``."""
         self._need_port()
-        n = self.client.stop_walk()
-        self._own(s, "SET_GAIT")
+        t0 = time.monotonic()
         if wait_s is None:
+            self.client.stop_walk()
             return {"stopped": None, "elapsed_s": 0.0}
-        return await self._wait_gait_stopped(n, float(wait_s))
+        ok = await self._blocking(self.client.stop_walk, float(wait_s))
+        return {"stopped": bool(ok), "elapsed_s": round(time.monotonic() - t0, 3)}
 
-    async def _wait_gait_stopped(self, n: int, wait_s: float) -> dict[str, Any]:
-        clock = self.link.clock
-        t0 = clock()
-        quiet_since = None
-        while True:
-            if self.client.gait_stopped_since(n) is not None:
-                return {"stopped": True, "elapsed_s": round(clock() - t0, 3)}
-            now = clock()
-            if self.client.walking():
-                quiet_since = None
-            elif quiet_since is None:
-                quiet_since = now
-            elif now - quiet_since >= 0.3:
-                return {"stopped": True, "elapsed_s": round(now - t0, 3)}
-            if now - t0 >= wait_s:
-                return {"stopped": False, "elapsed_s": round(now - t0, 3)}
-            await asyncio.sleep(0.02)
-
-    async def op_gait(self, s: Any) -> dict[str, Any] | None:
-        """BodyClient.gait_state(): the latched gait and the body's phase."""
-        return self.client.gait_state()
+    async def op_walk_status(self, s: Any) -> dict[str, Any] | None:
+        """BodyClient.walk_status(): the walk, its stream and the model's error."""
+        return self.client.walk_status()
 
     async def op_pose(self, s: Any, pitch_deg: float = 0, roll_deg: float = 0, dheight_mm: float = 0,
                       xshift_mm: float = 0, override: bool = False) -> dict[str, int]:

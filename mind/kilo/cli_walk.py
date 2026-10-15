@@ -1,36 +1,33 @@
-"""`kilo walk ...` and `kilo pose ...`: the gait and the body pose (SET_GAIT,
-SET_BODY_POSE; docs/architecture.md §3d, P2).
+"""`kilo walk ...` and `kilo pose ...`: walking (the planner's FEET stream)
+and the body pose (SET_BODY_POSE; docs/architecture.md §3d).
 
-    kilo walk [forward|back|left|right|march|stop] [--speed MM_S] [--stride MM] [--turn MM]
-              [--pattern trot|walk|crawl] [--period MS] [--duty N] [--step-h MM]
-              [--body-h MM] [--no-bob] [--no-wag] [--no-balance] [--no-sway] [--no-catch] [--place] [--for S]
+    kilo walk [forward|back|left|right|march|stop] [--pattern trot|walk|crawl]
+              [--speed MM_S] [--no-balance] [--for S] [--wait S]
     kilo pose [set|release] [--pitch DEG] [--roll DEG] [--height MM] [--xshift MM]
               [--posture stance|...] [--for S]
 
-``kilo walk`` latches SET_GAIT run=1 (refreshed at 5 Hz) and walks until
-Ctrl-C (or SIGTERM) or ``--for S``; then it sends the stop (run=0) and waits
-for EVENT GAIT_STOPPED: the body ramps the stride down over one period and
-hands over to STANCE. Directions: forward / back with the pattern's default
-stride (``--stride``), ``--turn`` (+ = left) bends the path; left / right
-turn in place (``--turn`` magnitude, default 20 mm; ``--stride`` makes an
-arc); march steps in place. ``--speed`` sets the stride, period and duty
-with the pattern's fixed swing time (``kilo.body.client.gait_timing``; the
-default speed gives the §3d defaults); ``--stride``, ``--period`` and
-``--duty`` override it field by field. Other fields left out take the §3d
-defaults of the pattern. ``kilo walk stop`` stops whoever walks (a client of the daemon, the
-IR remote) and waits for GAIT_STOPPED. The body moves to STANCE first from
-any other posture. A refusal (EVENT GOAL_REFUSED for SET_GAIT: UNKNOWN_TYPE
-from a firmware without the gait, STALE, FALLEN, LOW_BATT, UNCALIBRATED) or
-the goal cleared by an epoch bump (fall, watchdog, low battery) ends the
-command with status 1.
+``kilo walk`` walks until Ctrl-C (or SIGTERM) or ``--for S``, then stops:
+each leg steps back under its shoulder, the body levels, and Kilo stands in
+STANCE. The steps are planned in the mind (kilo.planner: the walk and the
+crawl move the body over the three feet that stay down before each lift)
+and streamed to the body every 20 ms. Directions: forward, back, left /
+right (turn in place), march (step in place). ``--speed`` in mm/s (the
+pattern's range is in ``--help``); ``--no-balance`` turns the body's
+balance off for this walk (SET_BALANCE enable 0) and restores it after.
+Once a second it prints the attitude, the error the body reports (measured
+minus predicted) and the model's error estimates (steady offset, extra
+servo lag; kilo.planner.errors). ``kilo walk stop`` stops whoever walks: the
+daemon's walk, or, without a daemon, a walk of another ``kilo`` process
+(the STANCE posture ends it on the body). A walk the body ends (a fall, a
+refusal, the stream late, a reboot) ends the command with status 1.
 
 SAFETY (the owner's rule): Kilo walks on the floor only, never on a desk or
 a table; every walk prints that reminder first.
 
 ``kilo pose`` latches SET_BODY_POSE (pitch + = nose down, roll + = right side
-up, height delta, x-shift) on top of the gait and the STANCE posture until
-Ctrl-C or ``--for``, then latches the neutral pose. ``kilo pose release``
-latches the neutral pose at once.
+up, height delta, x-shift) on top of the STANCE posture until Ctrl-C or
+``--for``, then latches the neutral pose. ``kilo pose release`` latches the
+neutral pose at once.
 
 Registered in cli.py with one line (``add_parser`` adds the subcommands and
 their handlers to LINK_COMMANDS).
@@ -45,16 +42,18 @@ import threading
 import time
 from typing import Any, Iterator
 
-from kilo.body.client import (DEFAULT_PATTERN, DEFAULT_TURN_MM, GAIT_PATTERN_CHOICES, BodyClient,
-                              gait_default_speed, gait_speed, gait_speed_range, walk_args)
+from kilo.body.client import BodyClient
 from kilo.link import consts
+from kilo.planner import patterns as pat
+from kilo.planner.walker import stop_timeout
 from kilo.protocol import kilo_protocol as P
 
 EXIT_OK, EXIT_ERR = 0, 1
 SAFETY = "SAFETY: Kilo walks on the floor only, never on a desk or a table (it fell off a desk once)."
 DIRECTIONS = ("forward", "back", "left", "right", "march", "stop")
+STOP_WAIT_S = 2.0  # `kilo walk stop` without a daemon: how long GAIT may take to end after STANCE
 REFUSAL_HINTS = {
-    "UNKNOWN_TYPE": "this firmware has no gait generator: flash the P2 body (kilo flash)",
+    "UNKNOWN_TYPE": "this firmware does not play FEET: flash the protocol 2 body (kilo flash)",
     "UNCALIBRATED": "the body has no calibration (kilo cal)",
     "STALE": "the body's epoch changed (a fall, the watchdog, a reboot)",
     "FALLEN": "Kilo is down: the fall reflex holds the joints",
@@ -65,44 +64,26 @@ REFUSAL_HINTS = {
 
 def add_parser(sub: Any, commands: dict) -> None:
     """Add `kilo walk` and `kilo pose` to the CLI's subparsers and their handlers to ``commands``."""
-    s = sub.add_parser("walk", help="walk (SET_GAIT) until Ctrl-C or --for, then stop; ON THE FLOOR ONLY")
+    s = sub.add_parser("walk", help="walk (the planner streams FEET) until Ctrl-C or --for, then stop; "
+                                    "ON THE FLOOR ONLY")
     s.add_argument("direction", nargs="?", choices=DIRECTIONS, default="forward",
                    help="forward (default), back, left / right (turn in place), march (in place), "
-                        "or stop (stop any walk and wait for GAIT_STOPPED)")
-    s.add_argument("--pattern", choices=GAIT_PATTERN_CHOICES, default=DEFAULT_PATTERN,
-                   help=f"gait pattern (default {DEFAULT_PATTERN})")
+                        "or stop (stop any walk)")
+    s.add_argument("--pattern", choices=pat.PATTERN_NAMES, default=pat.DEFAULT_PATTERN,
+                   help=f"gait pattern (default {pat.DEFAULT_PATTERN})")
     s.add_argument("--speed", type=float, default=None, metavar="MM_S",
-                   help="speed in mm/s with the pattern's fixed swing time: sets stride, period and duty "
-                        "(default: the pattern's, " + ", ".join(
-                            f"{p} {gait_default_speed(p):.0f} ({lo:.0f}..{hi:.0f})"
-                            for p in GAIT_PATTERN_CHOICES for lo, hi in [gait_speed_range(p)]) + ")")
-    s.add_argument("--stride", type=float, default=None, metavar="MM",
-                   help="stride in mm, overrides --speed's (forward/back take its magnitude)")
-    s.add_argument("--turn", type=float, default=None, metavar="MM",
-                   help=f"turn in mm, + = left (forward/back: an arc; left/right: the magnitude, "
-                        f"default {DEFAULT_TURN_MM})")
-    s.add_argument("--period", type=int, default=None, metavar="MS", help="cycle period in ms, overrides --speed's")
-    s.add_argument("--duty", type=int, default=None, metavar="N",
-                   help="stance fraction in 1/256, overrides --speed's")
-    s.add_argument("--step-h", type=float, default=None, metavar="MM", help="foot lift in mm")
-    s.add_argument("--body-h", type=float, default=None, metavar="MM",
-                   help="body height in mm (default: a fraction of LEG_L1_MM + LEG_L2_MM)")
-    s.add_argument("--no-bob", action="store_true", help="no head bob")
-    s.add_argument("--no-wag", action="store_true", help="no tail wag")
-    s.add_argument("--no-balance", action="store_true", help="no balance corrections while walking")
-    s.add_argument("--no-sway", action="store_true",
-                   help="no body sway away from the lifting leg (default: on for walk and crawl)")
-    s.add_argument("--no-catch", action="store_true",
-                   help="no early touchdown (a swinging leg lands at once when the body tips toward it; default on)")
-    s.add_argument("--place", action="store_true",
-                   help="forward placement (SET_GAIT flag PLACE): off by default until a floor run shows it helps")
+                   help="speed in mm/s (default: the pattern's, " + ", ".join(
+                       f"{p} {pat.default_speed(p):.0f} ({lo:.1f}..{hi:.0f})"
+                       for p in pat.PATTERN_NAMES for lo, hi in [pat.speed_range(p)]) + ")")
+    s.add_argument("--no-balance", action="store_true",
+                   help="the body's balance off for this walk (SET_BALANCE enable 0), restored after")
     s.add_argument("--for", dest="hold", type=float, default=None, metavar="S",
                    help="walk S seconds, then stop (default: until Ctrl-C)")
     s.add_argument("--wait", type=float, default=None, metavar="S",
-                   help="how long to wait for GAIT_STOPPED after the stop (default: one period + 1.5 s)")
+                   help="how long the stop may take (default: two cycles + 1.5 s)")
     commands["walk"] = cmd_walk
 
-    s = sub.add_parser("pose", help="body pitch/roll/height/x-shift (SET_BODY_POSE) over STANCE and the gait")
+    s = sub.add_parser("pose", help="body pitch/roll/height/x-shift (SET_BODY_POSE) over STANCE")
     s.add_argument("action", nargs="?", choices=("set", "release"), default="set",
                    help="set (default: hold until Ctrl-C or --for) or release (neutral pose now)")
     s.add_argument("--pitch", type=float, default=0.0, metavar="DEG", help="body pitch, + = nose down")
@@ -110,7 +91,7 @@ def add_parser(sub: Any, commands: dict) -> None:
     s.add_argument("--height", type=float, default=0.0, metavar="MM", help="height delta in mm")
     s.add_argument("--xshift", type=float, default=0.0, metavar="MM", help="forward shift in mm")
     s.add_argument("--posture", choices=("stance",), default=None,
-                   help="take STANCE first (the pose applies to STANCE and the gait only)")
+                   help="take STANCE first (the pose applies to STANCE only)")
     s.add_argument("--for", dest="hold", type=float, default=None, metavar="S",
                    help="hold S seconds, then release (default: until Ctrl-C)")
     commands["pose"] = cmd_pose
@@ -153,80 +134,94 @@ def _print_refusal(goal: str, reason: str) -> None:
     print(f"body refused {goal}: {reason}" + (f" ({hint})" if hint else ""), flush=True)
 
 
-def _stop(client: Any, wait: float | None) -> int:
-    timeout = client.stop_timeout() if wait is None else wait
+def error_text(est: dict[str, Any] | None) -> str:
+    """The model's error estimates in one line (kilo.planner.errors)."""
+    if not est:
+        return "model error: not enough walking yet (needs 1 s of 50 Hz telemetry)"
+    lag = est.get("lag_ms")
+    return (f"model error: offset pitch {est['offset_pitch_deg']:+.1f}° roll {est['offset_roll_deg']:+.1f}°  "
+            f"servo lag {'-' if lag is None else f'{lag:+.0f} ms vs the model'}  "
+            f"largest {est['spike_deg']:.1f}°  balance corr {est['corr_pitch_deg']:+.1f}° "
+            f"{est['corr_roll_deg']:+.1f}°")
+
+
+def _stop_other(client: Any, wait: float | None) -> int:
+    """`kilo walk stop`: the daemon's walk (its walker), or, without a
+    daemon, whoever streams: the STANCE posture ends GAIT on the body."""
     t0 = time.monotonic()
-    if client.stop_walk(wait_s=timeout):
+    st = client.walk_status() or {}
+    if client.stop_walk(wait_s=stop_timeout(st.get("period_ms")) if wait is None else wait) and not client.walking():
         print(f"stopped ({time.monotonic() - t0:.1f} s)", flush=True)
         return EXIT_OK
-    print(f"no GAIT_STOPPED within {timeout:.1f} s (mode {client.state.mode}); the stop stays latched",
-          flush=True)
+    if not client.walking():
+        print("not walking", flush=True)
+        return EXIT_OK
+    client.posture("stance")
+    end = time.monotonic() + STOP_WAIT_S
+    while client.walking() and time.monotonic() < end:
+        client.spin(0.05)
+    if not client.walking():
+        print(f"stopped: STANCE ended the walk ({time.monotonic() - t0:.1f} s)", flush=True)
+        return EXIT_OK
+    print(f"still walking after STANCE (mode {client.state.mode})", flush=True)
     return EXIT_ERR
 
 
-def walk_fields(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
-    """walk() arguments for `kilo walk`: the direction's (walk_args) and the
-    gait's. --speed (default: the pattern's) sets stride, period and duty;
-    --stride, --period and --duty win where given."""
-    speed = gait_default_speed(args.pattern) if args.speed is None else args.speed
-    kw = walk_args(args.direction, args.pattern, args.stride, args.turn, speed_mm_s=speed)
-    period, duty = kw.pop("period_ms"), kw.pop("duty")
-    gait = dict(period_ms=period if args.period is None else args.period,
-                duty=duty if args.duty is None else args.duty, step_h_mm=args.step_h, body_h_mm=args.body_h,
-                bob=not args.no_bob, wag=not args.no_wag, balance=not args.no_balance,
-                sway=False if getattr(args, "no_sway", False) else None, catch=not getattr(args, "no_catch", False),
-                place=getattr(args, "place", False))
-    return kw, gait
+def _line(t: float, snap: dict[str, Any]) -> str:
+    err = snap.get("err_deg")
+    return (f"t={t:5.1f}s  mode {snap['mode']}  pitch {_f(snap['pitch_deg'])}° roll {_f(snap['roll_deg'])}°"
+            + ("" if err is None else f"  error {err[0]:+.1f}° {err[1]:+.1f}°"))
 
 
 def cmd_walk(args: argparse.Namespace, client: BodyClient) -> int:
     client.wait_ready(args.timeout)
     if args.direction == "stop":
         with _sigterm_interrupts():
-            return _stop(client, args.wait)
-    kw, gait = walk_fields(args)
-    print(SAFETY, flush=True)  # out-of-range fields raise ValueError in walk(), before anything is sent
-    client.load_geometry()
+            return _stop_other(client, args.wait)
+    pat.pattern(args.pattern)  # ValueError before anything is sent
+    print(SAFETY, flush=True)
     rc = EXIT_OK
     with _sigterm_interrupts():
         t0 = time.monotonic()
         try:
-            f = client.walk(**kw, **gait)
-            print(f"walking {args.direction}: {kw['pattern']} stride {f['stride_mm']} mm, turn {f['turn_mm']} mm, "
-                  f"period {f['period_ms']} ms, duty {f['duty']}/256 (swing "
-                  f"{f['period_ms'] * (256 - f['duty']) / 256:.0f} ms"
-                  + (f", {gait_speed(f['period_ms'], f['duty'], f['stride_mm']):.0f} mm/s" if f['stride_mm'] else "")
-                  + f"), step {f['step_h_mm']} mm, body "
-                  f"{f['body_h_mm']} mm" + (f" for {args.hold:g} s" if args.hold is not None
-                                             else " (Ctrl-C to stop)"), flush=True)
+            st = client.walk(args.direction, args.pattern, args.speed, balance=not args.no_balance)
+            print(f"walking {args.direction}: {st['pattern']} {st['speed_mm_s']:.1f} mm/s (stride "
+                  f"{st['stride_mm']:.0f} mm, cycle {st['period_ms']} ms)"
+                  + (", balance off" if args.no_balance else "")
+                  + (f" for {args.hold:g} s" if args.hold is not None else " (Ctrl-C to stop)"), flush=True)
             end = None if args.hold is None else t0 + args.hold
             next_line = t0 + 1.0
             while end is None or time.monotonic() < end:
                 client.spin(0.25 if end is None else max(0.0, min(0.25, end - time.monotonic())))
-                why = refusal(client, "SET_GAIT", time.monotonic() - t0 + 0.05)
-                if why is not None:
-                    _print_refusal("SET_GAIT", why)
-                    rc = EXIT_ERR
-                    break
-                if "SET_GAIT" not in client.link.goals():
-                    st = client.state
-                    print(f"gait goal cleared by the body (mode {st.mode}, epoch {st.epoch}); exiting", flush=True)
-                    return EXIT_ERR
+                st = client.walk_status() or {}
+                if st.get("ended"):
+                    why = refusal(client, "FEET", time.monotonic() - t0 + 0.05)
+                    if why is not None:
+                        _print_refusal("FEET", why)
+                    print(f"the walk ended: {st['ended']}", flush=True)
+                    print(error_text(st.get("error")), flush=True)
+                    return EXIT_OK if st.get("ok") else EXIT_ERR
                 now = time.monotonic()
                 if now >= next_line:
                     next_line += 1.0
-                    s = client.state.snapshot()
-                    phase = s.get("gait_phase")
-                    print(f"t={now - t0:5.1f}s  mode {s['mode']}  phase "
-                          + ("-" if phase is None else f"{phase / 256:.2f}")
-                          + f"  pitch {_f(s['pitch_deg'])}°  roll {_f(s['roll_deg'])}°", flush=True)
+                    print(_line(now - t0, client.state.snapshot()), flush=True)
         except KeyboardInterrupt:
             pass
         try:
-            stop_rc = _stop(client, args.wait)
+            wait = stop_timeout((client.walk_status() or {}).get("period_ms")) if args.wait is None else args.wait
+            stopped = client.stop_walk(wait_s=wait)
         except KeyboardInterrupt:
-            stop_rc = EXIT_ERR
-    return rc if rc != EXIT_OK else stop_rc
+            stopped = False
+        st = client.walk_status() or {}
+        if stopped and st.get("ok", True):
+            print(f"stopped ({time.monotonic() - t0:.1f} s): sent {st.get('sent', 0)} ticks, "
+                  f"{st.get('skipped', 0)} too late, {st.get('underruns', 0)} underruns, "
+                  f"smallest margin {st.get('min_margin_mm')} mm", flush=True)
+        else:
+            print(f"the walk ended: {st.get('ended') or 'no end within the wait'}", flush=True)
+            rc = EXIT_ERR
+        print(error_text(st.get("error")), flush=True)
+    return rc
 
 
 def cmd_pose(args: argparse.Namespace, client: BodyClient) -> int:
@@ -239,9 +234,8 @@ def cmd_pose(args: argparse.Namespace, client: BodyClient) -> int:
     if args.posture:
         client.posture(args.posture)
         client.spin(1.0)  # the default posture move is 0.5 s
-    elif client.state.mode != "GAIT":
-        print("note: the pose applies to STANCE and the gait only; add --posture stance if Kilo stands "
-              "otherwise", flush=True)
+    else:
+        print("note: the pose applies to STANCE only; add --posture stance if Kilo stands otherwise", flush=True)
     rc = EXIT_OK
     with _sigterm_interrupts():
         t0 = time.monotonic()

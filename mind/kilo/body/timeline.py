@@ -9,9 +9,10 @@ seconds relative to ``t0`` (0.1 s resolution):
   flicker by design, DIST_FRESH, OVERRUN and BALANCE_HELD (twice per trot
   cycle), are left out of the diff);
 - a HELLO (boot), telemetry lost / back;
-- once a second, a telemetry summary line (from ``poll()``), with the gait
-  phase (0..1) while the body walks (mode GAIT or the GAIT flag); EVENT
-  GAIT_STOPPED and GOAL_REFUSED (SET_GAIT: reason) print like every event.
+- once a second, a telemetry summary line (from ``poll()``), with the error
+  the body reports while it walks (measured minus the plan's prediction, in
+  mode GAIT); EVENT GAIT_STOPPED, FEET_UNDERRUN and GOAL_REFUSED (FEET:
+  reason) print like every event.
 
 It never sends anything; the link it watches must be silent for the timeline
 to say anything about the body's link watchdog.
@@ -131,8 +132,8 @@ class Timeline:
             self.say("telemetry: none yet", now)
             return
         rate = "" if last is None else f"  {n / (now - last):.0f} Hz"
-        gait = (f" phase {snap['gait_phase'] / 256:.2f}" if snap.get("gait_phase") is not None
-                and (snap["mode"] == "GAIT" or "gait" in snap["flags"]) else "")
+        err = snap.get("err_deg")
+        gait = "" if err is None else f" error {err[0]:+.1f} {err[1]:+.1f}"
         self.say(f"tel tick {snap['tick']} mode {snap['mode']}{gait} epoch {snap['epoch']} "
                  f"pitch {_f(snap['pitch_deg'])} roll {_f(snap['roll_deg'])} "
                  f"batt {snap['batt_mv']} mV{rate}", now)

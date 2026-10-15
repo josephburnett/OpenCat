@@ -12,12 +12,13 @@ timeline, without the 0.5 s stop stage; ``kilo run --idle-posture
 rest|limp|none``, ``--idle-limp S``), and a balance enable is switched off.
 With a behaviour runner active the daemon only drops the goal and leaves the
 body to the runner. The idle REST is latched whenever a hold that owned what
-the legs do (``BODY_HOLDS``: the posture, a trick or the gait) ends and
+the legs do (``BODY_HOLDS``: the posture, a trick or a walk) ends and
 nobody else owns one, even if another client still holds SET_BALANCE; a
 balance-, head- or pose-only hold that ends leaves the posture timeline
-alone. A walk is never just dropped: the daemon latches the gait stop (the
-body ramps down and hands over to STANCE), then runs the idle timeline; a
-pose hold ending latches the neutral pose; a trick hold ending stops the
+alone. A walk is never just dropped: the daemon stops it the planned way
+(each leg steps home, STANCE; kilo.planner.walker), and only then runs the
+idle timeline (a REST latched earlier would take the legs mid-step); a pose
+hold ending latches the neutral pose; a trick hold ending stops the
 trick.
 
 Latches owned by nobody (``goal_owner[name] is None``): the idle REST/LIMP,
@@ -52,7 +53,7 @@ from kilo.link.serial_link import LinkError
 log = logging.getLogger("kilo.daemon")
 
 # Holds that decide what the legs do: when the last one ends the idle timeline runs.
-BODY_HOLDS = ("SET_POSTURE", "TRICK", "SET_GAIT")
+BODY_HOLDS = ("SET_POSTURE", "TRICK", "WALK")
 
 
 class Session:
@@ -97,7 +98,7 @@ class HoldsMixin:
         return any(o is not None for o in self.goal_owner.values())
 
     def _posture_held(self) -> bool:
-        """Somebody owns what the body's legs do: SET_POSTURE, a trick or a gait."""
+        """Somebody owns what the body's legs do: SET_POSTURE, a trick or a walk."""
         return any(self.goal_owner.get(n) is not None for n in BODY_HOLDS)
 
     def _latch_idle(self, name: str) -> None:
@@ -148,19 +149,17 @@ class HoldsMixin:
                 self.pool.submit(self._stop_trick_quietly)  # its TRICK_DONE ends the trick_play op
             posture_hold_ended = True
         else:
-            posture_hold_ended = "SET_POSTURE" in names or "SET_GAIT" in names
+            posture_hold_ended = "SET_POSTURE" in names or "WALK" in names
         if self._shutting_down:
             return  # go_silent() drops everything next
-        if "SET_GAIT" in names and not self.port_released:
-            # A walk is never just dropped: latch the stop (the body ramps
-            # down, hands over to STANCE, GAIT_STOPPED clears the goal).
-            names.remove("SET_GAIT")
-            g = link.goals().get("SET_GAIT")
-            if g is not None and g.fields.get("run"):
-                try:
-                    self.client.stop_walk()
-                except (LinkError, ValueError) as e:
-                    log.warning("client %d: gait stop: %s", s.id, e)
+        if "WALK" in names:
+            names.remove("WALK")
+            st = self.client.walk_status()
+            if st is not None and st.get("active") and not self.port_released:
+                # A walk is never just dropped: the planned stop first, the
+                # idle timeline after it (_idle_after_walk).
+                self.pool.submit(self._stop_walk_then_idle, s.id)
+                posture_hold_ended = False
         if "SET_BODY_POSE" in names and not self.port_released:
             names.remove("SET_BODY_POSE")
             self.client.release_pose()
@@ -193,6 +192,31 @@ class HoldsMixin:
             self.idle_since = time.monotonic()
             self.idle_stage = self.idle_posture
             self._latch_idle(self.idle_posture)
+
+    def _stop_walk_then_idle(self, sid: int) -> None:
+        """Pool thread: the planned stop of a walk whose hold ended, then the
+        idle timeline on the loop."""
+        from kilo.planner.walker import stop_timeout
+
+        st = self.client.walk_status() or {}
+        try:
+            if not self.client.stop_walk(wait_s=stop_timeout(st.get("period_ms"))):
+                log.warning("client %d: the walk did not stop in time", sid)
+        except LinkError as e:
+            log.warning("client %d: walk stop: %s", sid, e)
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self._idle_after_walk)
+
+    def _idle_after_walk(self) -> None:
+        """On the loop, after a walk whose hold ended has stopped: the idle
+        timeline, unless somebody holds the legs again (or the runner, the
+        port release or the shutdown has them)."""
+        if (self._shutting_down or self.port_released or self.behaviour_active or self.idle_posture == "none"
+                or self._posture_held()):
+            return
+        self.idle_since = time.monotonic()
+        self.idle_stage = self.idle_posture
+        self._latch_idle(self.idle_posture)
 
     def _stop_trick_quietly(self) -> None:
         """TRICK_STOP, errors logged (pool thread: a request)."""

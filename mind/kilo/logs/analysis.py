@@ -20,13 +20,13 @@ FIELD_ALIASES: dict[str, str] = {
     "gyro_pitch": "rate_pitch_dps", "gyro_roll": "rate_roll_dps", "gyro_yaw": "rate_yaw_dps",
     "dist": "dist_mm", "distance": "dist_mm", "batt": "batt_mv", "battery": "batt_mv",
     "load": "tick_load_ms", "tick_load": "tick_load_ms",
+    "ref_pitch": "ref_pitch_deg", "ref_roll": "ref_roll_deg", "corr_pitch": "corr_pitch_deg",
+    "corr_roll": "corr_roll_deg",
 }
 NUMERIC = ("pitch_deg", "roll_deg", "rate_pitch_dps", "rate_roll_dps", "rate_yaw_dps", "dist_mm",
-           "batt_mv", "tick_load_ms", "rx_err", "gait_phase", "trick_frame", "tick", "epoch")
+           "batt_mv", "tick_load_ms", "rx_err", "trick_frame", "tick", "epoch", "ref_pitch_deg", "ref_roll_deg",
+           "corr_pitch_deg", "corr_roll_deg", "feet_queued", "support")
 _MODE_CODES = {m.name: int(m) for m in P.Mode}
-NOT_IN_TELEMETRY = {
-    "corr": "balance corrections are not in TELEMETRY (only the BALANCE_ACTIVE flag: use 'balance')",
-}
 
 
 def _stats(xs: list[float]) -> dict[str, float] | None:
@@ -97,24 +97,40 @@ def _walking(s: TelemetrySample) -> bool:
 
 
 def gait_summary(ss: list[TelemetrySample], events: list[Any]) -> dict[str, Any] | None:
-    """Time walking (mode GAIT or the GAIT flag), gait cycles (gait_phase
-    wraps), GAIT_STOPPED and SET_GAIT refusals; None if the log has no gait."""
-    stops = sum(1 for e in events if e.name == "GAIT_STOPPED")
+    """Time walking (mode GAIT or the GAIT flag), GAIT_STOPPED (by arg: 0 a
+    posture or an epoch bump, 1 settled after an underrun), FEET_UNDERRUN,
+    FEET refusals, and the model's error over the walking samples
+    (kilo.planner.errors: offset, lag, spike); None if the log has no gait."""
+    from kilo.planner.errors import estimate
+
+    stops = [e.arg for e in events if e.name == "GAIT_STOPPED"]
+    underruns = sum(1 for e in events if e.name == "FEET_UNDERRUN")
     refused = [goal_refused_text(e.arg) for e in events if e.name == "GOAL_REFUSED" and e.arg is not None
-               and (int(e.arg) & 0xFFFF) >> 8 == int(P.MsgId.SET_GAIT)]
-    walking_s, cycles = 0.0, 0
+               and (int(e.arg) & 0xFFFF) >> 8 == int(P.MsgId.FEET)]
+    walking_s = 0.0
     for a, b in zip(ss, ss[1:]):
         if _walking(a):
             walking_s += b.t - a.t
-            if _walking(b) and a.gait_phase is not None and b.gait_phase is not None and b.gait_phase < a.gait_phase - 128:
-                cycles += 1
     if not walking_s and not stops and not refused:
         return None
-    return {"walking_s": round(walking_s, 2), "cycles": cycles, "stops": stops, "refused": refused}
+    errs = []
+    tick, last = 0, None
+    for i, s in enumerate(ss):
+        if not (_walking(s) and s.ref_pitch_deg is not None and s.pitch_deg is not None):
+            continue
+        if s.tick is None:
+            tick = i
+        else:
+            tick = s.tick if last is None else tick + ((s.tick - last) & 0xFFFF)
+            last = s.tick
+        errs.append((tick, s.pitch_deg, s.roll_deg, s.ref_pitch_deg, s.ref_roll_deg, s.corr_pitch_deg or 0.0,
+                     s.corr_roll_deg or 0.0))
+    return {"walking_s": round(walking_s, 2), "stops": len(stops), "stopped_underrun": sum(1 for a in stops if a == 1),
+            "underruns": underruns, "refused": refused, "error": estimate(errs)}
 
 
 def goal_refused_text(arg: Any) -> str:
-    """EVENT GOAL_REFUSED arg -> 'SET_GAIT: UNKNOWN_TYPE'."""
+    """EVENT GOAL_REFUSED arg -> 'FEET: STALE'."""
     from kilo.link import consts
 
     a = int(arg) & 0xFFFF
@@ -159,8 +175,15 @@ def format_summary(s: dict[str, Any]) -> str:
                  + ", ".join(f"{k} {v:.0%}" for k, v in s["flags_fraction"].items()))
     g = s.get("gait")
     if g:
-        L.append(f"  gait: walking {g['walking_s']:.1f}s, {g['cycles']} cycles, {g['stops']} GAIT_STOPPED"
+        L.append(f"  gait: walking {g['walking_s']:.1f}s, {g['stops']} GAIT_STOPPED "
+                 f"({g['stopped_underrun']} after an underrun), {g['underruns']} FEET_UNDERRUN"
                  + (f", refused {', '.join(sorted(set(g['refused'])))}" if g["refused"] else ""))
+        e = g.get("error")
+        if e:
+            lag = e.get("lag_ms")
+            L.append(f"  model error: offset pitch {e['offset_pitch_deg']:+.1f}° roll {e['offset_roll_deg']:+.1f}°, "
+                     f"servo lag {'-' if lag is None else f'{lag:+.0f} ms vs the model'}, "
+                     f"largest {e['spike_deg']:.1f}°")
     if s["events"]:
         L.append(f"  events ({len(s['events'])}): "
                  + ", ".join(f"{t:.1f}s {n}" + _event_arg(n, a) for t, n, a in s["events"][:40])
@@ -192,8 +215,6 @@ def resolve_fields(fields: list[str], samples: list[TelemetrySample]) -> list[st
         f = f.strip()
         if not f:
             continue
-        if f in NOT_IN_TELEMETRY:
-            raise ValueError(f"{f}: {NOT_IN_TELEMETRY[f]}")
         a = FIELD_ALIASES.get(f, f)
         if a not in NUMERIC and a not in ("mode", "balance"):
             raise ValueError(f"unknown field {f!r}; known: {', '.join(sorted(set(FIELD_ALIASES) | {'mode', 'balance'}))}")
